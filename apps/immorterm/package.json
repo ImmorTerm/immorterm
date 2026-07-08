@@ -1,0 +1,63 @@
+{
+	"name": "immorterm",
+	"version": "0.1.0",
+	"description": "ImmorTerm CLI \u2014 persistent terminals, AI memory, MCP optimization",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/ImmorTerm/immorterm.git",
+		"directory": "apps/immorterm"
+	},
+	"homepage": "https://immorterm.com",
+	"keywords": [
+		"terminal",
+		"persistent",
+		"vscode",
+		"ai",
+		"memory",
+		"mcp"
+	],
+	"type": "module",
+	"bin": {
+		"immorterm": "./dist/cli.mjs"
+	},
+	"files": [
+		"dist",
+		"postinstall.mjs"
+	],
+	"scripts": {
+		"postinstall": "node postinstall.mjs",
+		"build": "bun build src/main.ts --outfile=dist/cli.mjs --target=node --minify --external ink --external react --external react-devtools-core && mkdir -p dist/resources/hooks && cp ../extension/resources/hooks/digest-llm-invoke.sh ../extension/resources/hooks/immorterm-notify.mjs dist/resources/hooks/",
+		"dev": "bun run src/main.ts",
+		"test": "vitest",
+		"test:run": "vitest run",
+		"test:hooks": "bash tests/hooks/run-all.sh",
+		"test:hooks:tap": "bash tests/hooks/run-all.sh --tap",
+		"test:all": "vitest run && bash tests/hooks/run-all.sh",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"hono": "^4.7.0",
+		"@hono/node-server": "^1.13.0",
+		"ink": "^6.8.0",
+		"react": "^19.0.0"
+	},
+	"devDependencies": {
+		"@immorterm/config": "workspace:*",
+		"@immorterm/types": "workspace:*",
+		"@immorterm/license": "workspace:*",
+		"@immorterm/analytics": "workspace:*",
+		"@immorterm/services": "workspace:*",
+		"@immorterm/terminal-logs": "workspace:*",
+		"@immorterm/design-tokens": "workspace:*",
+		"@immorterm/menu-data": "workspace:*",
+		"@types/node": "catalog:",
+		"@types/react": "catalog:",
+		"ink-testing-library": "^4.0.0",
+		"vitest": "^3.0.0",
+		"citty": "^0.1.6",
+		"consola": "^3.2.3",
+		"picocolors": "^1.1.1",
+		"typescript": "catalog:"
+	}
+}

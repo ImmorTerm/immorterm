@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "paths": {
+      "@immorterm/config": ["./libs/config/src"],
+      "@immorterm/types": ["./libs/types/src"],
+      "@immorterm/design-tokens": ["./libs/design-tokens/src"],
+      "@immorterm/license": ["./libs/license/src"],
+      "@immorterm/services": ["./libs/services/src"],
+      "@immorterm/analytics": ["./libs/analytics/src"],
+      "@immorterm/terminal-logs": ["./libs/terminal-logs/src"],
+      "@immorterm/tier-config": ["./libs/tier-config/src"]
+    }
+  },
+  "exclude": ["node_modules", "dist", ".next", "build", "out"]
+}

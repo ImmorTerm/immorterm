@@ -1,0 +1,128 @@
+# Publish the @immorterm/* shared libraries to npm.
+#
+# Manually dispatched with per-lib checkboxes. Uses npm Trusted Publishing
+# (OIDC) — no NPM_TOKEN.
+#
+# BEFORE FIRST PUBLISH: configure Trusted Publishing on npmjs.com for EACH
+# @immorterm/<lib> package name, pointing at this repo + this workflow file.
+# See WORKFLOW-NOTES.md.
+#
+# Versioning: publishes the version currently in each lib's package.json.
+# Bump in-repo before re-publishing. workspace:^ and catalog: protocols are
+# translated to real semver ranges by `bun pm pack`. Libs are published in
+# dependency order (leaves first) so dependents are installable immediately.
+
+name: Publish Libs
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_types:
+        description: "@immorterm/types"
+        type: boolean
+        default: false
+      publish_config:
+        description: "@immorterm/config (deps: types)"
+        type: boolean
+        default: false
+      publish_tier_config:
+        description: "@immorterm/tier-config"
+        type: boolean
+        default: false
+      publish_license:
+        description: "@immorterm/license (deps: types)"
+        type: boolean
+        default: false
+      publish_design_tokens:
+        description: "@immorterm/design-tokens"
+        type: boolean
+        default: false
+      publish_menu_data:
+        description: "@immorterm/menu-data (builds dist first)"
+        type: boolean
+        default: false
+      publish_services:
+        description: "@immorterm/services (deps: config, types)"
+        type: boolean
+        default: false
+      publish_ui:
+        description: "@immorterm/ui (deps: menu-data, tier-config)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish selected libs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build menu-data dist (require() consumers need it)
+        if: inputs.publish_menu_data == true
+        run: bun run --cwd libs/menu-data build
+
+      - name: Pack and publish
+        env:
+          PUBLISH_TYPES: ${{ inputs.publish_types }}
+          PUBLISH_CONFIG: ${{ inputs.publish_config }}
+          PUBLISH_TIER_CONFIG: ${{ inputs.publish_tier_config }}
+          PUBLISH_LICENSE: ${{ inputs.publish_license }}
+          PUBLISH_DESIGN_TOKENS: ${{ inputs.publish_design_tokens }}
+          PUBLISH_MENU_DATA: ${{ inputs.publish_menu_data }}
+          PUBLISH_SERVICES: ${{ inputs.publish_services }}
+          PUBLISH_UI: ${{ inputs.publish_ui }}
+        run: |
+          set -euo pipefail
+
+          # Dependency order: leaves first.
+          LIBS=""
+          [ "$PUBLISH_TYPES" = "true" ]         && LIBS="$LIBS types"
+          [ "$PUBLISH_TIER_CONFIG" = "true" ]   && LIBS="$LIBS tier-config"
+          [ "$PUBLISH_DESIGN_TOKENS" = "true" ] && LIBS="$LIBS design-tokens"
+          [ "$PUBLISH_MENU_DATA" = "true" ]     && LIBS="$LIBS menu-data"
+          [ "$PUBLISH_CONFIG" = "true" ]        && LIBS="$LIBS config"
+          [ "$PUBLISH_LICENSE" = "true" ]       && LIBS="$LIBS license"
+          [ "$PUBLISH_SERVICES" = "true" ]      && LIBS="$LIBS services"
+          [ "$PUBLISH_UI" = "true" ]            && LIBS="$LIBS ui"
+
+          if [ -z "$LIBS" ]; then
+            echo "No libs selected — nothing to do."
+            exit 0
+          fi
+
+          echo "## Published Libs" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Package | Version |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---------|---------|" >> "$GITHUB_STEP_SUMMARY"
+
+          for LIB in $LIBS; do
+            echo "── Publishing @immorterm/$LIB ──"
+            cd "libs/$LIB"
+
+            # bun pm pack translates workspace:^ / catalog: → real ranges
+            bun pm pack
+            TARBALL=$(ls immorterm-*.tgz)
+
+            # Trusted Publishing needs npm >= 11.5.1 — run latest via npx
+            npx -y npm@latest publish "$TARBALL" --provenance --access public
+
+            VERSION=$(jq -r .version package.json)
+            echo "| @immorterm/$LIB | $VERSION |" >> "$GITHUB_STEP_SUMMARY"
+
+            rm -f "$TARBALL"
+            cd "$GITHUB_WORKSPACE"
+          done

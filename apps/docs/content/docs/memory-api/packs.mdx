@@ -1,0 +1,128 @@
+---
+title: Knowledge packs
+description: List, search, and move digested knowledge packs — including .impack import/export.
+---
+
+Packs are digested knowledge bases (books, research, docs) stored as typed
+memories. Pack content lives outside session scope: search it with
+`scope=knowledge` or via `/packs/search`.
+
+## GET /api/v1/packs
+
+List all packs. No parameters. Returns the same JSON as the `list_packs`
+MCP tool.
+
+```bash
+curl http://localhost:8765/api/v1/packs
+```
+
+## GET /api/v1/packs/ram
+
+A pack's compiled RAM (its always-loaded core summary). Query param:
+`pack_name` (required). Returns the same JSON as the `get_pack_ram` MCP
+tool.
+
+```bash
+curl 'http://localhost:8765/api/v1/packs/ram?pack_name=my-pack'
+```
+
+## GET /api/v1/packs/frameworks
+
+Frameworks inside a pack. Query param: `pack_name` (required). Returns the
+same JSON as the `list_frameworks` MCP tool.
+
+```bash
+curl 'http://localhost:8765/api/v1/packs/frameworks?pack_name=my-pack'
+```
+
+## GET /api/v1/packs/framework
+
+One framework's deep-dive. Query params: `pack_name` and `framework_name`
+(both required). Returns the same JSON as the `get_framework` MCP tool.
+
+```bash
+curl 'http://localhost:8765/api/v1/packs/framework?pack_name=my-pack&framework_name=some-framework'
+```
+
+## POST /api/v1/packs/search
+
+Semantic search inside one pack. Body:
+`{ pack_name, query, type_filter?, limit? }` (limit default 10). Returns
+the same JSON as the `search_pack` MCP tool.
+
+```bash
+curl -X POST http://localhost:8765/api/v1/packs/search \
+  -H 'Content-Type: application/json' \
+  -d '{"pack_name":"my-pack","query":"pricing strategy","limit":10}'
+```
+
+## DELETE /api/v1/packs/delete
+
+Delete a pack. Query params: `pack_name` (required), `hard` (default
+false). Returns the same JSON as the `delete_pack` MCP tool.
+
+```bash
+curl -X DELETE 'http://localhost:8765/api/v1/packs/delete?pack_name=my-pack'
+```
+
+## POST /api/v1/packs/export
+
+Export a pack to a file path on the server's filesystem. Body:
+`{ pack_name, output_path, format?, agent_md? }` — `format` defaults to
+`"db"`.
+
+```bash
+curl -X POST http://localhost:8765/api/v1/packs/export \
+  -H 'Content-Type: application/json' \
+  -d '{"pack_name":"my-pack","output_path":"/tmp/my-pack.impack","format":"impack"}'
+```
+
+Response: `{ "status": "exported", "pack_name", "count": N, "format" }`.
+
+## GET /api/v1/packs/export/download
+
+Same export, streamed back as `application/octet-stream` with a
+`Content-Disposition` attachment filename (`<pack_name>.impack` or `.db`).
+Query params: `pack_name` (required), `format` (default `impack`),
+`agent_md`. Errors use real status codes (500).
+
+```bash
+curl -OJ 'http://localhost:8765/api/v1/packs/export/download?pack_name=my-pack'
+```
+
+## POST /api/v1/packs/import
+
+Import a pack from a file path on the server's filesystem. Body:
+`{ input_path }`.
+
+```bash
+curl -X POST http://localhost:8765/api/v1/packs/import \
+  -H 'Content-Type: application/json' \
+  -d '{"input_path":"/tmp/my-pack.impack"}'
+```
+
+Response: `{ "status": "imported", "pack_name", "count": N }`.
+
+## POST /api/v1/packs/import/upload
+
+Import via multipart upload — the field name must be `file` or `impack`.
+Missing/empty file → 400; import failure → 500.
+
+```bash
+curl -X POST http://localhost:8765/api/v1/packs/import/upload \
+  -F 'file=@my-pack.impack'
+```
+
+Response: `{ "status": "imported", "pack_name", "count": N }`.
+
+## POST /api/v1/packs/backfill-topics
+
+One-time maintenance: extracts `tags` from existing pack-item metadata and
+wires them into the entity graph as `HAS_TOPIC` relations plus `co_occurs`
+edges. No body.
+
+```bash
+curl -X POST http://localhost:8765/api/v1/packs/backfill-topics
+```
+
+Response: `{ "status": "completed", "memories_processed", "topics_added", "cooccurs_edges_added" }`.

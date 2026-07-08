@@ -1,0 +1,101 @@
+---
+title: Gateway
+description: The MCP gateway — one shared proxy instead of a server per session.
+---
+
+Every AI session normally spawns its own copy of every MCP server you have
+configured. Twenty sessions with seven servers is a few hundred idle
+processes. The gateway runs each server once and routes every session's
+calls through it over HTTP — measured on a 21-session workload, 339
+processes (11.7 GB) became 10 (~56 MB).
+
+The gateway is infrastructure, not a paid feature — there is no license
+check anywhere in it.
+
+## How it works
+
+The gateway is a transparent HTTP-to-stdio JSON-RPC proxy on port **9100**
+(default). It is not an MCP server itself — the child processes are the real
+servers; the gateway just routes traffic.
+
+On startup it:
+
+1. Reads `~/.claude.json` and finds every `type: "stdio"` MCP server entry.
+2. Writes an atomic backup to `~/.immorterm/mcp-gateway/config-backup.json`.
+3. Rewrites each entry to `type: "http"` pointing at
+   `http://localhost:9100/<name>/mcp`.
+4. Watches the config for changes — servers added later via `claude mcp add`
+   are wrapped automatically.
+
+On shutdown (or crash recovery) the original stdio config is put back from
+the backup. Your config is never the only copy.
+
+## Stateless vs stateful
+
+Not every server can be shared. The gateway classifies each one:
+
+- **Stateless** (the default): one shared child for all sessions,
+  multiplexed by JSON-RPC request id. Right for search APIs, docs lookup —
+  anything that doesn't remember you between calls.
+- **Stateful**: one child per session. Required for servers that hold
+  conversational or browser state.
+
+Built-in stateful list: `sequential-thinking`, `serena`, `playwright`,
+`chrome-devtools`, `puppeteer`. Override any classification in
+`~/.immorterm/mcp-gateway/classification.json`:
+
+```json
+{
+  "my-custom-server": { "mode": "stateful" },
+  "another-server": { "mode": "stateless", "requestTimeout": 30000 }
+}
+```
+
+Individual servers can be excluded from the gateway entirely; opt-outs
+persist in `~/.immorterm/mcp-gateway/opt-out.json`.
+
+### npx resolution
+
+The single biggest saving. A config like
+`{ "command": "npx", "args": ["-y", "@upstash/context7-mcp"] }` costs a full
+Node.js wrapper process (~41 MB) per session just to spawn the actual
+binary. The gateway resolves the binary path once, caches it for 7 days, and
+spawns it directly.
+
+## Cleanup
+
+With stdio, MCP servers die with the session that spawned them. Behind the
+gateway they are children of the gateway process, so it cleans up
+explicitly, in three layers:
+
+| Layer | Trigger | Latency |
+|---|---|---|
+| Client-driven | `DELETE /sessions/by-pid/:pid` before the terminal closes | immediate |
+| PID probe | the owning client pid no longer exists | ~60s |
+| Idle timeout | no requests from a session for 30 minutes | 30 min |
+
+Activity is tracked per session, not per server — using one tool keeps the
+whole session's children alive.
+
+## Running it
+
+The gateway is normally managed for you (the extension and the setup wizard
+start it), but it runs standalone:
+
+```bash
+immorterm-mcp-gateway start     # detached; PID-file lock prevents duplicates
+immorterm-mcp-gateway stop
+immorterm-mcp-gateway status
+immorterm-mcp-gateway doctor
+```
+
+Flags: `--port/-p` (default 9100), `--config/-c` (default `~/.claude.json`),
+`--foreground/-f`. State, logs, and backups live in
+`~/.immorterm/mcp-gateway/`.
+
+Useful HTTP surface while it runs:
+
+- `GET /health` — liveness plus server stats and memory usage
+- `GET /dashboard` — live view of servers, sessions, and children
+- `POST /:server/mcp` — the proxy route your AI tools are rewritten to
+- `DELETE /sessions/by-pid/:pid`, `DELETE /sessions/:sessionId` — cleanup

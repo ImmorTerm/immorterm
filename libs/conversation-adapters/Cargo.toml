@@ -1,0 +1,16 @@
+[package]
+name = "conversation-adapters"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Per-vendor AI transcript adapters — Claude Code, Cursor, Codex, Gemini CLI, opencode"
+
+[dependencies]
+conversation-schema = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+regex = "1"
+once_cell = "1"
+tracing = { workspace = true }
+
+[dev-dependencies]

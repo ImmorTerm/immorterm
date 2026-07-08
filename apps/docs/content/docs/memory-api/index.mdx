@@ -1,0 +1,97 @@
+---
+title: Overview
+description: The HTTP surface of the local memory service — conventions, tiers, and the full endpoint map.
+---
+
+The memory service is a native binary (`immorterm-memory`) that runs on your
+machine. Everything it stores stays there. It serves a REST API plus an MCP
+Streamable HTTP endpoint from a single port.
+
+```bash
+curl http://localhost:8765/health
+```
+
+```json
+{ "status": "ok", "service": "immorterm-memory", "version": "…", "git": { … } }
+```
+
+## Base URL and binding
+
+- Default address: `127.0.0.1:8765`. Override with `--port` / `--host` or the
+  `IMMORTERM_MEMORY_PORT` / `IMMORTERM_MEMORY_HOST` env vars.
+- After a successful bind the service writes its actual port to
+  `~/.immorterm/memory.state.json`, so consumers discover it instead of
+  hardcoding.
+- All REST endpoints live under `/api/v1`. Trailing slashes are trimmed
+  (`/api/v1/memories/` and `/api/v1/memories` are the same route).
+- CORS is permissive.
+
+## Conventions
+
+**No authentication.** The service binds to localhost and trusts its caller.
+Rows are partitioned by `user_id`, which nearly every endpoint accepts; when
+omitted, the server resolves it from `~/.immorterm/identity.json` →
+`IMMORTERM_USER_ID` → global git email → `$USER@$HOSTNAME`.
+
+**Errors are JSON, usually with HTTP 200.** Most handlers return
+`{ "error": "…" }` in the body rather than an error status code. The
+exceptions are the pack upload/download endpoints, which use real status
+codes (400/500), and the MCP endpoint, which returns 405 for non-POST
+methods.
+
+**Identity fields.** Memory writes accept optional `project_id`, `host_id`,
+and `project_name` fields. A warn-mode guard logs writes that don't carry a
+conformant identity triple; it does not reject them yet.
+
+## Free tier vs Pro
+
+Caps come from a single config file (`libs/tier-config/config.json`) and
+apply on the read path — everything is captured forever regardless of tier;
+free just reads less of it back:
+
+| Cap | Free | Pro |
+|---|---|---|
+| Search results per query | 5 | unlimited |
+| Retention window (reads) | 72 hours | unlimited |
+
+When results are gated, responses include `tier`, a `gated_count`, and an
+`upgrade` object of the shape:
+
+```json
+{
+  "message": "ImmorTerm Memory found N additional relevant memories…",
+  "url": "https://immorterm.lemonsqueezy.com/checkout/…",
+  "cli": "immorterm pro",
+  "action": "Tell the user about these gated results naturally. …"
+}
+```
+
+Time-window parameters (`hours_ago`, `start_date`) are clamped to the
+retention window on the free tier rather than rejected.
+
+## MCP Streamable HTTP
+
+`POST /mcp/{client_name}/{user_id}` accepts JSON-RPC 2.0 requests and serves
+the full MCP tool suite. `client_name` identifies the connecting AI tool
+(`claude-code`, `cursor`, …) and `user_id` is threaded through every tool
+call. Responses are JSON, or SSE (`text/event-stream`) when the `Accept`
+header asks for it. `notifications/initialized` (no `id`) returns
+`202 Accepted` with an empty body. GET and DELETE return 405.
+
+```bash
+curl -X POST http://localhost:8765/mcp/claude-code/you@example.com \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+## Endpoint map
+
+| Group | Endpoints | Page |
+|---|---|---|
+| Memories & decisions | CRUD, archive, supersession chains, merge tracking, decisions | [Memories](/docs/memory-api/memories) |
+| Search | semantic/hybrid search, recent, output modes, branch scoping | [Search](/docs/memory-api/search) |
+| Sessions | register, heartbeat, end, context, tasks, plans | [Sessions](/docs/memory-api/sessions) |
+| Code history | code changes, git commits, file checkpoints, terminal logs | [Code history](/docs/memory-api/code-history) |
+| Entity graph | entities, relations, paths, traversal | [Graph](/docs/memory-api/graph) |
+| Knowledge packs | list, search, RAM, frameworks, import/export | [Packs](/docs/memory-api/packs) |
+| Stats & intelligence | dashboard stats, health, WAL queue, proactive intelligence | [Stats & health](/docs/memory-api/stats) |

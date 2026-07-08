@@ -1,0 +1,58 @@
+[package]
+name = "immorterm-hub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Unified backend for ImmorTerm AI GPU terminal — serves all deployment targets"
+
+[[bin]]
+name = "immorterm-hub"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace deps
+tokio = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+
+# HTTP server
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "normalize-path", "set-header", "fs"] }
+tower = "0.5"
+
+# Platform (kill(pid, 0) for process liveness checks)
+libc = "0.2"
+
+# Base64 for encoding font bytes in /api/font responses
+base64 = { workspace = true }
+
+# HTTP client for URL preview (og:*) fetcher
+reqwest = { workspace = true }
+regex = "1"
+url = "2"
+
+# WebSocket client for the AI-session control channel (mirrors extension
+# SessionManager's MinimalWsClient) + fs watcher for registry.json debounce.
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+notify = { workspace = true }
+tokio-util = "0.7"
+
+# Markdown (port of the bundled `marked` UMD) + syntax highlighting (port
+# of `shiki`). pulldown-cmark is pure Rust; syntect ships a pre-built
+# SyntaxSet/ThemeSet via `default-syntaxes`/`default-themes`.
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-onig", "html"] }
+
+# RFC3339 timestamps for tool_history entries written by session-link.
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+# Gitignore-aware file walking for the file-browser sidebar's non-git
+# fallback (/api/v1/files/index, /api/v1/files/grep). Mirrors ripgrep's
+# directory traversal + .gitignore semantics.
+ignore = "0.4"

@@ -1,0 +1,22 @@
+language: "typescript"
+layer: "library"
+stack: "backend"
+
+project:
+  title: "Analytics & Feature Flags"
+  description: "PostHog integration for event tracking, A/B testing, and feature flags"
+  owner: "@immorterm/core"
+
+dependsOn:
+  - "config"
+  - "license"
+
+tasks:
+  typecheck:
+    command: "bun run tsc --noEmit"
+    inputs:
+      - "src/**/*"
+      - "tsconfig.json"
+    deps:
+      - "config:typecheck"
+      - "license:typecheck"

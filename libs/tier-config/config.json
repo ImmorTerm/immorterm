@@ -1,0 +1,14 @@
+{
+	"free": {
+		"memorySearchResults": 5,
+		"memoryRetentionHours": 72
+	},
+	"pro": {
+		"memorySearchResults": null,
+		"memoryRetentionHours": null
+	},
+	"memory-pro": {
+		"memorySearchResults": null,
+		"memoryRetentionHours": null
+	}
+}

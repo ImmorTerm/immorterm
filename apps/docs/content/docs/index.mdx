@@ -1,0 +1,117 @@
+---
+title: Getting Started
+description: Install ImmorTerm, start the memory service, get your first recall.
+---
+
+ImmorTerm keeps terminal sessions alive in a daemon beneath your editor. Crash
+VS Code, reboot, drop SSH — reattach live, with full scrollback and the build
+still running. A local memory service captures what you and your AI decided,
+and recalls it in about 8ms, before you ask.
+
+This page takes you from nothing to a working install with a first recall.
+Five commands, one download, no account.
+
+## Supported platforms
+
+| Platform | Status |
+|---|---|
+| macOS — Apple Silicon (arm64) | Supported |
+| Linux — x86_64 / arm64, **glibc 2.38+** (Ubuntu 24.04, Debian 13, or newer) | Supported |
+| Windows | Not yet |
+
+The glibc floor comes from the memory binary's ONNX runtime. On older distros
+(Ubuntu 22.04, Debian 12) the binary exists on disk but dies in the dynamic
+loader — `immorterm memory up` and `immorterm doctor` run a preflight that
+says so instead of timing out.
+
+## 1. Install the CLI
+
+```bash
+npm install -g immorterm
+```
+
+This is the control-plane CLI — setup, services, diagnostics, upgrades. The
+full command surface is on the [CLI reference](/docs/cli).
+
+## 2. Initialize
+
+```bash
+immorterm init --yes
+```
+
+`--yes` skips the interactive wizard and writes defaults to
+`~/.immorterm/config.json`: memory enabled, gateway disabled, free tier. Drop
+the flag for the full TUI wizard (theme, terminal backend, license). It also
+attempts to install the VS Code extension if the `code` CLI is on your PATH —
+non-fatal when it isn't.
+
+## 3. Install the memory binary
+
+```bash
+immorterm memory install
+```
+
+Downloads the native `immorterm-memory` binary for your platform from GitHub
+Releases into `~/.immorterm/bin/`. One binary; SQLite, embeddings, and the
+MCP server are all inside it.
+
+## 4. Start the memory service
+
+```bash
+immorterm memory up
+```
+
+First boot downloads about 150 MB of embedding and reranking models, so the
+health wait is 180 seconds instead of the usual 10. Every boot after that is
+fast. When it's up:
+
+```text
+Memory service is already running and healthy.
+Memory service: http://127.0.0.1:8765/health
+```
+
+The service binds to localhost only. Everything it stores stays on your
+machine — the REST API and MCP endpoint share one port (default `8765`,
+discoverable via `~/.immorterm/memory.state.json`). Details on the
+[Memory API overview](/docs/memory-api).
+
+## 5. First recall
+
+Save a memory, then ask for it back:
+
+```bash
+curl -X POST http://localhost:8765/api/v1/memories \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Chose rotating refresh tokens over long-lived JWTs"}'
+
+curl -X POST http://localhost:8765/api/v1/memories/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"how do we handle auth tokens"}'
+```
+
+The search response ranks by meaning, not keywords — the full request and
+response shapes are on the [Search reference](/docs/memory-api/search).
+
+In day-to-day use you won't curl anything: your AI tool connects over MCP and
+hooks capture memories from your sessions automatically. Set that up next in
+the [Claude Code integration guide](/docs/claude-code), or read
+[Connecting over MCP](/docs/mcp-connection) for other clients.
+
+## Verify
+
+```bash
+immorterm doctor
+```
+
+Eight checks — config, binaries, service health, hooks, license — each with a
+one-line fix hint when something isn't a pass. `immorterm status` gives the
+shorter live view.
+
+## Where next
+
+- [Memory without the terminal](/docs/memory-standalone) — running just the
+  memory service, and what $9 Memory Pro adds
+- [Claude Code integration](/docs/claude-code) — hooks, MCP, and what gets
+  captured
+- [Updating](/docs/updating) — how each component gets new versions
+- [MCP Tools](/docs/mcp-tools) — all 41 tools your AI gets

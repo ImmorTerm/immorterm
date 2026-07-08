@@ -1,0 +1,68 @@
+{
+  "name": "immorterm",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ImmorTerm — persistent, AI-native terminal sessions that survive crashes and restarts",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "scripts": {
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "build:extension": "bun run --cwd apps/extension compile",
+    "dev:extension": "bun run --cwd apps/extension watch",
+    "test:extension": "bun run --cwd apps/extension test:run",
+    "build:cli": "bun run --cwd apps/immorterm build",
+    "dev:cli": "bun run --cwd apps/immorterm dev",
+    "test:cli": "bun run --cwd apps/immorterm test:all",
+    "build:docs": "bun run --cwd apps/docs build",
+    "dev:docs": "bun run --cwd apps/docs dev",
+    "build:immorterm-ai": "./scripts/build-immorterm-ai.sh",
+    "build:immorterm-ai:quick": "./scripts/build-immorterm-ai.sh --quick",
+    "test:immorterm-ai": "cargo test -p immorterm-core -p immorterm-render",
+    "lint:immorterm-ai": "cargo clippy -p immorterm-core -p immorterm-render -p immorterm-daemon -- -D warnings",
+    "lint:immorterm-ai:wasm": "cargo clippy -p immorterm-wasm --target wasm32-unknown-unknown -- -D warnings",
+    "test:rust": "cargo test --workspace --exclude immorterm-wasm",
+    "lint:rust": "cargo clippy --workspace --exclude immorterm-wasm -- -D warnings",
+    "test:ai": "./scripts/test-immorterm-ai.sh",
+    "test:ai:quick": "./scripts/test-immorterm-ai.sh --quick",
+    "test:ai:e2e": "./scripts/test-immorterm-ai.sh --e2e"
+  },
+  "workspaces": {
+    "packages": [
+      "apps/docs",
+      "apps/extension",
+      "apps/immorterm",
+      "libs/*",
+      "packages/immorterm-opencode-plugin"
+    ],
+    "catalog": {
+      "typescript": "^5.7.0",
+      "@types/node": "^22.0.0",
+      "zod": "^3.23.0",
+      "react": "^19.0.0",
+      "react-dom": "^19.0.0",
+      "@types/react": "^19.0.0",
+      "@types/react-dom": "^19.0.0"
+    },
+    "catalogs": {
+      "ui": {
+        "lucide-react": "^0.474.0",
+        "motion": "^12.32.0",
+        "tailwind-merge": "^3.0.0",
+        "class-variance-authority": "^0.7.1",
+        "clsx": "^2.1.0"
+      }
+    }
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.3.10",
+    "@playwright/test": "^1.58.2",
+    "@types/bun": "^1.3.9",
+    "@types/node": "catalog:",
+    "@types/ws": "^8.18.1",
+    "typescript": "catalog:"
+  },
+  "dependencies": {
+    "ws": "^8.19.0"
+  }
+}

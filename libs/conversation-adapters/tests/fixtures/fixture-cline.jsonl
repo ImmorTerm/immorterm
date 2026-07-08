@@ -1,0 +1,6 @@
+{"role":"user","ts":1764345600000,"content":"add a fibonacci function to math.py"}
+{"role":"assistant","ts":1764345601000,"content":[{"type":"text","text":"I'll add fib() to math.py."},{"type":"tool_use","id":"toolu_01","name":"write_to_file","input":{"path":"math.py","content":"def fib(n):\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a\n"}}]}
+{"role":"user","ts":1764345602000,"content":[{"type":"tool_result","tool_use_id":"toolu_01","content":[{"type":"text","text":"File saved: math.py (98 bytes)"}]}]}
+{"role":"user","ts":1764345610000,"content":"now run the tests"}
+{"role":"assistant","ts":1764345611000,"content":[{"type":"text","text":"Running pytest."},{"type":"tool_use","id":"toolu_02","name":"execute_command","input":{"command":"pytest -q"}}]}
+{"role":"user","ts":1764345612000,"content":[{"type":"tool_result","tool_use_id":"toolu_02","content":[{"type":"text","text":"3 passed in 0.05s"}]}]}

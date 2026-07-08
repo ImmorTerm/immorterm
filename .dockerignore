@@ -1,0 +1,30 @@
+# Docker build context exclusions
+# Referenced by .devops/docker/Dockerfile
+
+node_modules
+.git
+.moon/cache
+target
+dist
+out
+*.log
+
+# Test files (not needed in Docker)
+**/__tests__
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+
+# Development files
+.vscode
+.idea
+*.swp
+*.swo
+
+# CI/CD (not needed in Docker)
+.github
+
+# Documentation
+docs
+*.md
+!README.md

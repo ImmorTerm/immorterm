@@ -1,0 +1,20 @@
+{
+	"name": "@immorterm/ai-darwin-x64",
+	"version": "0.1.0",
+	"description": "ImmorTerm AI binary for macOS Intel (x86_64)",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/ImmorTerm/immorterm.git",
+		"directory": "packages/immorterm-ai-darwin-x64"
+	},
+	"os": [
+		"darwin"
+	],
+	"cpu": [
+		"x64"
+	],
+	"files": [
+		"bin"
+	]
+}

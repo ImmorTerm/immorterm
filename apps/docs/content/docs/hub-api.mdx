@@ -1,0 +1,162 @@
+---
+title: Hub API
+description: The local hub — session registry, config, file index, terminal serving.
+---
+
+The hub is the local HTTP service behind the GPU terminal. It spawns and
+tracks sessions in the registry, serves themes and preferences, and indexes
+your project files for the file-browser sidebar.
+
+It listens on port **1440** by default and binds to `127.0.0.1`. The actual
+port and pid are written to `~/.immorterm/hub.state.json` on startup — read
+that file to discover a running hub instead of assuming the default.
+
+```bash
+curl http://localhost:1440/api/v1/registry
+```
+
+## Security model
+
+There is no authentication on any endpoint. The trust boundary is the
+loopback interface: the hub binds `127.0.0.1` unless you set
+`IMMORTERM_HUB_HOST` (e.g. to `0.0.0.0`), and anything that can reach the
+socket can spawn sessions, read your file index, and grep your source.
+Don't bind it to a routable interface. Remote access goes through the SSH
+tunneling built into the hub's remote endpoints, not through an exposed port.
+
+Handlers report failures as `200` with an `{ "error": "..." }` body rather
+than HTTP error codes — check for the `error` key.
+
+## Registry
+
+### `GET /api/v1/registry`
+
+Lists sessions. Optional `?project_dir=<abs>` filters to one project.
+
+Each session entry is enriched at read time:
+
+| Field | Meaning |
+|---|---|
+| `alive` | pid exists and responds to signal 0 |
+| `ws_port` | the daemon's WebSocket port, present only when alive |
+| `tool` | AI tool tag; legacy entries default to `claude-code` |
+| `speak_mode`, `session_order` | merged from `session-status.json` |
+
+The response also carries `projects` — unique project dirs with alive-session
+counts and last-activity timestamps, for the project picker:
+
+```json
+{
+  "sessions": [ ... ],
+  "projects": [
+    { "project_dir": "/abs/path", "name": "path", "session_count": 2, "last_activity": 1750000000 }
+  ]
+}
+```
+
+### `POST /api/v1/registry/spawn`
+
+Spawns a new `immorterm-ai` daemon for a project.
+
+```json
+{
+  "project_dir": "/abs/path/to/project",
+  "display_name": "optional label",
+  "shell": "/bin/zsh"
+}
+```
+
+`project_dir` is required. `display_name` defaults to an auto-generated
+name; `shell` defaults to `$SHELL`, then `/bin/zsh`. The hub waits up to 8
+seconds for the daemon's WebSocket port to come up, then answers:
+
+```json
+{
+  "session_name": "myproject-ai-abc123",
+  "window_id": "abc123",
+  "display_name": "Terminal 1",
+  "ws_port": 51234,
+  "pid": 48120
+}
+```
+
+On timeout you get `error` plus `session_name` and `window_id` — the daemon
+may still arrive late; check the registry.
+
+Neighboring registry routes (`close`, `shelve`, `reattach`, `rename`,
+`reorder`, `title-lock`, `speak-mode`, session-status) follow the same
+pattern: POST a JSON body keyed by `window_id`.
+
+## Config
+
+### `GET /api/v1/config`
+
+Returns everything a terminal client needs to render: `theme`,
+`preferences`, per-project `services` config, `memory_url` (the discovered
+memory-service URL), plus themes, menu items, and character definitions
+merged from the build-time `menu-data.json`. Pass `?project_dir=<abs>` to
+layer per-project overrides (theme, speak mode, file-browser state) over the
+global config.
+
+### `PUT /api/v1/config/preferences`
+
+Body is a flat JSON object of preference keys. They are merged — not
+replaced — into the `preferences` block of `~/.immorterm/config.json`.
+Returns `{ "success": true }`.
+
+### `PUT /api/v1/config/project`
+
+```json
+{ "projectDir": "/abs/path", "theme": "hot-pink", "speakMode": "off" }
+```
+
+Merges every field except `projectDir` into that project's config and
+returns the path it wrote.
+
+## Files
+
+Backs the file-browser sidebar. Every endpoint validates `root`: present,
+absolute, and an existing directory.
+
+### `GET /api/v1/files/index?root=<abs>&limit=<n>`
+
+Relative paths of all non-ignored files under `root` — files only, sorted,
+gitignore-aware. `limit` defaults to 20,000; `truncated` tells you when the
+list was cut. Results are cached per root for 5 seconds, so polling is cheap.
+
+```json
+{ "root": "/abs/path", "truncated": false, "files": ["src/main.rs", "..."] }
+```
+
+### `GET /api/v1/files/grep?root=<abs>&q=<query>&limit=<n>`
+
+Fixed-string content search (not regex). Uses `git grep -F` inside a repo
+and falls back to an ignore-aware walk outside one. `q` is capped at 200
+characters; `limit` defaults to 300 matches.
+
+```json
+{ "matches": [{ "file": "src/main.rs", "line": 42, "text": "..." }], "truncated": false }
+```
+
+`GET /api/v1/files/status?root=<abs>` adds git working-tree status — a
+`relpath → one-letter code` map (`M`, `A`, `D`, `U`, `R`, `C`) for dirty
+indicators. Non-git roots return an empty map, not an error.
+
+## New session (legacy)
+
+### `POST /api/new-session`
+
+The standalone-adapter shim over `registry/spawn`, in camelCase. Body is
+optional JSON `{ "project_dir": "..." }`; with no body the hub uses its own
+working directory.
+
+```json
+{ "sessionName": "myproject-ai-abc123", "windowId": "abc123", "wsPort": 51234, "displayName": "Terminal 1" }
+```
+
+## Everything else
+
+The hub also serves tasks (mirroring the extension's task storage), remote
+hosts (SSH-tunneled registry, files, and spawn proxies), markdown rendering,
+vendor detection, diagnostics, and paste-image caching — the same `/api/v1/`
+surface, same conventions as above.

@@ -1,0 +1,104 @@
+---
+title: Billing API
+description: Licenses, tiers, and the cloud API surface.
+---
+
+Licensing is key-based — there are no accounts and no login. Checkout is
+handled by Dodo Payments; your license key arrives in the purchase email,
+and everything below is keyed by it. The cloud API is a thin layer over
+Dodo's public license endpoints plus a subscription database populated by
+Dodo webhooks. The Dodo API key never leaves the server.
+
+Tiers are `free`, `pro`, and `memory-pro`. The free tier's caps are the ones
+we publish: recall reads 5 results from a 72-hour window. `pro` and
+`memory-pro` remove both caps.
+
+## Endpoints
+
+### `POST /api/licenses/verify`
+
+```json
+{ "license_key": "<your-license-key>", "machine_id": "optional" }
+```
+
+Validates the key with Dodo (the source of truth), then enriches from the
+subscription database:
+
+```json
+{
+  "valid": true,
+  "status": "active",
+  "tier": "pro",
+  "customer_email": "you@example.com",
+  "machine_id": null,
+  "instance_count": null,
+  "max_instances": null
+}
+```
+
+`instance_count` / `max_instances` are always `null` — Dodo exposes no
+public activation counts. Invalid keys return `{ "valid": false, "error": ... }`;
+an unreachable license server returns `502`.
+
+### `POST /api/licenses/activate`
+
+```json
+{ "license_key": "<your-license-key>", "name": "my-laptop" }
+```
+
+Proxies Dodo's public activate endpoint (`name` falls back to `machine_id`,
+then `"immorterm"`). The response — including the
+`license_key_instance_id` you'll need to deactivate — passes through
+unchanged, status code and all.
+
+### `POST /api/licenses/deactivate`
+
+```json
+{ "license_key": "<your-license-key>", "license_key_instance_id": "..." }
+```
+
+Releases an activation. Both fields are required.
+
+### `POST /api/licenses/portal`
+
+```json
+{ "license_key": "<your-license-key>" }
+```
+
+Validates the key, then returns `{ "portal_url": "..." }` — a fresh session
+in the Dodo-hosted customer portal, where cancel, upgrade, and invoices
+live. No account needed; the key is the credential.
+
+### `GET /api/licenses/check?email=you@example.com`
+
+Lost the email with your key? This confirms a license exists for an email
+address:
+
+```json
+{ "found": true, "license_key_masked": "abc•••••••••7f3a", "status": "active", "tier": "pro" }
+```
+
+It is unauthenticated by design, so it never returns the full key — first 3
+and last 4 characters only, enough to recognize your own. The full key lives
+in your purchase email and the Dodo portal. Rate-limited to 20 requests per
+minute per IP; expired and cancelled subscriptions report `{ "found": false }`.
+
+### `GET /api/pricing`
+
+Live pricing pulled from Dodo, cached for 1 hour:
+
+```json
+{
+  "name": "ImmorTerm Pro",
+  "price": "29",
+  "priceFormatted": "$29/mo",
+  "currency": "USD",
+  "interval": "month",
+  "description": "...",
+  "checkoutUrl": "https://..."
+}
+```
+
+`checkoutUrl` is the hosted checkout link, or `null` until configured.
+Prices come straight from the payment provider's product catalog, so what
+this endpoint reports is what checkout charges.

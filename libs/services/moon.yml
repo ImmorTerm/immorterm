@@ -1,0 +1,21 @@
+language: "typescript"
+layer: "library"
+stack: "backend"
+
+project:
+  title: "Service Managers"
+  description: "Docker, OpenMemory, MCP Gateway, and health check managers (IDE-independent)"
+  owner: "@immorterm/core"
+
+dependsOn:
+  - "config"
+  - "types"
+
+tasks:
+  typecheck:
+    command: "bun run tsc --noEmit"
+    inputs:
+      - "src/**/*"
+      - "tsconfig.json"
+    deps:
+      - "config:typecheck"

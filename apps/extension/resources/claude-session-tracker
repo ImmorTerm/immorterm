@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# claude-session-tracker - Real-time Claude session tracking via history.jsonl
+# Monitors Claude's history file and correlates with screen activity to map sessions to terminals
+set -euo pipefail
+
+PROJECT_DIR="${SCREEN_PROJECT_DIR:-$(pwd)}"
+JSON="$PROJECT_DIR/.immorterm/restore-terminals.json"
+LOGS_DIR="$PROJECT_DIR/.immorterm/terminals/logs"
+HISTORY="$HOME/.claude/history.jsonl"
+STATE_FILE="$PROJECT_DIR/.immorterm/terminals/.session-tracker.state"
+PIDFILE="$PROJECT_DIR/.immorterm/terminals/.session-tracker.pid"
+
+# Singleton check
+if [[ -f "$PIDFILE" ]]; then
+  OLD_PID=$(cat "$PIDFILE" 2>/dev/null || true)
+  if [[ -n "$OLD_PID" ]] && kill -0 "$OLD_PID" 2>/dev/null; then
+    exit 0
+  fi
+fi
+echo $$ > "$PIDFILE"
+trap 'rm -f "$PIDFILE"' EXIT
+
+# Get project prefix
+project_lower=$(basename "$PROJECT_DIR" | tr '[:upper:]' '[:lower:]')
+
+# Initialize state file with current history position
+if [[ ! -f "$STATE_FILE" ]]; then
+  wc -l < "$HISTORY" > "$STATE_FILE"
+fi
+
+update_session() {
+  local window_id="$1"
+  local session_id="$2"
+
+  [[ -z "$window_id" || -z "$session_id" ]] && return 1
+
+  # Check if already set
+  local current
+  current=$(jq -r --arg wid "$window_id" \
+    '.terminals[]?.splitTerminals[]? | select(.windowId == $wid) | .claudeSessionId // empty' \
+    "$JSON" 2>/dev/null || true)
+
+  [[ "$current" == "$session_id" ]] && return 0
+
+  # Update JSON
+  local tmp=$(mktemp)
+  if jq --arg wid "$window_id" --arg sid "$session_id" '
+    .terminals = [.terminals[]? |
+      .splitTerminals = [.splitTerminals[]? |
+        if .windowId == $wid then .claudeSessionId = $sid else . end
+      ]
+    ]
+  ' "$JSON" > "$tmp"; then
+    mv "$tmp" "$JSON"
+    echo "$(date '+%H:%M:%S') Updated: $window_id → $session_id"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+find_active_terminal() {
+  local timestamp="$1"
+  local tolerance=5000  # 5 second tolerance
+
+  # Get all window IDs
+  local window_ids
+  window_ids=$(jq -r '.terminals[]?.splitTerminals[]?.windowId // empty' "$JSON" 2>/dev/null)
+
+  # Find which terminal had recent activity (log file modified near the timestamp)
+  local best_match=""
+  local best_diff=999999999
+
+  while IFS= read -r wid; do
+    [[ -z "$wid" ]] && continue
+
+    local log_file="$LOGS_DIR/${project_lower}-${wid}.log"
+    [[ ! -f "$log_file" ]] && continue
+
+    # Get log file modification time in milliseconds
+    local log_mtime
+    log_mtime=$(stat -f %m "$log_file" 2>/dev/null || echo "0")
+    log_mtime=$((log_mtime * 1000))
+
+    # Calculate difference
+    local diff=$((timestamp - log_mtime))
+    [[ $diff -lt 0 ]] && diff=$((-diff))
+
+    if [[ $diff -lt $best_diff && $diff -lt $tolerance ]]; then
+      best_diff=$diff
+      best_match="$wid"
+    fi
+  done <<< "$window_ids"
+
+  echo "$best_match"
+}
+
+process_new_entries() {
+  local last_line
+  last_line=$(cat "$STATE_FILE" 2>/dev/null || echo "0")
+
+  local current_lines
+  current_lines=$(wc -l < "$HISTORY")
+
+  if [[ $current_lines -le $last_line ]]; then
+    return 0
+  fi
+
+  # Process new entries
+  tail -n +$((last_line + 1)) "$HISTORY" | while IFS= read -r line; do
+    # Only process entries for this project
+    local entry_project
+    entry_project=$(echo "$line" | jq -r '.project // empty' 2>/dev/null)
+    [[ "$entry_project" != "$PROJECT_DIR" ]] && continue
+
+    local session_id timestamp
+    session_id=$(echo "$line" | jq -r '.sessionId // empty' 2>/dev/null)
+    timestamp=$(echo "$line" | jq -r '.timestamp // empty' 2>/dev/null)
+
+    [[ -z "$session_id" || -z "$timestamp" ]] && continue
+
+    # Find which terminal this belongs to
+    local window_id
+    window_id=$(find_active_terminal "$timestamp")
+
+    if [[ -n "$window_id" ]]; then
+      update_session "$window_id" "$session_id"
+    fi
+  done
+
+  # Update state
+  echo "$current_lines" > "$STATE_FILE"
+}
+
+echo "$(date '+%H:%M:%S') Claude session tracker started"
+echo "  Project: $PROJECT_DIR"
+echo "  Monitoring: $HISTORY"
+
+# Main loop - check every 10 seconds
+while true; do
+  process_new_entries
+  sleep 10
+done

@@ -1,0 +1,113 @@
+# Publish the immorterm-memory npm packages once the memory release binaries
+# land on this repo's Releases.
+#
+# The memory engine is built in its own (private) repository; that repo's
+# release lane cross-uploads the platform tarballs to a Release here via
+# `gh release upload`. This workflow then downloads those assets, drops each
+# binary into the matching platform package's bin/, and publishes all five
+# npm packages (4 platform + 1 meta) via npm Trusted Publishing (OIDC).
+#
+# BEFORE FIRST PUBLISH: configure Trusted Publishing on npmjs.com for
+# immorterm-memory and each immorterm-memory-<platform> package, pointing at
+# this repo + this workflow file. See WORKFLOW-NOTES.md.
+#
+# Expected release assets (one tarball per platform, each containing the
+# `immorterm-memory` binary):
+#   immorterm-memory-linux-x86_64.tar.gz
+#   immorterm-memory-linux-aarch64.tar.gz
+#   immorterm-memory-macos-x86_64.tar.gz
+#   immorterm-memory-macos-aarch64.tar.gz
+
+name: Publish Memory npm
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish from (e.g. memory-v0.1.2)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish immorterm-memory packages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Download release binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          mkdir -p dl
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir dl \
+            --pattern 'immorterm-memory-*.tar.gz'
+          ls -la dl
+
+      - name: Stage binaries + publish
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./packages/immorterm-memory/package.json').version")
+          echo "Publishing immorterm-memory npm packages v${VERSION}"
+
+          declare -A ARTIFACT_TO_PKG=(
+            ["immorterm-memory-linux-x86_64"]="immorterm-memory-linux-x64"
+            ["immorterm-memory-linux-aarch64"]="immorterm-memory-linux-arm64"
+            ["immorterm-memory-macos-x86_64"]="immorterm-memory-darwin-x64"
+            ["immorterm-memory-macos-aarch64"]="immorterm-memory-darwin-arm64"
+          )
+
+          for ARTIFACT in "${!ARTIFACT_TO_PKG[@]}"; do
+            PKG_DIR="packages/${ARTIFACT_TO_PKG[$ARTIFACT]}"
+            mkdir -p "$PKG_DIR/bin"
+            if [ -f "dl/$ARTIFACT.tar.gz" ]; then
+              tar xzf "dl/$ARTIFACT.tar.gz" -C "$PKG_DIR/bin/"
+              chmod +x "$PKG_DIR/bin/immorterm-memory"
+              echo "Extracted $ARTIFACT -> $PKG_DIR/bin/"
+            else
+              echo "::warning::Artifact $ARTIFACT.tar.gz not found, skipping ${ARTIFACT_TO_PKG[$ARTIFACT]}"
+            fi
+          done
+
+          # Sync version across platform packages
+          for PKG_DIR in packages/immorterm-memory-darwin-arm64 packages/immorterm-memory-darwin-x64 packages/immorterm-memory-linux-x64 packages/immorterm-memory-linux-arm64; do
+            node -e "
+              const p='./$PKG_DIR/package.json'; const pkg=require(p);
+              pkg.version='${VERSION}';
+              require('fs').writeFileSync(p, JSON.stringify(pkg, null, '\t') + '\n');
+            "
+          done
+          # Sync optionalDependencies in the meta package
+          node -e "
+            const p='./packages/immorterm-memory/package.json'; const pkg=require(p);
+            for (const d of Object.keys(pkg.optionalDependencies || {})) pkg.optionalDependencies[d]='${VERSION}';
+            require('fs').writeFileSync(p, JSON.stringify(pkg, null, '\t') + '\n');
+          "
+
+          # Platform packages first (meta package's optionalDependencies resolve them)
+          for PKG_DIR in packages/immorterm-memory-linux-x64 packages/immorterm-memory-linux-arm64 packages/immorterm-memory-darwin-x64 packages/immorterm-memory-darwin-arm64; do
+            if [ -f "$PKG_DIR/bin/immorterm-memory" ]; then
+              echo "Publishing $(basename "$PKG_DIR")..."
+              (cd "$PKG_DIR" && npx -y npm@latest publish --provenance --access public) || echo "::warning::Failed to publish $(basename "$PKG_DIR")"
+            else
+              echo "::warning::Skipping $(basename "$PKG_DIR") — no binary"
+            fi
+          done
+
+          echo "Publishing immorterm-memory (meta)..."
+          (cd packages/immorterm-memory && npx -y npm@latest publish --provenance --access public)
+          echo "npm publish complete — v${VERSION}"

@@ -1,0 +1,4 @@
+{
+	"title": "Memory API",
+	"pages": ["index", "memories", "search", "sessions", "code-history", "graph", "packs", "stats"]
+}

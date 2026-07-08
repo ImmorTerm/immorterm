@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# vscode-screen-forget - Remove a single screen session, its log, and restore entry
+#
+# Usage: vscode-screen-forget [window-id]
+#   e.g., vscode-screen-forget 10977-1767190321484
+#
+# If no argument, detects from $STY (screen session env var)
+
+set -euo pipefail
+
+PROJECT_DIR="${SCREEN_PROJECT_DIR:-$(pwd)}"
+PROJECT="$(basename "$PROJECT_DIR" | tr '[:upper:]' '[:lower:]')"
+RESTORE_FILE="$PROJECT_DIR/.immorterm/restore-terminals.json"
+LOGS_DIR="$PROJECT_DIR/.immorterm/terminals/logs"
+RENAMES_DIR="$PROJECT_DIR/.immorterm/terminals/renames"
+
+# Get window name
+if [[ -n "${1:-}" ]]; then
+  WINDOW="$1"
+elif [[ -n "${STY:-}" ]]; then
+  # Extract window name from session name (pax-1 -> 1)
+  WINDOW="${STY#*.${PROJECT}-}"
+  if [[ "$WINDOW" == "$STY" ]]; then
+    echo "Error: Could not extract window name from session." >&2
+    exit 1
+  fi
+else
+  echo "Usage: vscode-screen-forget [window-name]"
+  echo "   or run from inside a screen session"
+  exit 1
+fi
+
+SESSION="${PROJECT}-${WINDOW}"
+
+# Remove from restore-terminals.json
+# Match the window ID in the commands array (e.g., "exec $HOME/.immorterm/scripts/screen-auto 2775-WA10ICb")
+if [[ -f "$RESTORE_FILE" ]]; then
+  tmp=$(mktemp)
+  jq --arg window "$WINDOW" '
+    .terminals = [.terminals[] | select(.splitTerminals[0].commands[0] | contains($window) | not)]
+  ' "$RESTORE_FILE" > "$tmp" && mv "$tmp" "$RESTORE_FILE"
+fi
+
+# Delete the log file
+rm -f "$LOGS_DIR/${SESSION}.log"
+
+# Delete the rename title file
+rm -f "$RENAMES_DIR/${SESSION}"
+
+# Use configured screen binary
+SCREEN="${IMMORTERM_SCREEN_BINARY:-immorterm}"
+
+# Kill all descendant processes (shells, Claude, etc.) before quitting screen
+# screen -X quit alone doesn't reliably kill Claude (it catches SIGHUP)
+kill_session_processes() {
+  local session="$1"
+  local screen_pid
+  screen_pid=$($SCREEN -ls 2>/dev/null | grep "[0-9]*\\.${session}[[:space:]]" | grep -oE "[0-9]+" | head -1)
+  [[ -z "$screen_pid" ]] && return
+  local pids
+  pids=$(ps -eo pid,ppid | awk -v root="$screen_pid" '
+    BEGIN { pids[root]=1 }
+    { if ($2 in pids) pids[$1]=1 }
+    END { for (p in pids) if (p != root) print p }
+  ')
+  [[ -z "$pids" ]] && return
+  kill $pids 2>/dev/null || true
+  sleep 2
+  kill -9 $pids 2>/dev/null || true
+}
+
+kill_session_processes "$SESSION"
+
+# Kill the screen session
+$SCREEN -S "$SESSION" -X quit 2>/dev/null || true
+
+# Also delete socket file directly (screen -X quit fails for "Remote or dead" sessions)
+SCREEN_DIR="${SCREENDIR:-$HOME/.screen}"
+for socket in "$SCREEN_DIR"/*."$SESSION"; do
+  [[ -S "$socket" ]] && rm -f "$socket"
+done

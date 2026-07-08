@@ -1,0 +1,20 @@
+language: "typescript"
+layer: "library"
+stack: "backend"
+
+project:
+  title: "Configuration"
+  description: "Shared config paths, types, and read/write for global + project configs"
+  owner: "@immorterm/core"
+
+dependsOn:
+  - "types"
+
+tasks:
+  typecheck:
+    command: "bun run tsc --noEmit"
+    inputs:
+      - "src/**/*"
+      - "tsconfig.json"
+    deps:
+      - "types:typecheck"

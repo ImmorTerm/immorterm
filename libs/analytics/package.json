@@ -1,0 +1,16 @@
+{
+	"name": "@immorterm/analytics",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"main": "./src/index.ts",
+	"types": "./src/index.ts",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"dependencies": {
+		"@immorterm/config": "workspace:*",
+		"@immorterm/license": "workspace:*",
+		"posthog-node": "^4.0.0"
+	}
+}

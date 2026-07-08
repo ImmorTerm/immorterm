@@ -1,0 +1,233 @@
+# ImmorTerm AI — headless daemon (Linux/VPS build)
+#
+# Builds `immorterm-ai` (apps/immorterm-ai/immorterm-daemon) with
+# `--no-default-features --features headless`. The headless build strips
+# the native winit window stack (window.rs + team_window.rs); the daemon
+# serves Tauri/VS Code webview clients only — PTY + WebSocket + MCP +
+# session registry. Intended for Hetzner / any Linux VPS hosting 24/7
+# agents that founders watch from anywhere.
+#
+# Build (from repo root):
+#   docker build -f .devops/docker/Dockerfile.immorterm-ai-headless \
+#     -t immorterm-ai:headless-latest .
+#
+# Run (local "remote box" for dev/test) — DO NOT hand-roll the docker run.
+# Use the canonical launcher, which mounts the SSH authorized_keys + publishes
+# the ssh/hub/ws ports the remote flow actually needs:
+#   scripts/remote-test-container.sh up        # build-if-needed + run + register + verify
+#   scripts/remote-test-container.sh verify    # test → registry → attach chain
+#
+# Bare smoke-test (no SSH, no remote flow — just prove the binary runs):
+#   docker run --rm -it \
+#     -v immorterm-ai-data:/root/.immorterm \
+#     -p 9000:9000 \
+#     immorterm-ai:headless-latest --version
+#
+# NOTE: a real remote-mode container MUST bind the host pubkey, e.g.
+#   -v ~/.ssh/id_rsa.pub:/tmp/authorized_keys.in:ro   (-p 2222:22  -p 1441:1440)
+# Omitting it is exactly what caused the 2026-05-18 "Permission denied
+# (publickey)" / "Remote unreachable" picker failure. The script does it for you.
+
+# =============================================================================
+# Stage 1: Build
+# =============================================================================
+FROM rust:1.93-trixie AS builder
+
+# System deps:
+#   pkg-config + libssl-dev   — reqwest (native-tls)
+#   libasound2-dev            — rodio (audio notifications)
+#   libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev — arboard (Linux clipboard,
+#                                                       compile-time even though
+#                                                       a headless VPS has no
+#                                                       X11 to talk to)
+#   libvulkan-dev             — wgpu (used by screenshot.rs; fails gracefully
+#                                     at runtime if no GPU adapter)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      pkg-config \
+      libssl-dev \
+      libasound2-dev \
+      libxcb1-dev \
+      libxkbcommon-dev \
+      libxkbcommon-x11-dev \
+      libvulkan-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+# Workspace manifests first (cargo needs to resolve the whole workspace
+# graph before it can build any single member).
+COPY Cargo.toml Cargo.lock ./
+
+# Stub source files for every workspace member except the ones we actually
+# need real source for. Lets cargo resolve + cache deps without copying the
+# entire repo. Real sources for daemon + its workspace deps come below.
+RUN mkdir -p apps/immorterm-ai/immorterm-core/src && echo "" > apps/immorterm-ai/immorterm-core/src/lib.rs && \
+    mkdir -p apps/immorterm-ai/immorterm-daemon/src && echo "fn main(){}" > apps/immorterm-ai/immorterm-daemon/src/main.rs && \
+    mkdir -p apps/immorterm-ai/immorterm-digest/src && echo "" > apps/immorterm-ai/immorterm-digest/src/lib.rs && echo "fn main(){}" > apps/immorterm-ai/immorterm-digest/src/main.rs && \
+    mkdir -p apps/immorterm-ai/immorterm-render/src && echo "" > apps/immorterm-ai/immorterm-render/src/lib.rs && \
+    mkdir -p apps/immorterm-ai/immorterm-wasm/src && echo "" > apps/immorterm-ai/immorterm-wasm/src/lib.rs && \
+    mkdir -p libs/conversation-adapters/src && echo "" > libs/conversation-adapters/src/lib.rs && \
+    mkdir -p libs/conversation-schema/src && echo "" > libs/conversation-schema/src/lib.rs && \
+    mkdir -p libs/structured-logs/src && echo "" > libs/structured-logs/src/lib.rs && \
+    mkdir -p services/hub/src && echo "fn main(){}" > services/hub/src/main.rs
+
+# Workspace member manifests
+COPY apps/immorterm-ai/immorterm-core/Cargo.toml apps/immorterm-ai/immorterm-core/
+COPY apps/immorterm-ai/immorterm-daemon/Cargo.toml apps/immorterm-ai/immorterm-daemon/
+COPY apps/immorterm-ai/immorterm-digest/Cargo.toml apps/immorterm-ai/immorterm-digest/
+COPY apps/immorterm-ai/immorterm-render/Cargo.toml apps/immorterm-ai/immorterm-render/
+COPY apps/immorterm-ai/immorterm-wasm/Cargo.toml apps/immorterm-ai/immorterm-wasm/
+COPY libs/conversation-adapters/Cargo.toml libs/conversation-adapters/
+COPY libs/conversation-schema/Cargo.toml libs/conversation-schema/
+COPY libs/structured-logs/Cargo.toml libs/structured-logs/
+COPY services/hub/Cargo.toml services/hub/
+
+# Warm the dep cache. Ignore failures from stubs — real build below.
+RUN cargo build --release -p immorterm-daemon --no-default-features --features headless 2>/dev/null || true
+
+# Real source for the daemon + its direct workspace deps
+COPY apps/immorterm-ai/immorterm-core/src   apps/immorterm-ai/immorterm-core/src
+COPY apps/immorterm-ai/immorterm-render/src apps/immorterm-ai/immorterm-render/src
+COPY apps/immorterm-ai/immorterm-daemon/src apps/immorterm-ai/immorterm-daemon/src
+# immorterm-p wrapper script — embedded into the daemon via include_str!
+COPY apps/immorterm-ai/scripts apps/immorterm-ai/scripts
+COPY libs/structured-logs/src               libs/structured-logs/src
+# tier-config is a compile-time include for some workspace members
+COPY libs/tier-config/config.json libs/tier-config/config.json
+
+# Hub serves gpu-terminal.html + companion JS/CSS/WASM. Copy real source.
+COPY services/hub/src services/hub/src
+# Auto-digester (immorterm-digest) — listens for sessions + writes facts.
+COPY apps/immorterm-ai/immorterm-digest/src apps/immorterm-ai/immorterm-digest/src
+# Workspace lib deps the above need.
+COPY libs/conversation-adapters/src libs/conversation-adapters/src
+COPY libs/conversation-schema/src libs/conversation-schema/src
+
+# Bust cargo's incremental cache for every crate whose real source was just
+# copied. Docker COPY preserves the source's (older) mtime, while the stub
+# lib.rs files have build-time (newer) mtimes — cargo sees the stub artifact
+# as up-to-date and skips re-compiling, producing 'symbol not found' errors
+# at the leaves.
+RUN touch \
+      apps/immorterm-ai/immorterm-core/src/lib.rs \
+      apps/immorterm-ai/immorterm-render/src/lib.rs \
+      libs/structured-logs/src/lib.rs \
+      apps/immorterm-ai/immorterm-daemon/src/main.rs \
+      apps/immorterm-ai/immorterm-digest/src/main.rs \
+      services/hub/src/main.rs \
+      libs/conversation-adapters/src/lib.rs \
+      libs/conversation-schema/src/lib.rs && \
+    cargo build --release \
+      -p immorterm-daemon --no-default-features --features headless \
+      -p immorterm-hub \
+      -p immorterm-digest
+
+# =============================================================================
+# Stage 2: Runtime
+# =============================================================================
+FROM debian:trixie-slim
+
+LABEL org.opencontainers.image.source=https://github.com/ImmorTerm/immorterm
+LABEL org.opencontainers.image.description="ImmorTerm AI — headless agent terminal daemon for 24/7 remote agents"
+
+# Runtime deps:
+#   ca-certificates — TLS roots for reqwest / wss out
+#   libasound2      — rodio
+#   libssl3         — reqwest
+#   libxcb1 libxkbcommon0 — arboard runtime symbols (won't function w/o X11
+#                          but the binary needs the .so to load)
+#   libvulkan1      — wgpu runtime; screenshot path will fail gracefully
+#                     if no adapter
+#   curl            — healthcheck
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      ca-certificates \
+      libasound2 \
+      libssl3 \
+      libxcb1 \
+      libxkbcommon0 \
+      libxkbcommon-x11-0 \
+      libvulkan1 \
+      curl \
+      git \
+      bash \
+      jq \
+      ripgrep \
+      vim \
+      less \
+      gnupg \
+      openssh-server \
+      inotify-tools && \
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir -p /var/run/sshd /root/.ssh && \
+    chmod 700 /root/.ssh && \
+    sed -i 's/#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config && \
+    sed -i 's/#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+
+# Node.js (NodeSource setup script) + Claude Code CLI.
+# Founders running this container want to type `claude` and get an agent
+# loop. Auth is via `ANTHROPIC_API_KEY` env passed at `docker run` time —
+# we don't bake credentials into the image.
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    npm install -g @anthropic-ai/claude-code && \
+    rm -rf /var/lib/apt/lists/* /root/.npm
+
+COPY --from=builder /src/target/release/immorterm-ai     /usr/local/bin/immorterm-ai
+COPY --from=builder /src/target/release/immorterm-hub    /usr/local/bin/immorterm-hub
+COPY --from=builder /src/target/release/immorterm-digest /usr/local/bin/immorterm-digest
+RUN chmod +x /usr/local/bin/immorterm-ai \
+             /usr/local/bin/immorterm-hub \
+             /usr/local/bin/immorterm-digest
+
+# immorterm-memory is NOT built from source here — its engine lives in a
+# separate repo. Download the prebuilt binary from the public release, using
+# the same pinned tag + rate-limit-free CDN path the CLI installer uses
+# (see libs/services/src/memory.ts). Override the tag with --build-arg.
+ARG IMMORTERM_MEMORY_TAG=memory-prod-2026-07-07.1
+RUN arch="$(dpkg --print-architecture)" && \
+    case "$arch" in \
+      amd64) asset="immorterm-memory-linux-x86_64.tar.gz" ;; \
+      arm64) asset="immorterm-memory-linux-aarch64.tar.gz" ;; \
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac && \
+    curl -fsSL "https://github.com/ImmorTerm/immorterm/releases/download/${IMMORTERM_MEMORY_TAG}/${asset}" \
+      -o /tmp/immorterm-memory.tar.gz && \
+    tar xzf /tmp/immorterm-memory.tar.gz -C /usr/local/bin/ && \
+    rm /tmp/immorterm-memory.tar.gz && \
+    chmod +x /usr/local/bin/immorterm-memory
+
+# Install the npm-distributed MCP gateway (TypeScript). Falls back to a
+# no-op stub if the package isn't published; the daemon's MCP server
+# inside the container still works without the gateway, only loses the
+# "merge multiple MCP servers under one socket" feature.
+RUN npm install -g immorterm-mcp-gateway 2>/dev/null || \
+    echo "[build] immorterm-mcp-gateway not in npm — gateway disabled"
+
+# Static assets the hub serves (gpu-terminal.html, JS, WASM, CSS, fonts).
+# Pulled directly from apps/extension/resources at image build time.
+COPY apps/extension/resources /resources
+
+# Claude Code hooks — SessionStart triggers digest, ambient memory writes,
+# code-change capture, etc. Without these, `claude` in the container has
+# no memory persistence. The entrypoint installs them into /root/.claude/
+# on first boot.
+COPY .claude/hooks /opt/immorterm-hooks
+
+# Entrypoint: start a demo daemon session, then run the hub.
+COPY .devops/docker/immorterm-ai-headless-entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Single source of truth lives on the container filesystem (volume-mounted).
+# registry.json, memory.db, terminals/logs/ all under here.
+VOLUME ["/root/.immorterm"]
+
+# sshd — the tunnel endpoint laptops connect to with `ssh user@host -p 2222`
+EXPOSE 22
+# Hub HTTP (gpu-terminal.html + REST API consumed by the webview)
+EXPOSE 1440
+# Daemon per-session WebSocket range (set by IMMORTERM_WS_PORT_BASE/SPAN)
+EXPOSE 9000-9049
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

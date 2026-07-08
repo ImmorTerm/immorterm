@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# vscode-screen-cleanup - Remove stale entries from restore-terminals.json
+# Archives orphaned session directories instead of deleting them.
+
+set -euo pipefail
+
+PROJECT_DIR="${SCREEN_PROJECT_DIR:-$(pwd)}"
+PROJECT="$(basename "$PROJECT_DIR" | tr '[:upper:]' '[:lower:]')"
+JSON="$PROJECT_DIR/.immorterm/restore-terminals.json"
+LOGS_DIR="$PROJECT_DIR/.immorterm/terminals/logs"
+ARCHIVE_DIR="$LOGS_DIR/archive"
+
+# Use configured screen binary (immorterm by default)
+SCREEN="${IMMORTERM_SCREEN_BINARY:-immorterm}"
+
+[[ -f "$JSON" ]] || exit 0
+
+# Wait for screen to fully terminate after quit command
+sleep 0.3
+
+# Get list of active screen sessions for this project (extract the window ID part after PROJECT-)
+active_ids=$($SCREEN -ls 2>/dev/null | grep -oE "${PROJECT}-[0-9]+-[A-Za-z0-9]+" | sed "s/${PROJECT}-//" | sort -u || true)
+
+# Also get window IDs from registry.json (Rust daemon sessions)
+REGISTRY="$HOME/.immorterm/registry.json"
+registry_ids=""
+if [[ -f "$REGISTRY" ]]; then
+  registry_ids=$(jq -r '.sessions[].window_id // empty' "$REGISTRY" 2>/dev/null | sort -u || true)
+fi
+
+# Combine active IDs from both sources
+all_active_ids=$(printf '%s\n%s' "$active_ids" "$registry_ids" | sort -u | grep -v '^$' || true)
+
+# Get window IDs from JSON (extracted from commands array)
+# Commands look like: "exec $HOME/.immorterm/scripts/screen-auto 12345-abcdef12"
+window_ids_in_json=$(jq -r '.terminals[].splitTerminals[0].commands[0] // empty' "$JSON" 2>/dev/null | grep -oE '[0-9]+-[A-Za-z0-9]+' || true)
+
+# Slugify: lowercase, replace non-alnum with dash, trim dashes, max 50 chars
+slugify() {
+  echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g; s/^-*//; s/-*$//' | cut -c1-50
+}
+
+# Archive a session directory to archive/{date}_{slug}/
+archive_session_dir() {
+  local session_dir="$1"
+  local dir_name
+  dir_name="$(basename "$session_dir")"
+
+  # Read session.json for display_name and created_at
+  local session_json="$session_dir/session.json"
+  local date_str=""
+  local slug=""
+
+  if [[ -f "$session_json" ]]; then
+    local created_at
+    created_at=$(jq -r '.created_at // empty' "$session_json" 2>/dev/null || true)
+    if [[ -n "$created_at" ]]; then
+      date_str=$(date -r "$created_at" +%Y-%m-%d 2>/dev/null || true)
+    fi
+    local display_name
+    display_name=$(jq -r '.display_name // empty' "$session_json" 2>/dev/null || true)
+    if [[ -n "$display_name" ]]; then
+      slug=$(slugify "$display_name")
+    fi
+
+    # Update session.json with archive metadata
+    local now_ts
+    now_ts=$(date +%s)
+    local tmp
+    tmp=$(mktemp)
+    jq --argjson ts "$now_ts" '.status = "archived" | .archived_at = $ts' "$session_json" > "$tmp" 2>/dev/null && mv "$tmp" "$session_json"
+  fi
+
+  # Fallback: extract date from dir name prefix, use windowId as slug
+  if [[ -z "$date_str" ]]; then
+    date_str=$(echo "$dir_name" | grep -oE '^[0-9]{4}-[0-9]{2}-[0-9]{2}' || date +%Y-%m-%d)
+  fi
+  if [[ -z "$slug" ]]; then
+    slug=$(echo "$dir_name" | sed 's/^[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}_//')
+  fi
+
+  local archive_name="${date_str}_${slug}"
+  local archive_path="$ARCHIVE_DIR/$archive_name"
+
+  # Handle collision
+  if [[ -d "$archive_path" ]]; then
+    local suffix=2
+    while [[ -d "${archive_path}-${suffix}" ]]; do
+      ((suffix++))
+    done
+    archive_path="${archive_path}-${suffix}"
+  fi
+
+  mkdir -p "$ARCHIVE_DIR"
+  mv "$session_dir" "$archive_path"
+  echo "Archived: $dir_name → archive/$(basename "$archive_path")"
+}
+
+# --- Clean restore-terminals.json entries ---
+for window_id in $window_ids_in_json; do
+  if ! echo "$all_active_ids" | grep -qxF "$window_id"; then
+    echo "Removing stale entry for window ID: $window_id"
+    tmp="$(mktemp)"
+    jq --arg id "$window_id" '.terminals = [.terminals[] | select(.splitTerminals[0].commands[0] | contains($id) | not)]' "$JSON" > "$tmp" && mv "$tmp" "$JSON"
+    # Remove legacy flat log file if it exists
+    rm -f "$LOGS_DIR/${PROJECT}-${window_id}.log" 2>/dev/null || true
+  fi
+done
+
+# --- Archive orphaned session directories ---
+if [[ -d "$LOGS_DIR" ]]; then
+  for entry in "$LOGS_DIR"/*/; do
+    [[ -d "$entry" ]] || continue
+    dir_name="$(basename "$entry")"
+    # Skip archive directory itself
+    [[ "$dir_name" == "archive" ]] && continue
+
+    # Check if any active window ID matches this directory name
+    is_active=false
+    while IFS= read -r wid; do
+      [[ -z "$wid" ]] && continue
+      if [[ "$dir_name" == *"$wid"* ]]; then
+        is_active=true
+        break
+      fi
+    done <<< "$all_active_ids"
+
+    if [[ "$is_active" == "false" ]]; then
+      archive_session_dir "$entry"
+    fi
+  done
+fi
+
+echo "Cleanup complete"

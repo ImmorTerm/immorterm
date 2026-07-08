@@ -1,0 +1,774 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Trap ERR to log exactly which command kills the script under set -e.
+# Uses a fixed path since debug log variable isn't set yet at script start.
+_ERR_LOG="$HOME/.immorterm/screen-auto-err.log"
+trap '_ec=$?; echo "[$(date "+%Y-%m-%d %H:%M:%S")] ERR at line $LINENO: $BASH_COMMAND (exit $_ec)" >> "$_ERR_LOG"' ERR
+
+# Portable flock polyfill for macOS (which doesn't ship flock)
+# Uses Perl's flock() syscall on an inherited fd. The lock persists in the parent
+# because parent and child share the same open file description after fork().
+if ! command -v flock >/dev/null 2>&1; then
+  flock() {
+    perl -e 'use Fcntl qw(:flock); open(my $fh, ">&=", $ARGV[0]) or die "open: $!"; flock($fh, LOCK_EX) or die "flock: $!";' "$1"
+  }
+fi
+
+# Set terminal title IMMEDIATELY to avoid showing "bash" before the real name
+# For new terminals: profile provider sets IMMORTERM_DISPLAY_NAME in the environment
+# For restored terminals: name is passed as $2 argument
+if [[ -n "${IMMORTERM_DISPLAY_NAME:-}" ]]; then
+  printf '\033]0;%s\007' "$IMMORTERM_DISPLAY_NAME"
+elif [[ -n "${2:-}" ]]; then
+  printf '\033]0;%s\007' "$2"
+fi
+
+# Scripts are deployed globally at $HOME/.immorterm/scripts/
+# VS Code launches terminals in the project directory, so PWD is already correct
+PROJECT="$(basename "$PWD" | tr '[:upper:]' '[:lower:]')"
+JSON=".immorterm/restore-terminals.json"
+REGISTRY="$HOME/.immorterm/registry.json"
+PROJECT_DIR="${SCREEN_PROJECT_DIR:-$PWD}"
+LOGS_DIR="$PROJECT_DIR/.immorterm/terminals/logs"
+PENDING_DIR="$PROJECT_DIR/.immorterm/terminals/pending"
+
+# Screen binary - use configured path, local dev version, or fall back to 'immorterm'
+# Priority: env var > local dev build > homebrew installed
+if [[ -n "${IMMORTERM_SCREEN_BINARY:-}" ]]; then
+  SCREEN="$IMMORTERM_SCREEN_BINARY"
+elif [[ -x "$HOME/Development/immorterm/bin/immorterm" ]]; then
+  SCREEN="$HOME/Development/immorterm/bin/immorterm"
+else
+  SCREEN="immorterm"
+fi
+
+# ImmorTerm AI binary - used for structured log sidecar and grid-based restoration
+# Priority: env var > local dev build > PATH lookup
+if [[ -n "${IMMORTERM_AI_BINARY:-}" ]] && [[ -x "$IMMORTERM_AI_BINARY" ]]; then
+  IMMORTERM_AI="$IMMORTERM_AI_BINARY"
+elif [[ -x "$HOME/Development/immorterm/target/release/immorterm-ai" ]]; then
+  IMMORTERM_AI="$HOME/Development/immorterm/target/release/immorterm-ai"
+elif [[ -x "$HOME/Development/immorterm/target/debug/immorterm-ai" ]]; then
+  IMMORTERM_AI="$HOME/Development/immorterm/target/debug/immorterm-ai"
+elif command -v immorterm-ai >/dev/null 2>&1; then
+  IMMORTERM_AI="immorterm-ai"
+else
+  IMMORTERM_AI=""
+fi
+
+# Check if screen binary is available - graceful fallback if not
+if ! command -v "$SCREEN" >/dev/null 2>&1; then
+  echo ""
+  echo "╔═══════════════════════════════════════════════════════════════════╗"
+  echo "║  ImmorTerm: Screen binary '$SCREEN' not found                     ║"
+  echo "╠═══════════════════════════════════════════════════════════════════╣"
+  echo "║  Terminal persistence is disabled. Run the setup wizard:           ║"
+  echo "║                                                                   ║"
+  echo "║    npx immorterm                                                  ║"
+  echo "║                                                                   ║"
+  echo "║  Then reload VS Code (Cmd+Shift+P → 'Reload Window')              ║"
+  echo "╚═══════════════════════════════════════════════════════════════════╝"
+  echo ""
+  # Fall back to standard shell so user can still work
+  exec "${SHELL:-/bin/zsh}"
+fi
+
+mkdir -p "$PROJECT_DIR/.immorterm" "$LOGS_DIR" "$PENDING_DIR"
+[[ -f "$JSON" ]] || echo '{"artificialDelayMilliseconds":0,"terminals":[]}' > "$JSON"
+
+# Debug log for auto-resume troubleshooting
+DEBUG_LOG="$PROJECT_DIR/.immorterm/terminals/logs/auto-resume.log"
+debug() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$DEBUG_LOG"; }
+
+# Dump filtered log to VS Code scrollback buffer
+# Filters terminal log for restoration: PRESERVES colors (SGR sequences) while
+# stripping non-visual sequences (cursor movement, erase, scroll, etc.)
+# and deduplicates ghost prompts (screen redraw artifacts where zsh renders the
+# empty prompt, then screen clears and re-renders with the typed command).
+dump_filtered_log() {
+  local logfile="$1"
+  local lines="${2:-${SCREEN_HISTORY_LINES:-20000}}"
+  echo ""
+  tail -n "$lines" "$logfile" \
+    | perl -e '
+      use strict; use warnings;
+      my ($prev, $prev_t);
+      while (<STDIN>) {
+        s/\r/\n/g;
+        # Strip NON-VISUAL CSI sequences but KEEP SGR (ESC[...m = colors/attrs)
+        # CSI final bytes: 0x40-0x7e. SGR = 0x6d (m). Keep m, strip the rest.
+        s/\e\[[\x20-\x3f]*[\x40-\x6c\x6e-\x7e]//g;
+        # OSC sequences: ESC ] ... BEL  or  ESC ] ... ST
+        s/\e\][^\a\e]*(?:\a|\e\\)//g;
+        # DCS/PM/APC: ESC P|^|_ ... ST
+        s/\e[P\^_].*?\e\\//g;
+        # Simple two-char escapes: ESC + single byte (but NOT ESC[ which starts CSI/SGR)
+        s/\e[\x20-\x5a\x5c-\x7e]//g;
+        # Stray ESC not part of a CSI sequence
+        s/\e(?!\[)//g;
+        # Backspace overwriting (char + BS)
+        s/[^\x08]\x08//g;
+        # Control chars except newline and tab
+        s/[\x00-\x08\x0b\x0c\x0e-\x1f]//g;
+
+        for my $line (split /\n/) {
+          # Compare stripped text (no SGR) for dedup/ghost detection
+          my $stripped = $line;
+          $stripped =~ s/\e\[[\x20-\x3f]*m//g;
+          next if $stripped =~ /^%?\s*$/;
+          $stripped =~ s/^[ \t]{20,}(.)/$1/;
+          $stripped =~ s/\s+$//;
+          next if $stripped eq "";
+          # Clean original line whitespace (preserve SGR sequences)
+          $line =~ s/^((?:\e\[[\x20-\x3f]*m)*)[ \t]{20,}/$1/;
+          $line =~ s/\s+$//;
+          # Skip consecutive duplicate lines (compare stripped text)
+          next if defined $prev_t && $stripped eq $prev_t;
+          # Ghost prompt: prev is a strict prefix of current -> skip prev
+          if (defined $prev && length($prev_t) > 0
+              && length($stripped) > length($prev_t)
+              && substr($stripped, 0, length($prev_t)) eq $prev_t) {
+            # Replace prev with current
+          } else {
+            print "$prev\n" if defined $prev;
+          }
+          $prev = $line;
+          $prev_t = $stripped;
+        }
+      }
+      print "$prev\n" if defined $prev;
+    '
+}
+
+# Check if extension pre-generated identity (env vars set by ImmorTermProfileProvider)
+# This prevents duplicates - extension already created the pending file
+if [[ -n "${IMMORTERM_WINDOW_ID:-}" ]] && [[ -n "${IMMORTERM_DISPLAY_NAME:-}" ]]; then
+  # Extension created the terminal - use pre-generated values
+  WINDOW="$IMMORTERM_WINDOW_ID"
+  DISPLAY_NAME="$IMMORTERM_DISPLAY_NAME"
+  SESSION="${PROJECT}-${WINDOW}"
+  debug "EXTENSION terminal: window=$WINDOW, display=$DISPLAY_NAME (env vars)"
+  # Extension already created pending file, spawn reconciler to process it
+  "$HOME/.immorterm/scripts/screen-reconcile" &
+elif [[ -n "${1:-}" ]]; then
+  # Restored terminal: arg is window name (used as session name)
+  # optional second arg is display name (friendly name for tab)
+  WINDOW="$1"
+  DISPLAY_NAME="${2:-$WINDOW}"  # Use display name if provided, else windowId
+  SESSION="${PROJECT}-${WINDOW}"
+  debug "RESTORED terminal: window=$WINDOW, display=$DISPLAY_NAME"
+else
+  # NEW terminal without extension (fallback, shouldn't happen normally)
+  WINDOW="$$-$(head -c6 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c8)"
+  SESSION="${PROJECT}-${WINDOW}"
+
+  # Calculate next friendly name (pax-1, pax-2, etc.)
+  # Find highest existing N and add 1
+  if [[ -f "$JSON" ]]; then
+    MAX_N=$(jq -r --arg p "${PROJECT}-" '.terminals[]?.splitTerminals[]?.name // empty | select(startswith($p)) | ltrimstr($p) | tonumber' "$JSON" 2>/dev/null | sort -n | tail -1)
+    NEXT_N=$((${MAX_N:-0} + 1))
+  else
+    NEXT_N=1
+  fi
+  DISPLAY_NAME="${PROJECT}-${NEXT_N}"
+
+  # Create pending file with BOTH windowId and displayName
+  # Format: "windowId displayName"
+  echo "$WINDOW $DISPLAY_NAME" > "$PENDING_DIR/$WINDOW"
+
+  # Spawn reconciler in background (will add pending entries to JSON)
+  "$HOME/.immorterm/scripts/screen-reconcile" &
+fi
+
+# Per-session log directory — must be defined before LOGFILE reference
+# Reuse existing directory for this window_id (survives date changes on respawn)
+EXISTING_SESSION_DIR=$(find "$LOGS_DIR" -maxdepth 1 -type d -name "*_${WINDOW}" ! -path "*/archive/*" -print -quit 2>/dev/null)
+if [[ -n "$EXISTING_SESSION_DIR" ]]; then
+  SESSION_LOG_DIR="$EXISTING_SESSION_DIR"
+  # Extract the original date from the directory name for env export (format: YYYY-MM-DD_windowId)
+  export IMMORTERM_SESSION_DATE="$(basename "$EXISTING_SESSION_DIR" | cut -d_ -f1)"
+else
+  export IMMORTERM_SESSION_DATE="$(date +%Y-%m-%d)"
+  SESSION_LOG_DIR="${LOGS_DIR}/${IMMORTERM_SESSION_DATE}_${WINDOW}"
+fi
+mkdir -p "$SESSION_LOG_DIR"
+
+LOGFILE="${SESSION_LOG_DIR}/raw.log"
+
+# Export environment BEFORE creating session so screen inherits it
+# These variables are available to backtick commands and the interactive shell
+export SCREEN_PROJECT_DIR="$PROJECT_DIR"
+export IMMORTERM_SCREEN_BINARY="$SCREEN"  # Needed by screen-mem to detect parent process
+export SCREEN_WINDOW_ID="$WINDOW"
+export SCREEN_WINDOW_NAME="$DISPLAY_NAME"
+export IMMORTERM_BASE_NAME="$DISPLAY_NAME"  # Immutable base name for title construction
+# IMMORTERM_RENAMES_DIR is set by VS Code extension (screen-integration.ts)
+# Re-export to ensure screen server process inherits it for title file notifications
+export IMMORTERM_RENAMES_DIR="${IMMORTERM_RENAMES_DIR:-$PROJECT_DIR/.immorterm/terminals/renames}"
+export IMMORTERM_SESSION="$SESSION"
+export IMMORTERM_LOG_DIR="$LOGS_DIR"
+
+# Log dump moved to NEW SESSION block only (see below).
+# For reattachment to existing sessions, screen's own scrollback is sufficient.
+# This prevents duplication: VS Code scrollback + screen scrollback showing same content.
+
+# ============================================================================
+# SESSION MANAGEMENT
+# ============================================================================
+
+# Check if a PID is alive AND healthy (not zombie, not stuck in uninterruptible sleep).
+# kill -0 alone returns true for UEs processes (uninterruptible sleep) — they exist but
+# ignore ALL signals including SIGHUP. Sending SIGHUP to recover a "Remote or dead"
+# session is pointless if the server is in UEs. ps -o stat= gives the real process state.
+is_pid_healthy() {
+  local pid="$1"
+  kill -0 "$pid" 2>/dev/null || return 1
+  local stat
+  stat=$(ps -o stat= -p "$pid" 2>/dev/null) || return 1
+  case "$stat" in
+    D*|U*|Z*) return 1 ;;  # D=uninterruptible, U=uninterruptible (macOS), Z=zombie
+  esac
+  return 0
+}
+
+# Find existing sessions matching our session name.
+# Returns the full "PID.name" identifier for unambiguous operations.
+# Prefers "Detached" sessions over "Dead/Remote" ones.
+# If multiple healthy sessions exist, returns the one with highest PID (most recent).
+#
+# Uses two methods and picks the best result:
+# 1. screen -ls: standard, gets session state (Detached/Attached/Dead)
+# 2. Direct socket check: globs ~/.screen/*.$name, verifies process healthy via is_pid_healthy
+#
+# Why both? screen -ls probes ALL sockets (O(N), N=45+) and under concurrent load
+# from multiple screen-auto scripts, it can miss entries entirely. The socket glob
+# is O(1) for a specific name and immune to concurrent screen operations.
+find_best_session() {
+  local name="$1"
+  local best_from_screenls=""
+
+  # Method 1: screen -ls (standard — gets Detached/Attached state)
+  local sessions
+  sessions=$("$SCREEN" -ls 2>/dev/null | grep -E "[0-9]+\.$name[[:space:]]" || true)
+
+  if [[ -n "$sessions" ]]; then
+    # Pick highest PID among all non-Dead sessions. Do NOT prefer Detached over
+    # Attached — we use "screen -D -r" to attach, which forcefully detaches any
+    # stale client. Preferring Detached caused a bug: when duplicates exist, the
+    # CORRECT session may be "Attached" (to a dead VS Code display) while the
+    # WRONG duplicate is "Detached", causing us to pick the wrong one.
+    # Only trust sessions in known-good states (Detached/Attached/Multi).
+    # "Remote or dead" is ambiguous — the process might be dead but screen
+    # hasn't confirmed yet. Method 2 (is_pid_healthy) handles liveness for those.
+    local healthy
+    healthy=$(echo "$sessions" | grep -E "Detached|Attached|Multi" | sort -t. -k1 -n -r | head -1 | awk '{print $1}')
+    if [[ -n "$healthy" ]]; then
+      # Final safety: verify the PID is actually alive
+      local check_pid="${healthy%%.*}"
+      if [[ -n "$check_pid" ]] && is_pid_healthy "$check_pid"; then
+        best_from_screenls="$healthy"
+      else
+        debug "screen -ls returned $healthy but PID $check_pid is dead — ignoring"
+      fi
+    fi
+
+    # Log when multiple healthy sessions exist (duplicate detection)
+    local count
+    count=$(echo "$sessions" | grep -cE "Detached|Attached|Multi" || true)
+    if [[ "$count" -gt 1 ]]; then
+      debug "WARNING: $count duplicate sessions for $name — picked $best_from_screenls"
+    fi
+  fi
+
+  # Method 2: Direct socket check — immune to concurrent screen operations.
+  # Globs only matching sockets instead of probing all 45+, and checks process
+  # liveness directly via is_pid_healthy. This catches sessions that screen -ls missed
+  # due to concurrent screen -D -r operations from other screen-auto scripts.
+  local best_socket_pid=0
+  local best_socket_entry=""
+  local screen_dir="${HOME}/.screen"
+
+  for socket in "$screen_dir/"*."$name"; do
+    [[ -S "$socket" ]] || continue  # must be a socket file
+    local basename="${socket##*/}"
+    local pid="${basename%%.*}"
+    if [[ -n "$pid" ]] && is_pid_healthy "$pid"; then
+      if [[ "$pid" -gt "$best_socket_pid" ]]; then
+        best_socket_pid="$pid"
+        best_socket_entry="$basename"
+      fi
+    else
+      # Dead socket — wipe it now to prevent orphan accumulation.
+      # Dead sockets confuse future searches and waste screen -X calls.
+      "$SCREEN" -wipe "$basename" &>/dev/null || true
+      debug "Wiped dead socket during search: $basename"
+    fi
+  done
+
+  # Pick the best result from either method — prefer highest PID (most recent)
+  if [[ -n "$best_from_screenls" ]] && [[ -n "$best_socket_entry" ]]; then
+    local screenls_pid="${best_from_screenls%%.*}"
+    if [[ "$best_socket_pid" -gt "$screenls_pid" ]]; then
+      debug "Socket check found newer session: $best_socket_entry (screen -ls had $best_from_screenls)"
+      echo "$best_socket_entry"
+    else
+      echo "$best_from_screenls"
+    fi
+    return 0
+  elif [[ -n "$best_from_screenls" ]]; then
+    echo "$best_from_screenls"
+    return 0
+  elif [[ -n "$best_socket_entry" ]]; then
+    debug "Socket fallback found session: $best_socket_entry (screen -ls missed it)"
+    echo "$best_socket_entry"
+    return 0
+  fi
+
+  # No healthy sessions - all are truly gone
+  return 1
+}
+
+# Clean up dead sessions to prevent accumulation
+# Only targets sessions that are truly "Dead ???" (process exited).
+# IMPORTANT: Do NOT delete socket files directly — a server that appears
+# temporarily unresponsive (e.g., blocked on display I/O) will recover
+# via SigChldHandler if its socket is still intact.  Deleting the socket
+# of a live-but-stuck server creates a permanent zombie.
+cleanup_dead_sessions() {
+  local name="$1"
+  local dead_sessions
+  # Only match "Dead" — NOT "Remote" which can be a transient state
+  dead_sessions=$("$SCREEN" -ls 2>/dev/null | grep -E "[0-9]+\.$name[[:space:]]" | grep "Dead" || true)
+
+  if [[ -n "$dead_sessions" ]]; then
+    debug "Found dead sessions for $name, cleaning up..."
+
+    echo "$dead_sessions" | while read -r line; do
+      local full_id
+      full_id=$(echo "$line" | awk '{print $1}')
+      if [[ -n "$full_id" ]]; then
+        # Extract PID and verify the process is truly dead before cleanup
+        local pid="${full_id%%.*}"
+        if [[ -n "$pid" ]] && ! is_pid_healthy "$pid"; then
+          # Process is genuinely dead — safe to clean up
+          "$SCREEN" -S "$full_id" -X quit &>/dev/null || true
+          debug "Cleaned up dead session: $full_id (pid $pid confirmed dead)"
+        else
+          debug "Skipping session $full_id — process $pid still alive (may recover)"
+        fi
+      fi
+    done
+
+    # Run screen -wipe to finalize cleanup of truly dead sockets
+    "$SCREEN" -wipe "$name" 2>/dev/null || true
+  fi
+}
+
+# Main session logic
+SESSION_IS_NEW=false
+FULL_SESSION_ID=""
+SKIP_CLEAR=false  # Don't clear screen for Claude sessions on reattachment
+
+# DISABLED: cleanup_dead_sessions causes two problems:
+# 1. Race condition: concurrent screen-auto scripts running screen -wipe
+#    simultaneously corrupts socket state, causing find_best_session to
+#    miss healthy sessions → creates duplicates → fires claude --resume
+# 2. Safety: sessions may appear "Dead" after VS Code closes (pty gone)
+#    but the screen server process is still alive and would recover on
+#    reattach via screen -D -RR. Wiping them permanently destroys
+#    sessions that ImmorTerm should preserve.
+# Dead socket cleanup is cosmetic — find_best_session ignores Dead sessions.
+# cleanup_dead_sessions "$SESSION"
+
+# Acquire per-session lock to prevent duplicate creation.
+# When VS Code restores 5+ terminals concurrently, all screen-auto scripts race
+# through find-or-create simultaneously. Without serialization, two scripts can
+# both see "no session" and both create new ones → duplicates.
+# The lock is released after session creation/discovery (before attach).
+LOCK_FILE="$HOME/.screen/.immorterm-lock-${SESSION}"
+exec 9>"$LOCK_FILE"
+flock 9
+
+# Now find the best healthy session to attach to
+FULL_SESSION_ID=$(find_best_session "$SESSION" || true)
+
+if [[ -z "$FULL_SESSION_ID" ]]; then
+  # No healthy session found - create a new one
+  SESSION_IS_NEW=true
+  debug "SESSION_IS_NEW=true for $SESSION (creating new screen)"
+
+  # Check if this terminal has a Claude session to auto-resume
+  # If so, skip log dump - Claude's TUI output is full of escape sequences
+  # and --resume will restore conversation context anyway
+  WILL_AUTO_RESUME=""
+  if [[ -n "$WINDOW" ]]; then
+    # Check registry.json first (unified source), fallback to restore-terminals.json (legacy)
+    WILL_AUTO_RESUME=$(jq -r --arg wid "$WINDOW" \
+      '.sessions[]? | select(.window_id == $wid) | .claude_session_id // empty' \
+      "$REGISTRY" 2>/dev/null)
+    if [[ -z "$WILL_AUTO_RESUME" ]]; then
+      WILL_AUTO_RESUME=$(jq -r --arg wid "$WINDOW" \
+        '.terminals[]?.splitTerminals[]? | select(.windowId == $wid) | .claudeSessionId // empty' \
+        "$JSON" 2>/dev/null)
+    fi
+  fi
+
+  # Dump log history to VS Code's native scroll buffer (NEW sessions only)
+  # Skip for Claude sessions - their TUI output doesn't render well and --resume restores context
+  # Prefer grid-based restoration (.grid.jsonl) over raw log filtering
+  # Check per-session dir first (new format), then flat file (old format)
+  GRID_LOG="${SESSION_LOG_DIR}/grid.jsonl"
+  if [[ ! -f "$GRID_LOG" ]]; then
+    GRID_LOG="$LOGS_DIR/${SESSION}.grid.jsonl"
+  fi
+  if [[ -z "$WILL_AUTO_RESUME" ]]; then
+    if [[ -f "$GRID_LOG" ]] && [[ -n "$IMMORTERM_AI" ]]; then
+      debug "Using grid-based restoration from $GRID_LOG"
+      "$IMMORTERM_AI" restore-dump "$GRID_LOG"
+    elif [[ -f "$LOGFILE" ]]; then
+      debug "Falling back to dump_filtered_log"
+      dump_filtered_log "$LOGFILE"
+    fi
+  elif [[ -n "$WILL_AUTO_RESUME" ]]; then
+    debug "Skipping log dump - Claude session will auto-resume"
+  fi
+
+  # Create new detached session with configurable scrollback buffer
+  # SCREEN_SCROLLBACK is set by VS Code extension from immorterm.scrollbackBuffer setting
+  # Shell will inherit SCREEN_PROJECT_DIR from this parent process
+  # NOTE: Do NOT use -L -Logfile here as it may truncate the existing log file!
+  # Per-project screenrc (has project's theme), fall back to global default
+  SCREENRC="$PROJECT_DIR/.immorterm/screenrc"
+  [[ -f "$SCREENRC" ]] || SCREENRC="$HOME/.immorterm/scripts/screenrc"
+
+  "$SCREEN" -dmS "$SESSION" -c "$SCREENRC" -h "${SCREEN_SCROLLBACK:-50000}"
+
+  # Get the full session ID of the newly created session
+  # Use fast polling instead of fixed sleep (typically completes in <50ms)
+  for attempt in 1 2 3 4 5; do
+    FULL_SESSION_ID=$(find_best_session "$SESSION" 2>/dev/null) && break
+    sleep 0.02  # 20ms between attempts, max 100ms total
+  done
+  [[ -z "$FULL_SESSION_ID" ]] && FULL_SESSION_ID="$SESSION"
+  debug "Created new session: $FULL_SESSION_ID"
+
+  # Enable raw logging AFTER session creation (appends, doesn't truncate)
+  # DEPRECATED: Raw .log files are superseded by structured logging (C binary FFI).
+  # Kept for one release as safety net fallback. Remove when FFI is confirmed stable.
+  "$SCREEN" -S "$FULL_SESSION_ID" -X logfile "$LOGFILE" &>/dev/null || true
+  "$SCREEN" -S "$FULL_SESSION_ID" -X log on &>/dev/null || true
+
+  # Structured logging: the C binary's Rust FFI writes .grid.jsonl/.cast/.ai.jsonl directly
+  # when IMMORTERM_LOG_DIR is set. The sidecar is only needed for old binaries without FFI.
+  if [[ -z "${IMMORTERM_LOG_DIR:-}" ]] && [[ -n "$IMMORTERM_AI" ]]; then
+    # Old C binary without FFI — launch sidecar to process raw .log into structured files
+    "$IMMORTERM_AI" log-process "$LOGFILE" &
+    SIDECAR_PID=$!
+    debug "Launched log sidecar PID=$SIDECAR_PID ($IMMORTERM_AI) for $LOGFILE"
+  elif [[ -n "${IMMORTERM_LOG_DIR:-}" ]]; then
+    debug "C binary FFI active — structured logging handled natively (no sidecar needed)"
+  else
+    debug "immorterm-ai not found — structured logging disabled (raw .log only)"
+  fi
+
+  # Set the screen window title immediately (before shell can override it)
+  "$SCREEN" -S "$FULL_SESSION_ID" -X title "$DISPLAY_NAME" &>/dev/null || true
+
+  # Set environment variables for backtick commands (screen's internal env, not shell env)
+  # This is required because backticks query screen's internal environment table, NOT shell exports
+  # All screen -X commands are optional — never abort on transient socket failures.
+  "$SCREEN" -S "$FULL_SESSION_ID" -X setenv IMMORTERM_SCREEN_BINARY "$SCREEN" &>/dev/null || true
+  [[ -n "${IMMORTERM_RENAMES_DIR:-}" ]] && "$SCREEN" -S "$FULL_SESSION_ID" -X setenv IMMORTERM_RENAMES_DIR "$IMMORTERM_RENAMES_DIR" &>/dev/null || true
+  "$SCREEN" -S "$FULL_SESSION_ID" -X setenv IMMORTERM_LOG_DIR "$LOGS_DIR" &>/dev/null || true
+  [[ -n "${IMMORTERM_SESSION_DATE:-}" ]] && "$SCREEN" -S "$FULL_SESSION_ID" -X setenv IMMORTERM_SESSION_DATE "$IMMORTERM_SESSION_DATE" &>/dev/null || true
+
+  # Note: shell-init.zsh is sourced automatically via ZDOTDIR/.zshrc (set in screenrc)
+
+  # If this terminal has a Claude session to auto-resume (already checked above)
+  if [[ -n "$WILL_AUTO_RESUME" ]]; then
+    debug "AUTO-RESUME: sending 'claude --resume $WILL_AUTO_RESUME' to $FULL_SESSION_ID"
+    # Auto-resume Claude session in this screen
+    "$SCREEN" -S "$FULL_SESSION_ID" -X stuff "claude --resume $WILL_AUTO_RESUME\n" &>/dev/null || true
+  fi
+else
+  debug "SESSION_IS_NEW=false for $SESSION (attaching to existing: $FULL_SESSION_ID)"
+  # Note: shell-init.zsh is sourced automatically via ZDOTDIR/.zshrc (set in screenrc)
+  # No need to inject commands - ZDOTDIR handles it for all sessions
+
+  # Shelved reattach: screen already has the correct display state.
+  # Skip all cleanup (log dump, scrollback clear, viewport clear) to preserve content.
+  if [[ "${IMMORTERM_REATTACH:-0}" == "1" ]]; then
+    debug "REATTACH shelved: preserving display state for $WINDOW"
+    SKIP_CLEAR=true
+
+    # Auto-resume hibernated Claude session if one was saved during shelving
+    if [[ -n "${IMMORTERM_CLAUDE_RESUME_ID:-}" ]]; then
+      debug "REATTACH: scheduling auto-resume for Claude session $IMMORTERM_CLAUDE_RESUME_ID"
+      # Background job survives exec (already forked before exec replaces this process)
+      # Same pattern as hardstatus restore (see below)
+      (
+        sleep 0.8  # Wait for screen attachment to settle
+        "$SCREEN" -S "$FULL_SESSION_ID" -X stuff "claude --resume $IMMORTERM_CLAUDE_RESUME_ID\n" &>/dev/null || true
+        debug "AUTO-RESUMED hibernated Claude: $IMMORTERM_CLAUDE_RESUME_ID in $FULL_SESSION_ID"
+      ) &
+    fi
+
+  # For reattachment: check if this is an interactive session (has claudeSessionId)
+  # Interactive sessions (Claude) redraw themselves - dumping log causes duplication
+  # Non-interactive sessions need log dump to restore scrollback context
+  # Check registry.json first (unified source), fallback to restore-terminals.json (legacy)
+  else
+    CLAUDE_SESSION_ID=$(jq -r --arg wid "$WINDOW" \
+      '.sessions[]? | select(.window_id == $wid) | .claude_session_id // empty' \
+      "$REGISTRY" 2>/dev/null)
+    if [[ -z "$CLAUDE_SESSION_ID" ]]; then
+      CLAUDE_SESSION_ID=$(jq -r --arg wid "$WINDOW" \
+        '.terminals[]?.splitTerminals[]? | select(.windowId == $wid) | .claudeSessionId // empty' \
+        "$JSON" 2>/dev/null)
+    fi
+
+    if [[ -z "$CLAUDE_SESSION_ID" ]]; then
+      GRID_LOG="${SESSION_LOG_DIR}/grid.jsonl"
+      if [[ ! -f "$GRID_LOG" ]]; then
+        GRID_LOG="$LOGS_DIR/${SESSION}.grid.jsonl"
+      fi
+      if [[ -f "$GRID_LOG" ]] && [[ -n "$IMMORTERM_AI" ]]; then
+        debug "REATTACH: using grid-based restoration from $GRID_LOG"
+        "$IMMORTERM_AI" restore-dump "$GRID_LOG"
+      elif [[ -f "$LOGFILE" ]]; then
+        debug "REATTACH non-interactive: dumping log for $WINDOW"
+        dump_filtered_log "$LOGFILE"
+      fi
+    else
+      debug "REATTACH interactive (Claude): skipping log dump and clear for $WINDOW"
+      SKIP_CLEAR=true  # Claude sessions need their display intact - they don't auto-redraw
+    fi
+  fi
+
+  # Ensure environment variables are set (may have been lost on screen restart).
+  # All screen -X commands are optional setup — never abort the script on failure.
+  # Under concurrent load (7+ scripts), screen sockets can be transiently busy.
+  "$SCREEN" -S "$FULL_SESSION_ID" -X setenv IMMORTERM_SCREEN_BINARY "$SCREEN" &>/dev/null || true
+  [[ -n "${IMMORTERM_RENAMES_DIR:-}" ]] && "$SCREEN" -S "$FULL_SESSION_ID" -X setenv IMMORTERM_RENAMES_DIR "$IMMORTERM_RENAMES_DIR" &>/dev/null || true
+  "$SCREEN" -S "$FULL_SESSION_ID" -X setenv IMMORTERM_LOG_DIR "$LOGS_DIR" &>/dev/null || true
+  [[ -n "${IMMORTERM_SESSION_DATE:-}" ]] && "$SCREEN" -S "$FULL_SESSION_ID" -X setenv IMMORTERM_SESSION_DATE "$IMMORTERM_SESSION_DATE" &>/dev/null || true
+fi
+
+# Release per-session lock — the session is now found or created.
+# Other scripts waiting on the same session name will proceed and find it.
+# Must close BEFORE exec screen, otherwise screen inherits the fd and holds
+# the lock for the entire session lifetime.
+exec 9>&-
+
+# Set VS Code terminal tab name BEFORE exec screen
+# OSC 0 sequence sets terminal title - must be sent before screen takes over
+# otherwise VS Code shows "screen-5.0.1" (the process name)
+printf '\033]0;%s\007' "$DISPLAY_NAME"
+
+# Disable screen's internal scrollback dump (use log file approach instead)
+# All screen -X commands below are optional — never abort on transient socket failures.
+"$SCREEN" -S "$FULL_SESSION_ID" -X scrollback_dump off &>/dev/null || true
+
+# Clear screen's scrollback buffer AND display to prevent duplicate content
+# The scrollback accumulates previous renders (Claude Code redraws on resize)
+# BUT: Skip for Claude sessions - they don't auto-redraw and clearing blanks the display
+if [[ "$SKIP_CLEAR" != "true" ]]; then
+  # Reset scrollback to 0 then restore to clear it completely
+  "$SCREEN" -S "$FULL_SESSION_ID" -X scrollback 0 &>/dev/null || true
+  "$SCREEN" -S "$FULL_SESSION_ID" -X scrollback "${SCREEN_SCROLLBACK:-50000}" &>/dev/null || true
+
+  # Temporarily hide the hardstatus bar before attaching.
+  # With ti@:te@, screen's hardstatus rendering (cursor-jump to last row, write, jump back)
+  # goes through VS Code's primary buffer. During the reattach settling phase, multiple
+  # redraws (initial attach + shell-init precmd + title updates) each push a full viewport
+  # of blank lines + hardstatus into VS Code's scrollback. Hiding it prevents this pollution.
+  "$SCREEN" -S "$FULL_SESSION_ID" -X hardstatus ignore &>/dev/null || true
+  debug "Temporarily hid hardstatus for clean reattach"
+
+  # Schedule post-attach cleanup: restore hardstatus + move prompt to top
+  (
+    sleep 0.8  # Wait for attachment + shell-init to complete
+    # Restore the hardstatus bar (string is preserved, just visibility toggled)
+    "$SCREEN" -S "$FULL_SESSION_ID" -X hardstatus alwayslastline &>/dev/null
+    # Send Ctrl+L to the shell to clear display and redraw prompt at row 1
+    # This fixes the "prompt in middle of screen" issue caused by screen restoring
+    # the exact cursor row from the pre-restart display state
+    "$SCREEN" -S "$FULL_SESSION_ID" -X stuff $'\x0c' &>/dev/null
+    debug "Restored hardstatus and refreshed prompt for $FULL_SESSION_ID"
+  ) &
+else
+  debug "Skipped clear for Claude session $FULL_SESSION_ID"
+
+  # For Claude sessions: schedule a delayed hardstatus refresh after reattachment.
+  # This ensures the status bar is redrawn even if no resize occurs (same dimensions).
+  # The background job waits for attachment to complete, then forces a refresh.
+  (
+    sleep 0.3  # Wait for attachment to complete
+    "$SCREEN" -S "$FULL_SESSION_ID" -X redisplay &>/dev/null
+    debug "Forced redisplay for Claude session $FULL_SESSION_ID"
+  ) &
+fi
+
+# Attach to the session using full session ID to avoid ambiguity.
+# Use -D -r (NOT -D -RR) to prevent creating empty duplicate sessions.
+# -RR has a create-on-failure fallback: if the session is transiently "Dead ???"
+# during VS Code reload, -RR creates a new empty session named after the full
+# PID.name, e.g., "34151.55208.immorterm-XXX" — wiping the user's content.
+# -D -r detaches stale clients and reattaches, but FAILS instead of creating.
+# We retry to handle transient "Dead ???" states (sessions recover in <1s).
+debug "Attaching to: $FULL_SESSION_ID"
+
+# Clear the visible viewport (not scrollback) before screen takes over.
+# With ti@:te@ disabling alternate screen, screen's full-display redraw on reattach
+# goes to VS Code's primary buffer. Without this clear, screen's cursor positioning
+# and hardstatus rendering mix with log dump text still in the viewport, pushing
+# garbled content (hardstatus bars, truncated lines) into scrollback.
+# ESC[H = cursor home, ESC[2J = erase visible area only (scrollback preserved).
+if [[ "$SKIP_CLEAR" != "true" ]]; then
+  printf '\033[H\033[2J'
+fi
+
+# Retry with -D -r (not -RR!) to handle transient "Dead ???" states.
+# When VS Code closes, screen's client disconnects but the server may not
+# process the disconnect immediately — reporting "Dead ???" or stale "Attached".
+# SIGHUP is screen's standard "detach all clients" signal. Sending it directly
+# to the server PID forces immediate client cleanup and socket recovery,
+# without killing the session or any processes inside it.
+ATTACH_PID="${FULL_SESSION_ID%%.*}"
+MAX_RETRIES=4
+RETRY_DELAY=0.25
+
+# Fast path: on the vast majority of reloads the session is healthy and in
+# Attached/Detached state. Skip the state-check + SIGHUP retry overhead and
+# try "screen -D -r" directly — it handles stale-Attached sockets on its own
+# via the forced-detach flag. Only fall through to the slow state-aware
+# retry loop if the fast attach fails.
+if is_pid_healthy "$ATTACH_PID"; then
+  debug "Fast-path attach: PID $ATTACH_PID healthy, trying -D -r directly"
+  if "$SCREEN" -D -r -S "$FULL_SESSION_ID" 2>>"$DEBUG_LOG"; then
+    exit 0
+  fi
+  debug "Fast-path attach failed — falling through to state-aware retry"
+fi
+
+# Attach with state-aware retry. Only call "screen -D -r" on sessions in a
+# known-good state (Detached/Attached/Multi). Any other state — "Dead ???",
+# "Remote or dead", empty, etc — prints ugly diagnostic output to stdout and
+# always fails. Use SIGHUP to recover stale sockets instead.
+for attempt in $(seq 1 $MAX_RETRIES); do
+  _state=$("$SCREEN" -ls 2>/dev/null | grep -F "$FULL_SESSION_ID" || true)
+
+  # Whitelist: only attempt attach on known-good states
+  if [[ "$_state" != *"Detached"* && "$_state" != *"Attached"* && "$_state" != *"Multi"* ]]; then
+    if is_pid_healthy "$ATTACH_PID"; then
+      debug "Attempt $attempt/$MAX_RETRIES: bad state (${_state##*$'\t'}), PID $ATTACH_PID alive — sending SIGHUP"
+      kill -HUP "$ATTACH_PID" 2>/dev/null || true
+      sleep "$RETRY_DELAY"
+      continue
+    else
+      debug "Attempt $attempt/$MAX_RETRIES: bad state (${_state##*$'\t'}), PID $ATTACH_PID gone — skipping to fallback"
+      break
+    fi
+  fi
+
+  # Session is in a usable state — attempt attach
+  debug "Attach attempt $attempt/$MAX_RETRIES: $FULL_SESSION_ID (state: ${_state##*$'\t'})"
+  if "$SCREEN" -D -r -S "$FULL_SESSION_ID" 2>>"$DEBUG_LOG"; then
+    exit 0
+  fi
+
+  debug "Attach failed (attempt $attempt), retrying in ${RETRY_DELAY}s..."
+  sleep "$RETRY_DELAY"
+done
+
+# Session is genuinely dead — all retry attempts failed. Create a fresh one.
+# Replicate the SESSION_IS_NEW setup: log dump, env vars, Claude auto-resume.
+OLD_FAILED_SESSION="$FULL_SESSION_ID"
+debug "Session $OLD_FAILED_SESSION is permanently dead — creating replacement"
+SCREENRC="$PROJECT_DIR/.immorterm/screenrc"
+[[ -f "$SCREENRC" ]] || SCREENRC="$HOME/.immorterm/scripts/screenrc"
+
+# Determine if there's a Claude session to auto-resume (same logic as SESSION_IS_NEW path)
+FALLBACK_RESUME=""
+if [[ -n "${IMMORTERM_CLAUDE_RESUME_ID:-}" ]]; then
+  FALLBACK_RESUME="$IMMORTERM_CLAUDE_RESUME_ID"
+elif [[ -n "$WINDOW" ]]; then
+  FALLBACK_RESUME=$(jq -r --arg wid "$WINDOW" \
+    '.sessions[]? | select(.window_id == $wid) | .claude_session_id // empty' \
+    "$REGISTRY" 2>/dev/null)
+fi
+
+# Dump log history to VS Code's native scroll buffer (restore context for the fresh session)
+GRID_LOG="${SESSION_LOG_DIR}/grid.jsonl"
+[[ -f "$GRID_LOG" ]] || GRID_LOG="$LOGS_DIR/${SESSION}.grid.jsonl"
+if [[ -z "$FALLBACK_RESUME" ]]; then
+  if [[ -f "$GRID_LOG" ]] && [[ -n "$IMMORTERM_AI" ]]; then
+    debug "Fallback: grid-based log restoration from $GRID_LOG"
+    "$IMMORTERM_AI" restore-dump "$GRID_LOG" 2>/dev/null || true
+  elif [[ -f "$LOGFILE" ]]; then
+    debug "Fallback: filtered log restoration"
+    dump_filtered_log "$LOGFILE" 2>/dev/null || true
+  fi
+fi
+
+# Create the replacement session
+"$SCREEN" -dmS "$SESSION" -c "$SCREENRC" -h "${SCREEN_SCROLLBACK:-50000}"
+
+# Find the newly created session — must exclude the old failed one.
+# find_best_session picks highest PID, which would return the OLD dead session
+# (higher PID) instead of our fresh replacement. Search sockets directly and skip it.
+FULL_SESSION_ID=""
+for try in 1 2 3 4 5; do
+  for socket in "$HOME/.screen/"*."$SESSION"; do
+    [[ -S "$socket" ]] || continue
+    entry="${socket##*/}"
+    [[ "$entry" == "$OLD_FAILED_SESSION" ]] && continue
+    pid="${entry%%.*}"
+    if [[ -n "$pid" ]] && is_pid_healthy "$pid"; then
+      FULL_SESSION_ID="$entry"
+      break 2
+    fi
+  done
+  sleep 0.02
+done
+[[ -z "$FULL_SESSION_ID" ]] && FULL_SESSION_ID="$SESSION"
+debug "Created replacement session: $FULL_SESSION_ID (excluded old: $OLD_FAILED_SESSION)"
+
+# Clean up orphan sessions with the same name.
+# We're in the fallback path — the real session is confirmed dead.
+# Any OTHER sessions with this name are orphans from previous fallbacks.
+# Kill live orphans and wipe dead ones to prevent future misidentification
+# (find_best_session returning a stale orphan instead of going to fallback).
+for socket in "$HOME/.screen/"*."$SESSION"; do
+  [[ -S "$socket" ]] || continue
+  entry="${socket##*/}"
+  [[ "$entry" == "$FULL_SESSION_ID" ]] && continue  # skip our new session
+  pid="${entry%%.*}"
+  if is_pid_healthy "$pid"; then
+    debug "Killing orphan session: $entry (PID $pid)"
+    kill "$pid" &>/dev/null || true
+  fi
+  "$SCREEN" -wipe "$entry" &>/dev/null || true
+  debug "Cleaned up orphan: $entry"
+done
+
+# Set env vars (same as SESSION_IS_NEW path — all guarded against set -e)
+"$SCREEN" -S "$FULL_SESSION_ID" -X setenv IMMORTERM_LOG_DIR "$LOGS_DIR" &>/dev/null || true
+[[ -n "${IMMORTERM_SESSION_DATE:-}" ]] && "$SCREEN" -S "$FULL_SESSION_ID" -X setenv IMMORTERM_SESSION_DATE "$IMMORTERM_SESSION_DATE" &>/dev/null || true
+[[ -n "$WINDOW" ]] && "$SCREEN" -S "$FULL_SESSION_ID" -X setenv IMMORTERM_WINDOW_ID "$WINDOW" &>/dev/null || true
+"$SCREEN" -S "$FULL_SESSION_ID" -X setenv IMMORTERM_SCREEN_BINARY "$SCREEN" &>/dev/null || true
+[[ -n "${IMMORTERM_RENAMES_DIR:-}" ]] && "$SCREEN" -S "$FULL_SESSION_ID" -X setenv IMMORTERM_RENAMES_DIR "$IMMORTERM_RENAMES_DIR" &>/dev/null || true
+
+# Enable logging
+"$SCREEN" -S "$FULL_SESSION_ID" -X logfile "$LOGFILE" &>/dev/null || true
+"$SCREEN" -S "$FULL_SESSION_ID" -X log on &>/dev/null || true
+
+# Auto-resume Claude if applicable
+if [[ -n "$FALLBACK_RESUME" ]]; then
+  debug "Fallback: auto-resuming Claude session $FALLBACK_RESUME in $FULL_SESSION_ID"
+  "$SCREEN" -S "$FULL_SESSION_ID" -X stuff "claude --resume $FALLBACK_RESUME\n" &>/dev/null || true
+fi
+
+# Now attach to the fresh session (exec is safe here — this IS a fresh session we just created)
+exec "$SCREEN" -D -r -S "$FULL_SESSION_ID"

@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Claude Stats Reader for Screen Status Bar
+# Called by screen backtick command to display Claude process stats
+#
+# Reads claudeStats from restore-terminals.json and formats for display
+# Output format: "240M 5% 1h23m" (memory, CPU, runtime)
+#
+# Optimistic Timer Updates:
+# - Extension writes startTime to JSON every 30 seconds
+# - This script runs every 5 seconds via screen backtick
+# - Runtime is calculated as NOW - startTime for continuous updates
+
+set -euo pipefail
+
+# Get window ID from screen environment (set by screen-auto)
+WINDOW_ID="${SCREEN_WINDOW_ID:-}"
+PROJECT_DIR="${SCREEN_PROJECT_DIR:-}"
+
+if [[ -z "$WINDOW_ID" ]] || [[ -z "$PROJECT_DIR" ]]; then
+  exit 0
+fi
+
+JSON="$PROJECT_DIR/.immorterm/restore-terminals.json"
+
+if [[ ! -f "$JSON" ]]; then
+  exit 0
+fi
+
+# Extract stats for this window using jq
+STATS=$(jq -r --arg wid "$WINDOW_ID" '
+  .terminals[]?.splitTerminals[]?
+  | select(.windowId == $wid)
+  | .claudeStats // empty
+' "$JSON" 2>/dev/null)
+
+if [[ -z "$STATS" || "$STATS" == "null" ]]; then
+  exit 0  # No Claude running
+fi
+
+# Parse stats
+RSS=$(echo "$STATS" | jq -r '.rss // 0')
+CPU=$(echo "$STATS" | jq -r '.cpu // 0')
+START_TIME=$(echo "$STATS" | jq -r '.startTime // 0')
+
+# Validate numeric values
+if ! [[ "$RSS" =~ ^[0-9]+$ ]]; then RSS=0; fi
+if ! [[ "$START_TIME" =~ ^[0-9]+$ ]]; then START_TIME=0; fi
+
+# Calculate runtime from startTime (optimistic update)
+# This allows the timer to update every 5 seconds (backtick refresh)
+# instead of waiting for the 30-second extension sync
+NOW=$(date +%s)
+if (( START_TIME > 0 )); then
+  RUNTIME=$((NOW - START_TIME))
+else
+  RUNTIME=0
+fi
+
+# Format memory (KB -> MB or GB)
+if (( RSS >= 1048576 )); then
+  MEM=$(awk "BEGIN {printf \"%.1fG\", $RSS/1048576}")
+elif (( RSS >= 1024 )); then
+  MEM="$((RSS / 1024))M"
+else
+  MEM="${RSS}K"
+fi
+
+# Format runtime (seconds -> human readable)
+if (( RUNTIME >= 3600 )); then
+  H=$((RUNTIME / 3600))
+  M=$(((RUNTIME % 3600) / 60))
+  TIME="${H}h${M}m"
+elif (( RUNTIME >= 60 )); then
+  TIME="$((RUNTIME / 60))m"
+else
+  TIME="${RUNTIME}s"
+fi
+
+# Output: "AI: 240M 5% 1h23m"
+printf "AI: %s %.0f%% %s " "$MEM" "$CPU" "$TIME"

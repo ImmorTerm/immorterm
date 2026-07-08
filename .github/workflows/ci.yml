@@ -1,0 +1,71 @@
+# CI — build + test the public ImmorTerm components on every push / PR.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typescript:
+    name: TypeScript (build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build shared libs (dist consumers need them)
+        run: |
+          (cd libs/design-tokens && bun run build) 2>/dev/null || true
+          (cd libs/menu-data && bun run build) 2>/dev/null || true
+
+      - name: Compile extension
+        run: bun run build:extension
+
+      - name: Build CLI
+        run: bun run build:cli
+
+      - name: Test CLI
+        run: bun run --cwd apps/immorterm test:run
+
+      - name: Test extension
+        run: bun run --cwd apps/extension test:run
+
+  rust:
+    name: Rust engine (check + clippy + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check + clippy (native crates)
+        run: bun run lint:immorterm-ai
+
+      - name: Clippy (wasm crate)
+        run: bun run lint:immorterm-ai:wasm
+
+      - name: Test (core + render)
+        run: bun run test:immorterm-ai

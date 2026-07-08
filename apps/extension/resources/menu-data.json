@@ -1,0 +1,550 @@
+{
+  "menuItems": [
+    {
+      "id": "wizard",
+      "label": "Setup Wizard",
+      "desc": "Configure binary, memory, and services"
+    },
+    {
+      "id": "services",
+      "label": "Services",
+      "desc": "Manage and control ImmorTerm services"
+    },
+    {
+      "id": "insights",
+      "label": "Insights",
+      "desc": "View proactive intelligence stats"
+    },
+    {
+      "id": "doctor",
+      "label": "Diagnostics",
+      "desc": "Run health checks on all components"
+    },
+    {
+      "id": "logs",
+      "label": "Log Explorer",
+      "desc": "Browse terminal session logs"
+    },
+    {
+      "id": "pro",
+      "label": "Pro",
+      "desc": "Upgrade or manage your Pro subscription"
+    },
+    {
+      "id": "theme",
+      "label": "Theme",
+      "desc": "Change the banner and status bar theme"
+    }
+  ],
+  "serviceDefs": [
+    {
+      "id": "memory",
+      "name": "ImmorTerm Memory",
+      "configKey": "memory",
+      "desc": "Persistent AI memory — remembers decisions, context, and lessons across sessions",
+      "proOnly": false,
+      "canStartStop": true
+    },
+    {
+      "id": "gateway",
+      "name": "MCP Gateway",
+      "configKey": "mcpGateway",
+      "desc": "Shared MCP server proxy — reduces memory ~90% by deduplicating tool processes",
+      "proOnly": false,
+      "canStartStop": true
+    }
+  ],
+  "licenseItemsPro": [
+    {
+      "id": "status",
+      "label": "View Status",
+      "desc": "Show current license info"
+    },
+    {
+      "id": "deactivate",
+      "label": "Deactivate (Transfer)",
+      "desc": "Move license to another machine"
+    },
+    {
+      "id": "pro-page",
+      "label": "Visit immorterm.com/pro",
+      "desc": "Manage your subscription online"
+    }
+  ],
+  "licenseItemsFree": [
+    {
+      "id": "upgrade",
+      "label": "Upgrade to Pro",
+      "desc": "Unlock unlimited memory, knowledge packs, and more"
+    },
+    {
+      "id": "activate",
+      "label": "Activate Key",
+      "desc": "Enter a license key"
+    },
+    {
+      "id": "status",
+      "label": "View Status",
+      "desc": "Show current license info"
+    }
+  ],
+  "proItemsActive": [
+    {
+      "id": "status",
+      "label": "View Status",
+      "desc": "Show current license info"
+    },
+    {
+      "id": "deactivate",
+      "label": "Deactivate (Transfer)",
+      "desc": "Move license to another machine"
+    },
+    {
+      "id": "pro-page",
+      "label": "Visit immorterm.com/pro",
+      "desc": "Manage your subscription online"
+    }
+  ],
+  "proItemsFree": [
+    {
+      "id": "upgrade",
+      "label": "Upgrade to Pro",
+      "desc": "Unlock unlimited memory, knowledge packs, and more"
+    },
+    {
+      "id": "activate",
+      "label": "Activate Key",
+      "desc": "Enter a license key"
+    },
+    {
+      "id": "status",
+      "label": "View Status",
+      "desc": "Show current license info"
+    }
+  ],
+  "themes": [
+    {
+      "name": "Purple Haze",
+      "statusBarStops": [
+        "#2D004D",
+        "#3D1A6D",
+        "#4D2A7D",
+        "#5B2C8A",
+        "#6B3FA0",
+        "#7B52B8",
+        "#8B008B"
+      ],
+      "fgAccent": "#E0B0FF",
+      "fg": "#FFFFFF",
+      "label": "🟣 Purple Haze",
+      "description": "Purple → Violet gradient"
+    },
+    {
+      "name": "Ocean Depths",
+      "statusBarStops": [
+        "#001F3F",
+        "#003366",
+        "#00447A",
+        "#004C8C",
+        "#0066B3",
+        "#0080D9",
+        "#00A0E0"
+      ],
+      "fgAccent": "#87CEEB",
+      "fg": "#FFFFFF",
+      "label": "🔵 Ocean Depths",
+      "description": "Deep blue → Teal cool"
+    },
+    {
+      "name": "Aurora Borealis",
+      "statusBarStops": [
+        "#020B1A",
+        "#051832",
+        "#082E46",
+        "#0C4550",
+        "#105E54",
+        "#1C8B62",
+        "#2ECC71"
+      ],
+      "fgAccent": "#7DFFC3",
+      "fg": "#E0FFF4",
+      "label": "🌌 Aurora Borealis",
+      "description": "Dark → Green shimmer"
+    },
+    {
+      "name": "Solar Flare",
+      "statusBarStops": [
+        "#1A0800",
+        "#331400",
+        "#4D2200",
+        "#6B3500",
+        "#884C00",
+        "#B86B00",
+        "#FF8C00"
+      ],
+      "fgAccent": "#FFD700",
+      "fg": "#FFFFFF",
+      "label": "☀️ Solar Flare",
+      "description": "Dark amber → Blazing gold"
+    },
+    {
+      "name": "Cyberpunk",
+      "statusBarStops": [
+        "#0D0221",
+        "#1A0A3E",
+        "#240E4C",
+        "#2D1259",
+        "#541388",
+        "#7B1FA2",
+        "#FF006E"
+      ],
+      "fgAccent": "#FF00FF",
+      "fg": "#00FFFF",
+      "label": "💜 Cyberpunk",
+      "description": "Neon purple → Magenta glow"
+    },
+    {
+      "name": "Neon Tokyo",
+      "statusBarStops": [
+        "#080011",
+        "#140828",
+        "#281044",
+        "#421860",
+        "#661E74",
+        "#AA1E6E",
+        "#FF2975"
+      ],
+      "fgAccent": "#FFE54C",
+      "fg": "#00FFE5",
+      "label": "🏙️ Neon Tokyo",
+      "description": "Midnight → Neon pink city"
+    },
+    {
+      "name": "Dracula",
+      "statusBarStops": [
+        "#21222C",
+        "#282A36",
+        "#2E303E",
+        "#343746",
+        "#44475A",
+        "#6272A4",
+        "#BD93F9"
+      ],
+      "fgAccent": "#FF79C6",
+      "fg": "#F8F8F2",
+      "label": "🧛 Dracula",
+      "description": "Classic Dracula color scheme"
+    },
+    {
+      "name": "Matrix",
+      "statusBarStops": [
+        "#000000",
+        "#001500",
+        "#002A00",
+        "#004200",
+        "#005E00",
+        "#008B00",
+        "#00FF41"
+      ],
+      "fgAccent": "#33FF77",
+      "fg": "#00FF41",
+      "label": "💊 Matrix",
+      "description": "Black → Green digital rain"
+    },
+    {
+      "name": "Synthwave",
+      "statusBarStops": [
+        "#1A1A2E",
+        "#262640",
+        "#2C2C49",
+        "#323252",
+        "#4A3F6B",
+        "#614385",
+        "#FF2E97"
+      ],
+      "fgAccent": "#00F3FF",
+      "fg": "#FFFFFF",
+      "label": "🌆 Synthwave",
+      "description": "Retro purple → Electric cyan"
+    },
+    {
+      "name": "Rainbow",
+      "statusBarStops": [
+        "#8B0000",
+        "#8B4500",
+        "#6B6B00",
+        "#006400",
+        "#00008B",
+        "#4B0082",
+        "#800080"
+      ],
+      "fgAccent": "#FFD700",
+      "fg": "#FFFFFF",
+      "label": "🌈 Rainbow",
+      "description": "Full spectrum gradient"
+    },
+    {
+      "name": "Sunset Glow",
+      "statusBarStops": [
+        "#4A1C1C",
+        "#6B2D2D",
+        "#7E3636",
+        "#8C3E3E",
+        "#AD4F4F",
+        "#CE6060",
+        "#E07020"
+      ],
+      "fgAccent": "#FFD700",
+      "fg": "#FFFFFF",
+      "label": "🟠 Sunset Glow",
+      "description": "Warm red → Gold horizon"
+    },
+    {
+      "name": "Glacier",
+      "statusBarStops": [
+        "#06111C",
+        "#0E2240",
+        "#163560",
+        "#224D7E",
+        "#35689A",
+        "#4A8AB5",
+        "#7EC8E3"
+      ],
+      "fgAccent": "#B4F0FF",
+      "fg": "#F0F8FF",
+      "label": "🏔️ Glacier",
+      "description": "Frozen blue → Ice white"
+    },
+    {
+      "name": "Rose Gold",
+      "statusBarStops": [
+        "#3D1F2B",
+        "#5C2E41",
+        "#6C364C",
+        "#7B3D57",
+        "#9A4C6D",
+        "#B95B83",
+        "#D86A99"
+      ],
+      "fgAccent": "#FFB6C1",
+      "fg": "#FFFFFF",
+      "label": "🩷 Rose Gold",
+      "description": "Deep rose → Pink bloom"
+    },
+    {
+      "name": "Monochrome Dark",
+      "statusBarStops": [
+        "#000000",
+        "#1A1A1A",
+        "#2D2D2D",
+        "#404040",
+        "#555555",
+        "#6A6A6A",
+        "#808080"
+      ],
+      "fgAccent": "#CCCCCC",
+      "fg": "#FFFFFF",
+      "label": "⬛ Monochrome Dark",
+      "description": "Clean black → Gray minimal"
+    },
+    {
+      "name": "Monochrome Light",
+      "statusBarStops": [
+        "#FFFFFF",
+        "#F0F0F0",
+        "#E0E0E0",
+        "#D0D0D0",
+        "#C0C0C0",
+        "#B0B0B0",
+        "#A0A0A0"
+      ],
+      "fgAccent": "#333333",
+      "fg": "#000000",
+      "label": "⬜ Monochrome Light",
+      "description": "White → Silver light mode"
+    },
+    {
+      "name": "Vaporwave",
+      "statusBarStops": [
+        "#0A1520",
+        "#1A1E30",
+        "#2E2440",
+        "#442A52",
+        "#603066",
+        "#983878",
+        "#FF71CE"
+      ],
+      "fgAccent": "#01CDFE",
+      "fg": "#00FFD4",
+      "label": "📼 Vaporwave",
+      "description": "Retro purple → Pink aesthetic"
+    },
+    {
+      "name": "Ember",
+      "statusBarStops": [
+        "#1A0A00",
+        "#2E1400",
+        "#441E08",
+        "#5C2A10",
+        "#763818",
+        "#994520",
+        "#D4760A"
+      ],
+      "fgAccent": "#FFB84D",
+      "fg": "#FFF5E6",
+      "label": "🔥 Ember",
+      "description": "Smoldering dark → Warm amber"
+    },
+    {
+      "name": "Electric Lime",
+      "statusBarStops": [
+        "#050A00",
+        "#101C05",
+        "#1E3008",
+        "#2E4610",
+        "#406018",
+        "#588020",
+        "#84CC16"
+      ],
+      "fgAccent": "#BEFF5A",
+      "fg": "#F0FFF0",
+      "label": "⚡ Electric Lime",
+      "description": "Dark forest → Bright lime"
+    },
+    {
+      "name": "Tidal",
+      "statusBarStops": [
+        "#020A18",
+        "#061530",
+        "#0A2848",
+        "#104060",
+        "#186078",
+        "#208890",
+        "#2DD4BF"
+      ],
+      "fgAccent": "#48D1CC",
+      "fg": "#E0FFFF",
+      "label": "🌊 Tidal",
+      "description": "Deep ocean → Teal wave"
+    },
+    {
+      "name": "Amber",
+      "statusBarStops": [
+        "#0E0A00",
+        "#1E1800",
+        "#302800",
+        "#483C00",
+        "#665200",
+        "#887000",
+        "#BFA200"
+      ],
+      "fgAccent": "#FFD700",
+      "fg": "#FFFDD0",
+      "label": "🟡 Amber",
+      "description": "Dark gold → Bright amber"
+    },
+    {
+      "name": "Molten",
+      "statusBarStops": [
+        "#100004",
+        "#200810",
+        "#381018",
+        "#501820",
+        "#702020",
+        "#983028",
+        "#B83020"
+      ],
+      "fgAccent": "#FF6840",
+      "fg": "#FFD8C8",
+      "label": "🌋 Molten",
+      "description": "Black lava → Fiery red"
+    },
+    {
+      "name": "Delulus Club",
+      "statusBarStops": [
+        "#2D1864",
+        "#4A26A8",
+        "#6B3FD6",
+        "#3BC43A",
+        "#3BC43A",
+        "#3BC43A",
+        "#3BC43A"
+      ],
+      "fgAccent": "#F4C21E",
+      "fg": "#FBF7F0",
+      "label": "🌱 Delulus Club",
+      "description": "Indigo → Purple → dominant Green"
+    },
+    {
+      "name": "Hot Pink",
+      "statusBarStops": [
+        "#14000A",
+        "#260012",
+        "#3D001E",
+        "#57002B",
+        "#7A003C",
+        "#AD0052",
+        "#E0218A"
+      ],
+      "fgAccent": "#FF4FA3",
+      "fg": "#FFD9EC",
+      "label": "💗 Hot Pink",
+      "description": "Black → Hot magenta glow"
+    }
+  ],
+  "themeNames": [
+    "Purple Haze",
+    "Ocean Depths",
+    "Aurora Borealis",
+    "Solar Flare",
+    "Cyberpunk",
+    "Neon Tokyo",
+    "Dracula",
+    "Matrix",
+    "Synthwave",
+    "Rainbow",
+    "Sunset Glow",
+    "Glacier",
+    "Rose Gold",
+    "Monochrome Dark",
+    "Monochrome Light",
+    "Vaporwave",
+    "Ember",
+    "Electric Lime",
+    "Tidal",
+    "Amber",
+    "Molten",
+    "Delulus Club",
+    "Hot Pink"
+  ],
+  "freeThemeNames": {},
+  "characters": [
+    {
+      "id": "default",
+      "label": "🤖 Default",
+      "description": "Vendor's native voice — no character override",
+      "emoji": "",
+      "promptFile": "default.md"
+    },
+    {
+      "id": "caveman",
+      "label": "🪨 Caveman",
+      "description": "UGG SPEAK SIMPLE — caveman-style responses",
+      "emoji": "🪨",
+      "promptFile": "caveman.md"
+    },
+    {
+      "id": "ceo",
+      "label": "📊 CEO",
+      "description": "Executive bottom-line — status, what's left, decision needed",
+      "emoji": "📊",
+      "promptFile": "ceo.md"
+    }
+  ],
+  "characterIds": [
+    "default",
+    "caveman",
+    "ceo"
+  ],
+  "defaultCharacterId": "default"
+}

@@ -1,0 +1,20 @@
+language: "typescript"
+layer: "library"
+stack: "backend"
+
+project:
+  title: "License Client"
+  description: "Dodo Payments license validation and activation"
+  owner: "@immorterm/core"
+
+dependsOn:
+  - "types"
+
+tasks:
+  typecheck:
+    command: "bun run tsc --noEmit"
+    inputs:
+      - "src/**/*"
+      - "tsconfig.json"
+    deps:
+      - "types:typecheck"

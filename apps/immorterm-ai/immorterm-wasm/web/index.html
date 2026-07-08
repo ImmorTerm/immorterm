@@ -1,0 +1,2566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ImmorTerm — GPU Terminal</title>
+  <style>
+/* ── Reset + Layout ── */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #1e1e2e; }
+
+/* ── Project Picker (State 1) ── */
+#project-picker {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  width: 100%; height: 100%;
+  background: linear-gradient(135deg, #1e1e2e 0%, #2d004d 50%, #1e1e2e 100%);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  color: #cdd6f4;
+}
+.picker-logo { font-size: 48px; margin-bottom: 8px; opacity: 0.7; }
+.picker-title { font-size: 24px; font-weight: 700; color: #E0B0FF; margin-bottom: 4px; }
+.picker-subtitle { font-size: 13px; color: #a6adc8; margin-bottom: 24px; }
+.picker-section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: #a6adc8; margin-bottom: 8px; max-width: 420px; width: 100%; text-align: left; }
+.picker-projects { display: flex; flex-direction: column; gap: 6px; width: 100%; max-width: 420px; margin-bottom: 16px; max-height: 280px; overflow-y: auto; }
+.picker-card {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px; border-radius: 8px;
+  background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
+  cursor: pointer; transition: background 0.15s, border-color 0.15s;
+}
+.picker-card:hover { background: rgba(180,130,255,0.12); border-color: rgba(180,130,255,0.3); }
+.picker-card-icon { font-size: 24px; flex-shrink: 0; }
+.picker-card-info { flex: 1; min-width: 0; }
+.picker-card-name { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-card-path { font-size: 11px; color: #a6adc8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-card-sessions { font-size: 11px; color: #b482ff; flex-shrink: 0; }
+.picker-manual { display: flex; gap: 6px; width: 100%; max-width: 420px; }
+.picker-manual input {
+  flex: 1; padding: 8px 12px; border-radius: 6px; font-size: 13px;
+  border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.3); color: #cdd6f4;
+  outline: none; font-family: 'JetBrains Mono', monospace;
+}
+.picker-manual input:focus { border-color: rgba(180,130,255,0.5); }
+.picker-manual button {
+  padding: 8px 16px; border-radius: 6px; border: none;
+  background: #7c3aed; color: #fff; font-size: 13px; cursor: pointer;
+  transition: background 0.15s;
+}
+.picker-manual button:hover { background: #6d28d9; }
+.picker-loading { color: #a6adc8; font-size: 13px; padding: 20px; }
+.picker-error { color: #f38ba8; font-size: 12px; margin-top: 8px; max-width: 420px; }
+.picker-recent-label { font-size: 10px; color: #585b70; margin-top: 12px; }
+
+/* ── Terminal Workspace (State 2) ── */
+#workspace { display: none; width: 100%; height: 100%; }
+#container { display: flex; width: 100%; height: 100%; }
+#terminal-area { flex: 1; position: relative; min-width: 0; }
+#terminal-canvas { width: 100%; height: 100%; display: block; outline: none; }
+
+/* ── Session Sidebar ── */
+#sidebar {
+  width: 160px; background: var(--sidebar-bg, #181825);
+  border-left: 1px solid var(--sidebar-border, #313244);
+  display: flex; flex-direction: column;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-size: 12px; color: var(--sidebar-text, #cdd6f4);
+  user-select: none; position: relative; overflow: hidden;
+  transition: width 0.15s ease;
+}
+#sidebar.collapsed { width: 0; min-width: 0; border-left: none; }
+#sidebar.collapsed #sidebar-header { display: none; }
+#sidebar.collapsed #session-list { display: none; }
+#sidebar.collapsed #sidebar-resize-handle { display: none; }
+
+/* Auto-reveal: overlays terminal without affecting layout */
+#sidebar.auto-reveal {
+  position: absolute; top: 0; right: 0; height: 100%;
+  width: 0; min-width: 0; border-left: none;
+  z-index: 50;
+  box-shadow: -4px 0 12px rgba(0, 0, 0, 0.3);
+  transition: width 0.15s ease;
+}
+#sidebar.auto-reveal #sidebar-header { display: none; }
+#sidebar.auto-reveal #session-list { display: none; }
+#sidebar.auto-reveal #sidebar-resize-handle { display: none; }
+#sidebar.auto-reveal.revealed {
+  width: 160px; min-width: 120px;
+  border-left: 1px solid var(--sidebar-border, #313244);
+}
+#sidebar.auto-reveal.revealed #sidebar-header { display: flex; }
+#sidebar.auto-reveal.revealed #session-list { display: block; }
+#sidebar.auto-reveal.revealed #sidebar-resize-handle { display: block; }
+
+/* Floating expand button — toggled via JS */
+#sidebar-expand-btn {
+  display: none;
+  position: absolute; top: 8px; right: 8px; z-index: 100;
+  width: 24px; height: 24px;
+  background: var(--sidebar-bg, #181825);
+  border: 1px solid var(--sidebar-border, #313244);
+  border-radius: 4px;
+  color: var(--sidebar-muted, #a6adc8);
+  font-size: 14px; line-height: 24px; text-align: center;
+  cursor: pointer;
+  opacity: 0.6; transition: opacity 0.15s;
+  pointer-events: auto;
+}
+#sidebar-expand-btn:hover {
+  background: var(--sidebar-border, #313244);
+  color: var(--sidebar-text, #cdd6f4);
+  opacity: 1;
+}
+#sidebar-expand-btn.visible { display: block; }
+
+#sidebar-resize-handle {
+  position: absolute; top: 0; left: -6px; width: 12px; height: 100%;
+  cursor: col-resize; z-index: 10; background: transparent; transition: background 0.15s;
+}
+#sidebar-resize-handle::after {
+  content: ''; position: absolute; top: 0; left: 4px; width: 4px; height: 100%; transition: background 0.15s;
+}
+#sidebar-resize-handle:hover::after,
+#sidebar-resize-handle.active::after { background: var(--sidebar-accent, rgba(180, 130, 255, 0.4)); }
+
+#sidebar-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 8px; border-bottom: 1px solid var(--sidebar-border, #313244);
+  color: var(--sidebar-muted, #a6adc8); font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.5px; gap: 4px;
+}
+#sidebar-header button {
+  background: none; border: none; color: var(--sidebar-muted, #a6adc8);
+  cursor: pointer; font-size: 16px; line-height: 1; padding: 0 4px; border-radius: 3px; flex-shrink: 0;
+}
+#sidebar-header button:hover { background: var(--sidebar-border, #313244); color: var(--sidebar-text, #cdd6f4); }
+#sidebar-toggle { font-size: 12px !important; }
+
+#session-list { flex: 1; overflow-y: auto; padding: 4px 0; }
+.session-item {
+  display: flex; align-items: center; gap: 6px; padding: 4px 8px; cursor: pointer;
+  border-left: 2px solid transparent; transition: background 0.1s;
+}
+.session-item:hover { background: var(--sidebar-hover, #1e1e2e); }
+.session-item.active {
+  background: var(--sidebar-active-bg, #1e1e2e);
+  border-left: 3px solid var(--sidebar-accent, #b482ff);
+  box-shadow: inset 0 0 12px var(--sidebar-active-glow, rgba(180, 130, 255, 0.08));
+}
+.session-item.active .name { color: var(--sb-popup-text, #cdd6f4); font-weight: 600; }
+.session-item.active .dot { box-shadow: 0 0 4px 1px var(--sidebar-accent, #b482ff); }
+.session-item .dot { width: 6px; height: 6px; border-radius: 50%; background: #a6e3a1; flex-shrink: 0; }
+.session-item .dot.disconnected { background: #f38ba8; }
+.session-item .dot.connecting { background: #f9e2af; }
+.session-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.session-item .close {
+  opacity: 0; background: none; border: none; color: var(--sidebar-muted, #a6adc8);
+  cursor: pointer; font-size: 14px; padding: 0 2px; border-radius: 3px; line-height: 1;
+}
+.session-item:hover .close { opacity: 0.6; }
+.session-item .close:hover { opacity: 1; background: var(--sidebar-border, #45475a); }
+.session-item .drawing-badge { font-size: 11px; opacity: 0.6; margin-left: auto; margin-right: 4px; flex-shrink: 0; line-height: 1; }
+.session-item:hover .drawing-badge { opacity: 0.85; }
+.session-item .lock-badge { font-size: 10px; opacity: 0.5; margin-left: 2px; flex-shrink: 0; line-height: 1; }
+.session-item:hover .lock-badge { opacity: 0.75; }
+
+/* ── Drag-and-drop ── */
+.session-item.dragging { opacity: 0.4; cursor: grabbing !important; }
+.share-badge {
+  position: absolute; bottom: 32px; right: 8px; z-index: 200;
+  display: flex; align-items: center; gap: 6px; padding: 4px 10px;
+  background: var(--sidebar-bg, #181825); border: 1px solid var(--badge-glow-border, rgba(180,130,255,0.3));
+  border-radius: 12px; font-size: 11px; color: var(--sidebar-fg, #cdd6f4);
+  box-shadow: 0 0 8px var(--badge-glow-soft, rgba(180,130,255,0.1));
+  opacity: 1; transition: opacity 0.4s ease;
+}
+.share-badge .dismiss { cursor: pointer; opacity: 0.5; font-size: 13px; line-height: 1; }
+.share-badge .dismiss:hover { opacity: 1; }
+.share-badge.consumed { animation: badge-consumed 2s cubic-bezier(0.22, 1, 0.36, 1) forwards; }
+@keyframes badge-consumed {
+  0%   { opacity: 1; transform: scale(1); box-shadow: none; }
+  8%   { opacity: 1; transform: scale(1.12); background: var(--badge-glow-bg, rgba(180,130,255,0.15)); border-color: var(--badge-glow-border-bright, rgba(224,176,255,0.6)); box-shadow: 0 0 18px var(--badge-glow-halo, rgba(180,130,255,0.4)); color: var(--sidebar-accent, #E0B0FF); }
+  25%  { opacity: 1; transform: scale(1.06); box-shadow: 0 0 24px var(--badge-glow-halo-soft, rgba(180,130,255,0.25)); }
+  50%  { opacity: 1; transform: scale(1.03); box-shadow: 0 0 12px var(--badge-glow-halo-soft, rgba(180,130,255,0.15)); }
+  100% { opacity: 0; transform: scale(0.7) translateY(6px); box-shadow: none; }
+}
+.share-particle {
+  position: absolute; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--sidebar-accent, #b482ff); pointer-events: none; z-index: 51;
+  opacity: 1; animation: particle-fly 1.4s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+@keyframes particle-fly {
+  0%   { opacity: 1; transform: translate(0, 0) scale(1); }
+  50%  { opacity: 0.8; }
+  100% { opacity: 0; transform: translate(var(--px), var(--py)) scale(0); }
+}
+.share-drop-zone {
+  position: absolute; bottom: 28px; right: 4px; z-index: 49;
+  padding: 6px 14px; border: 2px dashed rgba(137,180,250,0.4); border-radius: 14px;
+  font-size: 11px; color: rgba(137,180,250,0.7); background: rgba(137,180,250,0.04);
+  pointer-events: none; opacity: 0; transform: scale(0.9);
+  transition: opacity 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+}
+.share-drop-zone.visible { opacity: 1; transform: scale(1); animation: drop-zone-pulse 1.5s ease-in-out infinite; }
+@keyframes drop-zone-pulse {
+  0%, 100% { box-shadow: 0 0 8px rgba(137,180,250,0.15); }
+  50%      { box-shadow: 0 0 16px rgba(137,180,250,0.35); }
+}
+.drop-indicator {
+  position: absolute; left: 4px; right: 4px; height: 2px;
+  background: var(--sidebar-accent, #b482ff); border-radius: 1px;
+  pointer-events: none; z-index: 10;
+  box-shadow: 0 0 6px var(--sidebar-active-glow, rgba(180, 130, 255, 0.4));
+}
+
+/* ── AI overlay layer ── */
+#ai-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; }
+.ai-card {
+  position: absolute; pointer-events: auto;
+  background: rgba(30, 30, 46, 0.95); border: 1px solid rgba(180, 130, 255, 0.4);
+  border-radius: 8px; padding: 12px 16px; color: #cdd6f4; cursor: grab;
+  font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace; font-size: 13px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4); backdrop-filter: blur(8px);
+  transition: transform 0.15s ease, box-shadow 0.15s ease; max-width: 400px; overflow: hidden;
+}
+.ai-card:hover:not(.dragging) { transform: translateY(-2px); box-shadow: 0 8px 32px rgba(180, 130, 255, 0.2); border-color: rgba(180, 130, 255, 0.7); }
+.ai-card.dragging { cursor: grabbing !important; transition: none !important; }
+.ai-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-weight: 600; color: #b482ff; }
+.ai-card-body { line-height: 1.5; }
+.ai-card-actions { margin-top: 10px; display: flex; gap: 8px; }
+.ai-card-btn {
+  padding: 4px 12px; border: 1px solid rgba(180, 130, 255, 0.4); border-radius: 4px;
+  background: transparent; color: #b482ff; cursor: pointer; font-size: 12px; font-family: inherit;
+  transition: background 0.15s;
+}
+.ai-card-btn:hover { background: rgba(180, 130, 255, 0.15); }
+.ai-card-btn.primary { background: rgba(180, 130, 255, 0.2); border-color: #b482ff; }
+.ai-card-close {
+  position: absolute; top: 6px; right: 6px; width: 20px; height: 20px;
+  border: none; border-radius: 50%; background: rgba(255,255,255,0.1);
+  color: rgba(255,255,255,0.5); font-size: 14px; line-height: 20px;
+  cursor: pointer; opacity: 0; transition: opacity 0.15s, background 0.15s;
+  z-index: 1; padding: 0; text-align: center;
+}
+.ai-card:hover .ai-card-close { opacity: 1; }
+.ai-card-close:hover { background: rgba(255,80,80,0.4); color: white; }
+
+.ai-annotation { position: absolute; pointer-events: auto; border: 2px solid; border-radius: 4px; transition: opacity 0.2s; }
+.ai-annotation:hover { opacity: 0.8; }
+
+/* ── Confetti ── */
+.confetti-piece { position: fixed; width: 10px; height: 10px; z-index: 9999; pointer-events: none; border-radius: 2px; animation: confetti-fall 2.5s ease-out forwards; }
+@keyframes confetti-fall {
+  0% { transform: translateY(0) rotate(0deg) scale(1); opacity: 1; }
+  100% { transform: translateY(100vh) rotate(720deg) scale(0.3); opacity: 0; }
+}
+
+/* ── Status bar popup menu ── */
+:root {
+  --sb-popup-bg: rgba(45, 0, 77, 0.98);
+  --sb-popup-border: rgba(224, 176, 255, 0.4);
+  --sb-popup-hover: rgba(224, 176, 255, 0.15);
+  --sb-popup-active: #E0B0FF;
+  --sb-popup-text: #FFFFFF;
+  --sb-popup-separator: rgb(85, 40, 117);
+  --sb-popup-header: rgba(255, 255, 255, 0.5);
+}
+#sb-popup {
+  position: absolute; background: var(--sb-popup-bg);
+  border: 1px solid var(--sb-popup-border); border-radius: 6px; padding: 4px 0;
+  min-width: 180px; max-width: 260px; z-index: 200; display: none;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+  font-family: 'JetBrains Mono', 'Cascadia Code', monospace; font-size: 12px;
+  color: var(--sb-popup-text); user-select: none;
+}
+#sb-popup.visible { display: block; }
+.sb-popup-item { padding: 5px 12px; cursor: pointer; display: flex; align-items: center; gap: 8px; transition: background 0.1s; }
+.sb-popup-item:hover { background: var(--sb-popup-hover); }
+.sb-popup-item.active { color: var(--sb-popup-active); }
+.sb-popup-item .check { width: 14px; text-align: center; font-size: 10px; }
+.sb-popup-separator { height: 1px; background: var(--sb-popup-separator); margin: 4px 8px; }
+.sb-popup-header { padding: 4px 12px; font-size: 10px; text-transform: uppercase; color: var(--sb-popup-header); letter-spacing: 0.5px; }
+.sb-popup-subtitle { padding: 2px 12px 4px; font-size: 11px; color: var(--sb-popup-header); }
+.sb-popup-footer { padding: 6px 12px 4px; font-size: 10px; color: var(--sb-popup-header); text-align: center; }
+#sb-popup.theme-mode { min-width: 380px; max-width: 480px; max-height: 520px; overflow-y: auto; }
+.sb-theme-item { padding: 4px 12px; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: background 0.1s; white-space: nowrap; }
+.sb-theme-item:hover { background: var(--sb-popup-hover); }
+.sb-theme-item.active { color: var(--sb-popup-active); }
+.sb-theme-item .check { width: 14px; text-align: center; font-size: 10px; flex-shrink: 0; }
+.sb-theme-item .theme-label { flex-shrink: 0; }
+.sb-theme-desc { opacity: 0.5; font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
+.sb-theme-badge { font-size: 10px; flex-shrink: 0; font-weight: bold; }
+.sb-theme-badge.current { color: #50fa7b; }
+.sb-theme-badge.pro { color: #f1fa8c; }
+.sb-theme-preview { display: flex; gap: 1px; flex-shrink: 0; margin-left: auto; }
+.sb-theme-preview span { width: 8px; height: 10px; border-radius: 1px; display: inline-block; }
+.sb-popup-label-wrap { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.sb-popup-item-desc { font-size: 10px; opacity: 0.45; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── Modal System ── */
+#modal-backdrop { display: none; position: fixed; inset: 0; z-index: 290; background: rgba(0,0,0,0.45); backdrop-filter: blur(2px); }
+#modal-backdrop.visible { display: block; }
+#modal-container {
+  display: none; position: fixed; z-index: 300;
+  top: 50%; left: 50%; transform: translate(-50%, -50%) scale(0.95);
+  width: min(560px, calc(100% - 48px)); max-height: 80vh;
+  background: var(--sb-popup-bg, #1e1e2e); border: 1px solid var(--sb-popup-border, #45475a);
+  border-radius: 10px; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  flex-direction: column; overflow: hidden;
+  font-family: system-ui, -apple-system, sans-serif; color: var(--sb-popup-text, #cdd6f4);
+  opacity: 0; transition: opacity 0.15s, transform 0.15s;
+}
+#modal-container.visible { display: flex; opacity: 1; transform: translate(-50%, -50%) scale(1); }
+#modal-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px 10px; border-bottom: 1px solid var(--sb-popup-separator, #313244); }
+#modal-header h2 { margin: 0; font-size: 15px; font-weight: 600; }
+#modal-close { background: none; border: none; color: var(--sb-popup-text, #cdd6f4); font-size: 18px; cursor: pointer; padding: 2px 6px; border-radius: 4px; opacity: 0.6; transition: opacity 0.15s; }
+#modal-close:hover { opacity: 1; background: var(--sb-popup-hover, rgba(255,255,255,0.06)); }
+#modal-body { flex: 1; overflow-y: auto; padding: 14px 18px; }
+#modal-footer { padding: 10px 18px 14px; border-top: 1px solid var(--sb-popup-separator, #313244); display: none; }
+.modal-section { margin-bottom: 16px; }
+.modal-section:last-child { margin-bottom: 0; }
+.modal-section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--sb-popup-header, #a6adc8); margin-bottom: 8px; }
+.modal-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 6px; background: var(--sb-popup-hover, rgba(255,255,255,0.03)); margin-bottom: 4px; }
+.modal-row:last-child { margin-bottom: 0; }
+.modal-status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.modal-status-dot.pass { background: #a6e3a1; }
+.modal-status-dot.warn { background: #f9e2af; }
+.modal-status-dot.fail { background: #f38ba8; }
+.modal-status-dot.unknown { background: #585b70; }
+.modal-row-label { font-size: 13px; flex: 1; }
+.modal-row-detail { font-size: 11px; color: var(--sb-popup-header, #a6adc8); text-align: right; }
+.modal-btn { padding: 6px 14px; border-radius: 6px; border: none; cursor: pointer; font-size: 12px; font-weight: 500; transition: background 0.15s; background: var(--sb-popup-active, rgba(255,255,255,0.1)); color: var(--sb-popup-text, #cdd6f4); }
+.modal-btn:hover { filter: brightness(1.2); }
+.modal-btn.primary { background: #7c3aed; color: #fff; }
+.modal-btn.primary:hover { background: #6d28d9; }
+.modal-btn.danger { background: #dc2626; color: #fff; }
+.modal-btn.danger:hover { background: #b91c1c; }
+.modal-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.modal-input { width: 100%; padding: 8px 10px; border-radius: 6px; font-size: 13px; border: 1px solid var(--sb-popup-border, #45475a); background: rgba(0,0,0,0.2); color: var(--sb-popup-text, #cdd6f4); outline: none; box-sizing: border-box; }
+.modal-input:focus { border-color: #7c3aed; }
+.modal-info { padding: 10px 12px; border-radius: 6px; font-size: 12px; line-height: 1.5; }
+.modal-info.info    { background: rgba(137,180,250,0.12); border-left: 3px solid #89b4fa; }
+.modal-info.success { background: rgba(166,227,161,0.12); border-left: 3px solid #a6e3a1; }
+.modal-info.warning { background: rgba(249,226,175,0.12); border-left: 3px solid #f9e2af; }
+.modal-info.error   { background: rgba(243,139,168,0.12); border-left: 3px solid #f38ba8; }
+.modal-spinner { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 24px; color: var(--sb-popup-header, #a6adc8); font-size: 13px; }
+.modal-spinner::before { content: ''; width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--sb-popup-separator, #313244); border-top-color: #7c3aed; animation: modal-spin 0.6s linear infinite; }
+@keyframes modal-spin { to { transform: rotate(360deg); } }
+.modal-toggle-wrap { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.modal-toggle { width: 36px; height: 20px; border-radius: 10px; position: relative; background: var(--sb-popup-separator, #313244); transition: background 0.2s; flex-shrink: 0; }
+.modal-toggle.on { background: #7c3aed; }
+.modal-toggle::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform 0.2s; }
+.modal-toggle.on::after { transform: translateX(16px); }
+.modal-segmented { display: inline-flex; border-radius: 6px; overflow: hidden; border: 1px solid var(--sb-popup-separator, #313244); }
+.modal-segmented button { background: transparent; border: none; color: #cdd6f4; padding: 4px 10px; font-size: 11px; cursor: pointer; transition: background 0.15s, color 0.15s; font-family: inherit; }
+.modal-segmented button:not(:last-child) { border-right: 1px solid var(--sb-popup-separator, #313244); }
+.modal-segmented button.active { background: #7c3aed; color: #fff; }
+.modal-segmented button:hover:not(.active) { background: rgba(124, 58, 237, 0.2); }
+.sb-context-menu { position: fixed; z-index: 10001; background: var(--sb-popup-bg, #1e1e2e); border: 1px solid var(--sb-popup-separator, #313244); border-radius: 6px; padding: 4px 0; box-shadow: 0 4px 16px rgba(0,0,0,0.4); min-width: 160px; }
+.sb-context-menu-item { padding: 6px 14px; cursor: pointer; font-size: 12px; color: var(--sb-popup-text, #cdd6f4); transition: background 0.1s; }
+.sb-context-menu-item:hover { background: var(--sb-popup-hover, rgba(124, 58, 237, 0.25)); }
+.modal-range { width: 100%; height: 4px; -webkit-appearance: none; appearance: none; background: var(--sb-popup-separator, #313244); border-radius: 2px; outline: none; accent-color: #7c3aed; cursor: pointer; }
+.modal-range::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #7c3aed; cursor: pointer; }
+.theme-actions { display: flex; gap: 8px; justify-content: flex-end; padding: 8px 12px; border-top: 1px solid var(--sb-popup-separator, #313244); }
+.theme-actions .modal-btn { font-size: 12px; padding: 5px 14px; }
+
+/* ── Status indicator ── */
+#status-indicator {
+  position: absolute; top: 8px; right: 8px; padding: 4px 10px; border-radius: 12px;
+  font-size: 11px; font-family: system-ui; background: rgba(30, 30, 46, 0.9);
+  color: #a6adc8; z-index: 100; opacity: 0; transition: opacity 0.3s;
+}
+#status-indicator.visible { opacity: 1; }
+#status-indicator.connected { color: #a6e3a1; }
+#status-indicator.error { color: #f38ba8; }
+
+/* ── Title tooltip ── */
+#title-tooltip {
+  position: absolute; display: none;
+  background: var(--sb-popup-bg); border: 1px solid var(--sb-popup-border);
+  border-radius: 6px; padding: 6px 12px; max-width: 400px;
+  font-family: 'JetBrains Mono', 'Cascadia Code', monospace; font-size: 11px;
+  color: var(--sb-popup-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  pointer-events: none; z-index: 200; box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  opacity: 0; transition: opacity 0.15s ease-in;
+}
+#title-tooltip.visible { display: block; opacity: 1; }
+
+/* ── Empty state ── */
+#empty-state {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  width: 100%; height: 100%; color: #585b70; font-family: system-ui; text-align: center;
+}
+#empty-state .icon { font-size: 48px; margin-bottom: 12px; opacity: 0.5; }
+#empty-state .title { font-size: 16px; color: #a6adc8; margin-bottom: 4px; }
+#empty-state .hint { font-size: 12px; }
+#empty-state kbd { background: #313244; padding: 2px 6px; border-radius: 3px; font-family: monospace; font-size: 11px; color: #cdd6f4; }
+
+/* ── WebGPU not available ── */
+#no-webgpu {
+  display: none; position: fixed; inset: 0; background: #1e1e2e; color: #f38ba8;
+  font: 16px/1.6 'JetBrains Mono', monospace; padding: 40px; z-index: 100;
+}
+#no-webgpu h1 { color: #89b4fa; margin-bottom: 16px; }
+#no-webgpu a { color: #89b4fa; }
+
+/* ── Session summary modal ── */
+.ss-empty { text-align: center; padding: 24px; font-size: 13px; font-style: italic; color: var(--sb-popup-header, #a6adc8); }
+.ss-at-a-glance { background: var(--sb-popup-hover, rgba(255,255,255,0.06)); border: 1px solid var(--sb-popup-separator, #313244); border-radius: 6px; padding: 10px 14px; margin-bottom: 12px; }
+.ss-glance-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+.ss-glance-item { font-size: 12px; line-height: 1.4; color: var(--sb-popup-text, #cdd6f4); padding-left: 14px; position: relative; }
+.ss-glance-item::before { content: ''; position: absolute; left: 0; top: 6px; width: 5px; height: 5px; border-radius: 50%; background: var(--sb-popup-active, #E0B0FF); }
+.ss-collapsible { border: 1px solid var(--sb-popup-separator, #313244); border-radius: 6px; margin-bottom: 8px; overflow: hidden; }
+.ss-collapsible-header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; user-select: none; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--sb-popup-header, #a6adc8); background: transparent; border: none; width: 100%; text-align: left; }
+.ss-collapsible-header:hover { background: var(--sb-popup-hover, rgba(255,255,255,0.06)); }
+.ss-chevron { display: inline-block; font-size: 8px; transition: transform 0.15s ease; color: var(--sb-popup-header, #a6adc8); }
+.ss-chevron.open { transform: rotate(90deg); }
+.ss-collapsible-body { display: none; padding: 0 12px 10px; }
+.ss-collapsible-body.open { display: block; }
+
+@keyframes errorSlideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+  </style>
+</head>
+<body>
+  <!-- ── State 1: Project Picker ── -->
+  <div id="project-picker">
+    <div class="picker-logo">&#9000;</div>
+    <div class="picker-title">ImmorTerm</div>
+    <div class="picker-subtitle">GPU Terminal in the Browser</div>
+    <div class="picker-loading">Loading sessions...</div>
+    <div class="picker-error" style="display:none;"></div>
+    <div class="picker-section-title" style="display:none;">Active Projects</div>
+    <div class="picker-projects" style="display:none;"></div>
+    <div class="picker-section-title picker-manual-label" style="display:none;">Connect to Project</div>
+    <div class="picker-manual" style="display:none;">
+      <input type="text" id="manual-path" placeholder="/path/to/project" aria-label="Project path">
+      <button id="manual-connect">Connect</button>
+    </div>
+  </div>
+
+  <!-- ── State 2: Terminal Workspace ── -->
+  <div id="workspace">
+    <div id="container">
+      <div id="terminal-area">
+        <div id="empty-state" style="display:none;">
+          <div class="icon">&#9000;</div>
+          <div class="title">ImmorTerm</div>
+          <div class="hint">Click <kbd>+</kbd> in the sidebar to open a new terminal</div>
+        </div>
+        <canvas id="terminal-canvas" tabindex="0" style="display:none;"></canvas>
+        <div id="title-tooltip"></div>
+        <div id="emoji-overlays" style="position:absolute;pointer-events:none;z-index:5;top:0;left:0;width:100%;height:100%;"></div>
+        <div id="ai-overlay"></div>
+        <div id="sb-popup"></div>
+        <div id="modal-backdrop"></div>
+        <div id="modal-container">
+          <div id="modal-header"><h2 id="modal-title"></h2><button id="modal-close">&times;</button></div>
+          <div id="modal-body"></div>
+          <div id="modal-footer"></div>
+        </div>
+        <div id="status-indicator"></div>
+        <button id="sidebar-expand-btn" title="Show sessions">&lsaquo;</button>
+      </div>
+      <div id="sidebar">
+        <div id="sidebar-resize-handle"></div>
+        <div id="sidebar-header">
+          <button id="sidebar-toggle" title="Toggle sidebar">&rsaquo;</button>
+          <span>Sessions</span>
+          <button id="new-session-btn" title="New Session">+</button>
+        </div>
+        <div id="session-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="no-webgpu">
+    <h1>WebGPU Not Available</h1>
+    <p>ImmorTerm requires WebGPU to render. Please use:</p>
+    <ul>
+      <li>Chrome 113+ (recommended)</li>
+      <li>Edge 113+</li>
+      <li>Firefox Nightly (with <code>dom.webgpu.enabled</code>)</li>
+    </ul>
+    <p style="margin-top: 16px;"><a href="https://developer.chrome.com/docs/web-platform/webgpu">Learn more about WebGPU</a></p>
+  </div>
+
+  <script type="module">
+    // ═══════════════════════════════════════════════════════════════════
+    // ImmorTerm Standalone Web Terminal
+    // Self-contained browser terminal with full VS Code extension parity.
+    // Replaces vscode.postMessage() with direct HTTP API to memory service.
+    // ═══════════════════════════════════════════════════════════════════
+
+    // Hub serves this page — registry calls use relative URLs (same origin).
+    // Memory service URL discovered from hub's /api/v1/config endpoint.
+    let MEMORY_URL = 'http://localhost:8765'; // default, updated at boot
+    const RECENT_KEY = 'immorterm-recent-projects';
+    const PREFS_KEY = 'immorterm-prefs';
+    const ORDER_KEY = 'immorterm-session-order';
+
+    // ── Themes (matches Rust THEME_PRESETS) ──
+    const DEFAULT_THEMES = [
+      { name: 'Purple Haze', label: '\uD83D\uDFE3 Purple Haze', desc: 'Purple \u2192 Violet gradient', bg: '#2D004D', accent: '#E0B0FF', fg: '#FFFFFF', stops: ['#2D004D','#3D1A6D','#4D2A7D','#5B2C8A','#6B3FA0','#7B52B8','#8B008B'] },
+      { name: 'Ocean Depths', label: '\uD83D\uDD35 Ocean Depths', desc: 'Deep blue \u2192 Teal cool', bg: '#001F3F', accent: '#87CEEB', fg: '#FFFFFF', stops: ['#001F3F','#003366','#00447A','#004C8C','#0066B3','#0080D9','#00A0E0'] },
+      { name: 'Aurora Borealis', label: '\uD83C\uDF0C Aurora Borealis', desc: 'Dark \u2192 Green shimmer', bg: '#020B1A', accent: '#7DFFC3', fg: '#E0FFF4', stops: ['#020B1A','#051832','#082E46','#0C4550','#105E54','#1C8B62','#2ECC71'] },
+      { name: 'Sunset Glow', label: '\uD83D\uDFE0 Sunset Glow', desc: 'Warm red \u2192 Gold horizon', bg: '#4A1C1C', accent: '#FFD700', fg: '#FFFFFF', stops: ['#4A1C1C','#6B2D2D','#7E3636','#8C3E3E','#AD4F4F','#CE6060','#E07020'] },
+      { name: 'Solar Flare', label: '\u2600\uFE0F Solar Flare', desc: 'Dark amber \u2192 Blazing gold', bg: '#1A0800', accent: '#FFD700', fg: '#FFFFFF', stops: ['#1A0800','#331400','#4D2200','#6B3500','#884C00','#B86B00','#FF8C00'] },
+      { name: 'Glacier', label: '\uD83C\uDFD4\uFE0F Glacier', desc: 'Frozen blue \u2192 Ice white', bg: '#06111C', accent: '#B4F0FF', fg: '#F0F8FF', stops: ['#06111C','#0E2240','#163560','#224D7E','#35689A','#4A8AB5','#7EC8E3'] },
+      { name: 'Rose Gold', label: '\uD83E\uDE77 Rose Gold', desc: 'Deep rose \u2192 Pink bloom', bg: '#3D1F2B', accent: '#FFB6C1', fg: '#FFFFFF', stops: ['#3D1F2B','#5C2E41','#6C364C','#7B3D57','#9A4C6D','#B95B83','#D86A99'] },
+      { name: 'Cyberpunk', label: '\uD83D\uDC9C Cyberpunk', desc: 'Neon purple \u2192 Magenta glow', bg: '#0D0221', accent: '#FF00FF', fg: '#00FFFF', stops: ['#0D0221','#1A0A3E','#240E4C','#2D1259','#541388','#7B1FA2','#FF006E'] },
+      { name: 'Monochrome Dark', label: '\u2B1B Monochrome Dark', desc: 'Clean black \u2192 Gray minimal', bg: '#000000', accent: '#CCCCCC', fg: '#FFFFFF', stops: ['#000000','#1A1A1A','#2D2D2D','#404040','#555555','#6A6A6A','#808080'] },
+      { name: 'Monochrome Light', label: '\u2B1C Monochrome Light', desc: 'White \u2192 Silver light mode', bg: '#FFFFFF', accent: '#333333', fg: '#000000', stops: ['#FFFFFF','#F0F0F0','#E0E0E0','#D0D0D0','#C0C0C0','#B0B0B0','#A0A0A0'] },
+      { name: 'Neon Tokyo', label: '\uD83C\uDFD9\uFE0F Neon Tokyo', desc: 'Midnight \u2192 Neon pink city', bg: '#080011', accent: '#FFE54C', fg: '#00FFE5', stops: ['#080011','#140828','#281044','#421860','#661E74','#AA1E6E','#FF2975'] },
+      { name: 'Dracula', label: '\uD83E\uDDDB Dracula', desc: 'Classic Dracula color scheme', bg: '#21222C', accent: '#FF79C6', fg: '#F8F8F2', stops: ['#21222C','#282A36','#2E303E','#343746','#44475A','#6272A4','#BD93F9'] },
+      { name: 'Matrix', label: '\uD83D\uDC8A Matrix', desc: 'Black \u2192 Green digital rain', bg: '#000000', accent: '#33FF77', fg: '#00FF41', stops: ['#000000','#001500','#002A00','#004200','#005E00','#008B00','#00FF41'] },
+      { name: 'Vaporwave', label: '\uD83D\uDCFC Vaporwave', desc: 'Retro purple \u2192 Pink aesthetic', bg: '#0A1520', accent: '#01CDFE', fg: '#00FFD4', stops: ['#0A1520','#1A1E30','#2E2440','#442A52','#603066','#983878','#FF71CE'] },
+      { name: 'Ember', label: '\uD83D\uDD25 Ember', desc: 'Smoldering dark \u2192 Warm amber', bg: '#1A0A00', accent: '#FFB84D', fg: '#FFF5E6', stops: ['#1A0A00','#2E1400','#441E08','#5C2A10','#763818','#994520','#D4760A'] },
+      { name: 'Electric Lime', label: '\u26A1 Electric Lime', desc: 'Dark forest \u2192 Bright lime', bg: '#050A00', accent: '#BEFF5A', fg: '#F0FFF0', stops: ['#050A00','#101C05','#1E3008','#2E4610','#406018','#588020','#84CC16'] },
+      { name: 'Tidal', label: '\uD83C\uDF0A Tidal', desc: 'Deep ocean \u2192 Teal wave', bg: '#020A18', accent: '#48D1CC', fg: '#E0FFFF', stops: ['#020A18','#061530','#0A2848','#104060','#186078','#208890','#2DD4BF'] },
+      { name: 'Amber', label: '\uD83D\uDFE1 Amber', desc: 'Deep gold \u2192 Warm amber', bg: '#0E0A00', accent: '#FFD700', fg: '#FFFDD0', stops: ['#0E0A00','#1E1800','#302800','#483C00','#665200','#887000','#BFA200'] },
+      { name: 'Synthwave', label: '\uD83C\uDF06 Synthwave', desc: 'Retro purple \u2192 Electric cyan', bg: '#1A1A2E', accent: '#00F3FF', fg: '#FFFFFF', stops: ['#1A1A2E','#262640','#2C2C49','#323252','#4A3F6B','#614385','#FF2E97'] },
+      { name: 'Molten', label: '\uD83C\uDF0B Molten', desc: 'Dark lava \u2192 Fiery red', bg: '#100004', accent: '#FF6840', fg: '#FFD8C8', stops: ['#100004','#200810','#381018','#501820','#702020','#983028','#b83020'] },
+      { name: 'Rainbow', label: '\uD83C\uDF08 Rainbow', desc: 'Full spectrum gradient', bg: '#8B0000', accent: '#FFD700', fg: '#FFFFFF', stops: ['#8B0000','#8B4500','#6B6B00','#006400','#00008B','#4B0082','#800080'] },
+      { name: 'Delulus Club', label: '\uD83C\uDF31 Delulus Club', desc: 'Indigo \u2192 Purple \u2192 dominant Green', bg: '#2D1864', accent: '#F4C21E', fg: '#FBF7F0', stops: ['#2D1864','#4A26A8','#6B3FD6','#3BC43A','#3BC43A','#3BC43A','#3BC43A'] },
+      { name: 'Hot Pink', label: '\uD83D\uDC97 Hot Pink', desc: 'Black \u2192 Hot magenta glow', bg: '#14000A', accent: '#FF4FA3', fg: '#FFD9EC', stops: ['#14000A','#260012','#3D001E','#57002B','#7A003C','#AD0052','#E0218A'] },
+    ];
+
+    // ── Error Surfacing ──
+    let reportError = (source, err) => {
+      const msg = `[${source}] ${err?.message || err}`;
+      console.error(msg, err);
+    };
+    window.onerror = (msg, src, line, col, err) => reportError('onerror', err || msg);
+    window.onunhandledrejection = (e) => reportError('unhandledrejection', e.reason);
+
+    function dbg(msg) { console.log('[GPU-DBG] ' + msg); }
+
+    // ══════════════════════════════════════════════════════════════
+    // STATE 1: PROJECT PICKER
+    // ══════════════════════════════════════════════════════════════
+
+    const pickerEl = document.getElementById('project-picker');
+    const loadingEl = pickerEl.querySelector('.picker-loading');
+    const errorEl = pickerEl.querySelector('.picker-error');
+    const projectsEl = pickerEl.querySelector('.picker-projects');
+    const sectionTitles = pickerEl.querySelectorAll('.picker-section-title');
+    const manualEl = pickerEl.querySelector('.picker-manual');
+    const manualInput = document.getElementById('manual-path');
+    const manualBtn = document.getElementById('manual-connect');
+
+    function getRecentProjects() {
+      try { return JSON.parse(localStorage.getItem(RECENT_KEY) || '[]'); } catch { return []; }
+    }
+    function addRecentProject(projectPath, projectName) {
+      const recent = getRecentProjects().filter(p => p.path !== projectPath);
+      recent.unshift({ path: projectPath, name: projectName, ts: Date.now() });
+      localStorage.setItem(RECENT_KEY, JSON.stringify(recent.slice(0, 10)));
+    }
+
+    // Cache full registry response for enterWorkspace to find sessions
+    let _registryData = null;
+
+    async function loadRegistry() {
+      try {
+        const resp = await fetch('/api/v1/registry', { signal: AbortSignal.timeout(3000) });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        _registryData = data;
+        loadingEl.style.display = 'none';
+
+        // Use pre-grouped projects array from API (only alive sessions counted)
+        const projects = (data.projects || []).filter(p => p.session_count > 0);
+
+        if (projects.length === 0) {
+          // No active projects -- show manual input only
+          sectionTitles.forEach(el => el.style.display = 'block');
+          manualEl.style.display = 'flex';
+          const info = document.createElement('div');
+          info.style.cssText = 'font-size:12px;color:#a6adc8;padding:12px;text-align:center;';
+          info.textContent = 'No active terminal sessions found. Enter a project path or start a terminal session first.';
+          projectsEl.appendChild(info);
+          projectsEl.style.display = 'flex';
+          return;
+        }
+
+        sectionTitles.forEach(el => el.style.display = 'block');
+        projectsEl.style.display = 'flex';
+        manualEl.style.display = 'flex';
+
+        // Sort by last_activity descending
+        projects.sort((a, b) => (b.last_activity || 0) - (a.last_activity || 0));
+
+        for (const proj of projects) {
+          const card = document.createElement('div');
+          card.className = 'picker-card';
+          // Build card content safely using DOM methods
+          const icon = document.createElement('div');
+          icon.className = 'picker-card-icon'; icon.textContent = '\uD83D\uDCC2';
+          const info = document.createElement('div');
+          info.className = 'picker-card-info';
+          const nameDiv = document.createElement('div');
+          nameDiv.className = 'picker-card-name'; nameDiv.textContent = proj.name;
+          const pathDiv = document.createElement('div');
+          pathDiv.className = 'picker-card-path'; pathDiv.textContent = proj.project_dir;
+          info.appendChild(nameDiv); info.appendChild(pathDiv);
+          const countDiv = document.createElement('div');
+          countDiv.className = 'picker-card-sessions';
+          countDiv.textContent = proj.session_count + ' session' + (proj.session_count === 1 ? '' : 's');
+          card.appendChild(icon); card.appendChild(info); card.appendChild(countDiv);
+          card.addEventListener('click', () => {
+            // Find alive sessions for this project from registry data
+            const sessList = (_registryData?.sessions || []).filter(s =>
+              s.project_dir === proj.project_dir && s.alive && s.ws_port
+            );
+            enterWorkspace(proj.project_dir, proj.name, sessList);
+          });
+          projectsEl.appendChild(card);
+        }
+      } catch (err) {
+        loadingEl.style.display = 'none';
+        errorEl.textContent = 'Could not reach hub server. Make sure immorterm-hub is running.';
+        errorEl.style.display = 'block';
+        sectionTitles.forEach(el => el.style.display = 'block');
+        manualEl.style.display = 'flex';
+        projectsEl.style.display = 'flex';
+      }
+    }
+
+    manualBtn.addEventListener('click', () => {
+      const path = manualInput.value.trim();
+      if (path) enterWorkspace(path, path.split('/').pop(), []);
+    });
+    manualInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') manualBtn.click(); });
+
+    // ══════════════════════════════════════════════════════════════
+    // STATE 2: TERMINAL WORKSPACE
+    // ══════════════════════════════════════════════════════════════
+
+    let currentProjectDir = null;
+    let currentProjectName = 'ImmorTerm';
+
+    async function enterWorkspace(projectDir, projectName, existingSessions) {
+      // Disconnect from previous project sessions (without killing daemons)
+      if (sessions.size > 0) {
+        for (const [, sess] of sessions) {
+          if (sess.pingInterval) clearInterval(sess.pingInterval);
+          if (sess.ws) { sess.ws.onclose = null; sess.ws.close(); }
+          if (sess.bgStateId !== null && terminal) terminal.destroy_background(sess.bgStateId);
+        }
+        sessions.clear();
+        sessionOrder.length = 0;
+        activeSessionName = null;
+        stopAutoCycle(); stopHealthChecks();
+      }
+      currentProjectDir = projectDir;
+      currentProjectName = projectName || projectDir.split('/').pop();
+      addRecentProject(projectDir, currentProjectName);
+
+      pickerEl.style.display = 'none';
+      document.getElementById('workspace').style.display = 'flex';
+
+      // Check WebGPU support
+      if (!navigator.gpu) {
+        document.getElementById('no-webgpu').style.display = 'block';
+        return;
+      }
+
+      // Import shared modules via symlinks
+      try {
+        utils = await import('./gpu-terminal-utils.js');
+        reportError = utils.createReportError({ postMessage: () => {}, appendTo: document.body });
+        renderSidebar = utils.createRenderSidebar({
+          sessionListEl,
+          sessions,
+          getActiveSessionName: () => activeSessionName,
+          onSwitch: (name) => switchSession(name),
+          onRename: (name, session, nameEl) => startSessionRename(name, session, nameEl),
+          onRemove: (name) => removeSession(name),
+          onContextMenu: (e, name) => showSessionContextMenu(e, name),
+          isRenaming: () => _renamingSession !== null,
+          getOrder: () => sessionOrder,
+          onReorder: (newOrder) => {
+            sessionOrder.length = 0;
+            sessionOrder.push(...newOrder);
+            localStorage.setItem(ORDER_KEY, JSON.stringify(newOrder));
+            renderSidebar();
+          },
+          onShareContext: (sourceName, targetName) => {
+            // In standalone, share is a no-op visual-only
+            showShareBadge(sourceName, targetName);
+          },
+          onShareDragState: (isDragging, sessionName) => {
+            if (isDragging && sessionName) {
+              const s = sessions.get(sessionName);
+              showShareDropZone(s?.displayName || sessionName);
+            } else {
+              hideShareDropZone();
+            }
+          },
+        });
+        dbg('utils module loaded');
+      } catch (e) { reportError('gpu-terminal-utils', e); }
+
+      try {
+        const modalsModule = await import('./gpu-terminal-modals.js');
+        modals = modalsModule.createModalSystem({
+          modalBackdrop: document.getElementById('modal-backdrop'),
+          modalContainer: document.getElementById('modal-container'),
+          modalTitle: document.getElementById('modal-title'),
+          modalBody: document.getElementById('modal-body'),
+          modalFooter: document.getElementById('modal-footer'),
+          modalCloseBtn: document.getElementById('modal-close'),
+          canvas,
+          postMessage: () => {},
+          dismissPopup,
+          getPrefs: () => ({ ...prefs }),
+          setPrefs: (p) => {
+            Object.assign(prefs, p);
+            if (p.statusBarMode !== undefined) {
+              if (prefs.statusBarMode === 'always') { sbAnim.reveal = 1.0; sbAnim.target = 1.0; }
+              else { sbAnim.reveal = 0.0; sbAnim.target = 0.0; }
+            }
+            applyPrefs();
+            localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+          },
+          getTerminal: () => terminal,
+        });
+        dbg('modals module loaded');
+      } catch (e) { reportError('gpu-terminal-modals', e); }
+
+      // Fetch per-project theme from hub config before WASM init
+      try {
+        const cfg = await fetch('/api/v1/config?project_dir=' + encodeURIComponent(projectDir), { signal: AbortSignal.timeout(2000) }).then(r => r.json());
+        if (cfg.memory_url) MEMORY_URL = cfg.memory_url;
+        if (cfg.theme && !localStorage.getItem('immorterm-theme')) {
+          activeThemeName = cfg.theme;
+        }
+      } catch (e) { dbg('config fetch failed:', e); }
+
+      // Init WASM
+      await initWasm();
+
+      // Restore preferences
+      try {
+        const saved = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}');
+        Object.assign(prefs, saved);
+        if (prefs.statusBarMode === 'always') { sbAnim.reveal = 1.0; sbAnim.target = 1.0; }
+        else { sbAnim.reveal = 0.0; sbAnim.target = 0.0; }
+        applyPrefs();
+      } catch {}
+
+      // Restore session order
+      try {
+        const saved = JSON.parse(localStorage.getItem(ORDER_KEY) || '[]');
+        if (saved.length > 0) sessionOrder.push(...saved);
+      } catch {}
+
+      // Update project name on status bar (for project switches after WASM is ready)
+      if (terminal && wasmReady) terminal.set_project_name(currentProjectName);
+
+      // Connect to existing sessions (registry entries with ws_port + alive)
+      if (existingSessions && existingSessions.length > 0) {
+        for (const sess of existingSessions) {
+          if (sess.ws_port && sess.name) {
+            addSession(sess.name, sess.ws_port, sess.display_name || sess.name, null, sess.title_locked || false, sess.window_id);
+          }
+        }
+      }
+
+      // If no sessions were added, show empty state
+      if (sessions.size === 0) {
+        canvas.style.display = 'none';
+        emptyState.style.display = 'flex';
+      }
+
+      // Start visibility as always-on (browser tab, not VS Code panel)
+      webviewVisible = true;
+    }
+
+    // ── DOM References ──
+    const canvas = document.getElementById('terminal-canvas');
+    const emptyState = document.getElementById('empty-state');
+    const overlay = document.getElementById('ai-overlay');
+    overlay.addEventListener('click', () => canvas.focus(), true);
+    const sbPopup = document.getElementById('sb-popup');
+    const statusEl = document.getElementById('status-indicator');
+    const sessionListEl = document.getElementById('session-list');
+    const newSessionBtn = document.getElementById('new-session-btn');
+    const sidebar = document.getElementById('sidebar');
+    const sidebarToggle = document.getElementById('sidebar-toggle');
+    const sidebarExpandBtn = document.getElementById('sidebar-expand-btn');
+    const resizeHandle = document.getElementById('sidebar-resize-handle');
+
+    // ── Sidebar: Collapse / Resize / Auto-reveal ──
+    let sidebarMode = 'show'; // 'show' | 'auto-reveal' | 'collapsed'
+
+    function saveSidebarState() {
+      const p = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}');
+      p.sidebarMode = sidebarMode;
+      p.sidebarWidth = parseInt(sidebar.style.width) || 160;
+      localStorage.setItem(PREFS_KEY, JSON.stringify(p));
+    }
+
+    function applySidebarMode(mode, savedWidth) {
+      sidebarMode = mode;
+      sidebar.style.width = '';
+      sidebar.classList.remove('collapsed', 'auto-reveal', 'revealed');
+      if (mode === 'collapsed') {
+        sidebar.classList.add('collapsed');
+        sidebarExpandBtn.classList.add('visible');
+      } else if (mode === 'auto-reveal') {
+        sidebar.classList.add('auto-reveal');
+        sidebarExpandBtn.classList.add('visible');
+      } else {
+        const w = savedWidth || JSON.parse(localStorage.getItem(PREFS_KEY) || '{}').sidebarWidth;
+        if (w) sidebar.style.width = w + 'px';
+        sidebarExpandBtn.classList.remove('visible');
+      }
+      saveSidebarState();
+    }
+
+    // Restore saved mode
+    {
+      const saved = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}');
+      // Legacy migration
+      if (saved.sidebarCollapsed && !saved.sidebarMode) saved.sidebarMode = 'collapsed';
+      applySidebarMode(saved.sidebarMode || 'show', saved.sidebarWidth);
+    }
+
+    sidebarToggle.addEventListener('click', () => {
+      applySidebarMode(sidebarMode === 'show' ? 'collapsed' : 'show');
+    });
+
+    sidebarExpandBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      applySidebarMode('show');
+      canvas.focus();
+    });
+
+    // Auto-reveal: hover over expand button to reveal, leave sidebar to hide
+    {
+      let hideTimer = null;
+
+      sidebarExpandBtn.addEventListener('mouseenter', () => {
+        if (sidebarMode !== 'auto-reveal') return;
+        clearTimeout(hideTimer);
+        sidebar.classList.add('revealed');
+        sidebarExpandBtn.classList.remove('visible');
+      });
+
+      sidebar.addEventListener('mouseenter', () => {
+        if (sidebarMode !== 'auto-reveal') return;
+        clearTimeout(hideTimer);
+      });
+
+      sidebar.addEventListener('mouseleave', () => {
+        if (sidebarMode !== 'auto-reveal') return;
+        hideTimer = setTimeout(() => {
+          sidebar.classList.remove('revealed');
+          sidebarExpandBtn.classList.add('visible');
+        }, 300);
+      });
+    }
+
+    // Drag-resize sidebar
+    {
+      let resizing = false, startX = 0, startWidth = 0;
+      resizeHandle.addEventListener('mousedown', (e) => {
+        if (sidebarMode !== 'show') return;
+        e.preventDefault(); resizing = true; startX = e.clientX;
+        startWidth = sidebar.getBoundingClientRect().width;
+        resizeHandle.classList.add('active');
+        document.body.style.userSelect = 'none'; document.body.style.cursor = 'col-resize';
+      });
+      document.addEventListener('mousemove', (e) => {
+        if (!resizing) return;
+        const delta = startX - e.clientX;
+        sidebar.style.width = Math.min(300, Math.max(120, startWidth + delta)) + 'px';
+        sidebar.style.transition = 'none';
+      });
+      document.addEventListener('mouseup', () => {
+        if (!resizing) return;
+        resizing = false; resizeHandle.classList.remove('active');
+        document.body.style.userSelect = ''; document.body.style.cursor = '';
+        sidebar.style.transition = ''; saveSidebarState();
+      });
+    }
+
+    // ── Multi-session State ──
+    const sessions = new Map();
+    const sessionOrder = [];
+    const clipboardCheckResolvers = new Map();
+    let clipboardCheckSeq = 0;
+    let activeSessionName = null;
+    let terminal = null;
+    let wasmReady = false;
+    let utils = null;
+    let dirty = true;
+    let mouseDown = false;
+    let userScrollLock = false;
+    let scrollAccumulator = 0;
+    let serverScrollbackTotal = 0;
+    let daemonFetchedRows = 0;
+    let scrollRequestPending = false;
+    let lastClickPos = null;
+    let cellWidth = 0;
+    let cellHeight = 0;
+    let currentHoverTarget = 'none';
+    let titleTooltipTimer = null;
+    const titleTooltip = document.getElementById('title-tooltip');
+    let popupVisible = false;
+    const aiCards = new Map();
+    const aiButtons = new Map();
+
+    // ── Share Context Drop Zone + Badge ──
+    const shareDropZone = document.createElement('div');
+    shareDropZone.className = 'share-drop-zone';
+    document.getElementById('terminal-area').appendChild(shareDropZone);
+
+    let pendingShareBadge = null;
+    function showShareDropZone(sessionName) {
+      shareDropZone.textContent = '\uD83D\uDCCE Attach ' + sessionName;
+      shareDropZone.classList.add('visible');
+    }
+    function hideShareDropZone() { shareDropZone.classList.remove('visible'); }
+    function showShareBadge(sourceName, targetSession) {
+      dismissShareBadge();
+      const termArea = document.getElementById('terminal-area');
+      const el = document.createElement('div');
+      el.className = 'share-badge';
+      el.appendChild(document.createTextNode('\uD83D\uDCCE ' + sourceName + ' '));
+      const dismiss = document.createElement('span');
+      dismiss.className = 'dismiss';
+      dismiss.textContent = '\u2715';
+      dismiss.addEventListener('click', () => dismissShareBadge());
+      el.appendChild(dismiss);
+      termArea.appendChild(el);
+      const target = targetSession || activeSessionName;
+      pendingShareBadge = { sourceName, el, targetSession: target };
+      if (activeSessionName !== target) el.style.display = 'none';
+    }
+    function dismissShareBadge() {
+      if (pendingShareBadge) { pendingShareBadge.el.remove(); pendingShareBadge = null; }
+    }
+    function consumeShareBadge() {
+      if (!pendingShareBadge) return;
+      const el = pendingShareBadge.el;
+      const rect = el.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+      for (let i = 0; i < 8; i++) {
+        const p = document.createElement('div');
+        p.className = 'share-particle';
+        const angle = (i / 8) * Math.PI * 2 + (Math.random() - 0.5) * 0.5;
+        const dist = 30 + Math.random() * 25;
+        p.style.left = cx + 'px'; p.style.top = cy + 'px';
+        p.style.setProperty('--px', Math.cos(angle) * dist + 'px');
+        p.style.setProperty('--py', Math.sin(angle) * dist + 'px');
+        p.style.width = p.style.height = (3 + Math.random() * 4) + 'px';
+        document.body.appendChild(p);
+        setTimeout(() => p.remove(), 1500);
+      }
+      el.textContent = '\u2713 Shared';
+      el.classList.add('consumed');
+      const ref = pendingShareBadge;
+      setTimeout(() => { if (ref.el.parentNode) ref.el.remove(); }, 2100);
+      pendingShareBadge = null;
+    }
+
+    // ── Scroll Indicator Dragging ──
+    let scrollDrag = null;
+
+    // ── AI Card Dragging ──
+    let cardDrag = null;
+    document.addEventListener('mousemove', (e) => {
+      if (!cardDrag) return;
+      const dx = e.clientX - cardDrag.startX, dy = e.clientY - cardDrag.startY;
+      if (!cardDrag.dragging && Math.abs(dx) + Math.abs(dy) > 4) {
+        cardDrag.dragging = true; cardDrag.card.classList.add('dragging');
+      }
+      if (cardDrag.dragging) {
+        cardDrag.card.style.left = (cardDrag.origLeft + dx) + 'px';
+        cardDrag.card.style.top = (cardDrag.origTop + dy) + 'px';
+      }
+    });
+    document.addEventListener('mouseup', () => {
+      if (cardDrag?.dragging) cardDrag.card.classList.remove('dragging');
+      cardDrag = null;
+    });
+
+    // ── AI Stats Display State ──
+    let aiStatsMode = 0;
+    let aiAutoCycleTimer = null;
+    function formatMemory(kb) { return utils.formatMemory(kb); }
+    function formatRuntime(secs) { return utils.formatRuntime(secs); }
+    function contextBar(pct) { return utils.contextBar(pct); }
+    function hexToRgb(hex) { return utils.hexToRgb(hex); }
+    function el(tag, cls, text) { return utils.el(tag, cls, text); }
+    function parseCSSColor(value) { return utils.parseCSSColor(value); }
+    function parseCSSColorWithAlpha(value) { return utils.parseCSSColorWithAlpha(value); }
+    function stripEmojis(str) { return utils.stripEmojis(str); }
+
+    // ── Health Indicators ──
+    let openMemoryHealthy = false;
+    let mcpGatewayHealthy = false;
+    let healthCheckTimer = null;
+
+    function getHealthIndicators() {
+      let s = '';
+      if (openMemoryHealthy) s += ' \uD83E\uDDE0';
+      if (mcpGatewayHealthy) s += ' \uD83D\uDCE1';
+      return s;
+    }
+    function checkHealthServices() {
+      fetch(MEMORY_URL + '/health', { signal: AbortSignal.timeout(2000) })
+        .then(r => { openMemoryHealthy = r.ok; }).catch(() => { openMemoryHealthy = false; });
+      fetch('http://localhost:3100/health', { signal: AbortSignal.timeout(2000) })
+        .then(r => { mcpGatewayHealthy = r.ok; }).catch(() => { mcpGatewayHealthy = false; });
+    }
+    function startHealthChecks() {
+      if (healthCheckTimer) return;
+      checkHealthServices();
+      healthCheckTimer = setInterval(checkHealthServices, 30000);
+    }
+    function stopHealthChecks() {
+      if (healthCheckTimer) { clearInterval(healthCheckTimer); healthCheckTimer = null; }
+      openMemoryHealthy = false; mcpGatewayHealthy = false;
+    }
+
+    function formatProcessStats(c) {
+      const ram = c.rss_kb ? 'RAM:' + formatMemory(c.rss_kb) : '';
+      const cpu = c.cpu_percent != null ? ' CPU:' + Math.round(c.cpu_percent) + '%' : '';
+      const runtime = c.runtime_secs ? ' ' + formatRuntime(c.runtime_secs) : '';
+      return ram + cpu + runtime;
+    }
+    function formatApiStats(c) {
+      return 'CTX: ' + Math.round(c.context_pct || 0) + '%';
+    }
+
+    // ── Emoji Overlay System ──
+    const EMOJI_RE = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/u;
+    const emojiOverlayContainer = document.getElementById('emoji-overlays');
+    let lastEmojiOverlayKey = '';
+
+    function updateEmojiOverlays(emojis) {
+      const key = emojis.map(e => e.char + '@' + e.col).join(',');
+      if (key === lastEmojiOverlayKey) return;
+      lastEmojiOverlayKey = key;
+      while (emojiOverlayContainer.firstChild) emojiOverlayContainer.removeChild(emojiOverlayContainer.firstChild);
+      if (emojis.length === 0 || cellWidth <= 0 || cellHeight <= 0 || !terminal) return;
+      const aiStartCol = getAiStatsStartCol();
+      const visibleRows = terminal.visible_rows();
+      const statusBarTopPx = PAD_TOP_CSS + visibleRows * cellHeight;
+      for (const e of emojis) {
+        const span = document.createElement('span');
+        span.textContent = e.char;
+        span.style.position = 'absolute';
+        span.style.left = (PAD_LEFT_CSS + (aiStartCol + e.col) * cellWidth) + 'px';
+        span.style.top = statusBarTopPx + 'px';
+        span.style.fontSize = (cellHeight * 0.75) + 'px';
+        span.style.lineHeight = cellHeight + 'px';
+        span.style.pointerEvents = 'none';
+        emojiOverlayContainer.appendChild(span);
+      }
+    }
+    function getAiStatsStartCol() {
+      if (!terminal) return 0;
+      for (let col = 0; col < (terminal.dimensions ? terminal.dimensions()[0] : 80); col++) {
+        const target = terminal.status_bar_hit_test(col);
+        if (target === 'ai_stats') return col;
+      }
+      return 0;
+    }
+    function setAiStatsWithOverlay(statsStr) { if (terminal) terminal.set_ai_stats(statsStr); }
+    function formatCurrentStats(c) {
+      if (!c) return '';
+      return aiStatsMode === 0 ? formatProcessStats(c) : formatApiStats(c);
+    }
+    function startAutoCycle() {
+      stopAutoCycle();
+      aiAutoCycleTimer = setInterval(() => {
+        aiStatsMode = (aiStatsMode + 1) % 2;
+        const s = sessions.get(activeSessionName);
+        if (s && s.claudeRaw) {
+          s.aiStats = formatCurrentStats(s.claudeRaw);
+          if (terminal) setAiStatsWithOverlay(s.aiStats);
+          if (terminal) terminal.set_ai_ctx_pct(aiStatsMode === 1 ? s.claudeRaw.context_pct : 0);
+          dirty = true;
+        }
+      }, 10000);
+    }
+    function stopAutoCycle() { if (aiAutoCycleTimer) { clearInterval(aiAutoCycleTimer); aiAutoCycleTimer = null; } }
+
+    // ── Shared menu/theme data ──
+    let THEMES = [...DEFAULT_THEMES];
+    let FREE_THEMES = new Set(DEFAULT_THEMES.map(t => t.name));
+    let menuItems = [{ id: 'theme', label: 'Theme', desc: 'Change the terminal theme' }];
+
+    function updatePopupTheme(theme) {
+      const { r, g, b } = hexToRgb(theme.bg);
+      const { r: ar, g: ag, b: ab } = hexToRgb(theme.accent);
+      const { r: fr, g: fg, b: fb } = hexToRgb(theme.fg);
+      const s = document.documentElement.style;
+      s.setProperty('--sb-popup-bg', `rgba(${r}, ${g}, ${b}, 0.98)`);
+      s.setProperty('--sb-popup-border', `rgba(${ar}, ${ag}, ${ab}, 0.4)`);
+      s.setProperty('--sb-popup-hover', `rgba(${ar}, ${ag}, ${ab}, 0.15)`);
+      s.setProperty('--sb-popup-active', theme.accent);
+      s.setProperty('--sb-popup-text', theme.fg);
+      const mix = (c, pct) => Math.min(255, Math.round(c + (255 - c) * pct));
+      s.setProperty('--sb-popup-separator', `rgb(${mix(r,0.2)}, ${mix(g,0.2)}, ${mix(b,0.2)})`);
+      s.setProperty('--sb-popup-header', `rgba(${fr}, ${fg}, ${fb}, 0.5)`);
+      s.setProperty('--sidebar-bg', theme.bg);
+      s.setProperty('--sidebar-border', `rgba(${mix(r,0.15)}, ${mix(g,0.15)}, ${mix(b,0.15)}, 1)`);
+      s.setProperty('--sidebar-text', theme.fg);
+      s.setProperty('--sidebar-muted', `rgba(${fr}, ${fg}, ${fb}, 0.65)`);
+      s.setProperty('--sidebar-hover', `rgba(${ar}, ${ag}, ${ab}, 0.08)`);
+      s.setProperty('--sidebar-accent', theme.accent);
+      s.setProperty('--sidebar-active-bg', `rgba(${ar}, ${ag}, ${ab}, 0.12)`);
+      s.setProperty('--sidebar-active-glow', `rgba(${ar}, ${ag}, ${ab}, 0.08)`);
+      s.setProperty('--badge-glow-soft', `rgba(${ar}, ${ag}, ${ab}, 0.1)`);
+      s.setProperty('--badge-glow-border', `rgba(${ar}, ${ag}, ${ab}, 0.3)`);
+      s.setProperty('--badge-glow-bg', `rgba(${ar}, ${ag}, ${ab}, 0.15)`);
+      s.setProperty('--badge-glow-border-bright', `rgba(${ar}, ${ag}, ${ab}, 0.6)`);
+      s.setProperty('--badge-glow-halo', `rgba(${ar}, ${ag}, ${ab}, 0.4)`);
+      s.setProperty('--badge-glow-halo-soft', `rgba(${ar}, ${ag}, ${ab}, 0.25)`);
+    }
+
+    // ── Status Indicator ──
+    function showStatus(text, cls) {
+      statusEl.textContent = text;
+      statusEl.className = 'visible' + (cls ? ' ' + cls : '');
+      setTimeout(() => { statusEl.className = ''; }, 3000);
+    }
+
+    // ── Sidebar Rendering ──
+    let renderSidebar = () => {};
+    let _renamingSession = null;
+    let modals = null;
+
+    function trackAiPrimitiveCount(sessionName, msg) {
+      const s = sessions.get(sessionName);
+      if (!s || !msg.data) return;
+      const count = Array.isArray(msg.data.primitives) ? msg.data.primitives.length : 0;
+      if (s.aiPrimitiveCount !== count) { s.aiPrimitiveCount = count; renderSidebar(); }
+    }
+
+    function startSessionRename(sessionName, session, nameEl) {
+      _renamingSession = sessionName;
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = session.displayName || sessionName;
+      input.className = 'name';
+      input.style.cssText = 'background:#313244;border:1px solid #b482ff;outline:none;padding:0 2px;color:#cdd6f4;font:inherit;width:100%;';
+      nameEl.replaceWith(input);
+      input.focus(); input.select();
+      const commit = () => {
+        _renamingSession = null;
+        const newName = input.value.trim();
+        if (newName && newName !== session.displayName) {
+          session.displayName = newName;
+          session.titleLocked = true;
+          // Persist rename via API (best-effort) — requires window_id
+          if (session.windowId) {
+            fetch('/api/v1/registry/rename', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ window_id: session.windowId, display_name: newName }),
+            }).catch(() => {});
+          }
+        }
+        renderSidebar();
+      };
+      input.addEventListener('blur', commit);
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') { ev.preventDefault(); input.blur(); }
+        if (ev.key === 'Escape') { input.value = session.displayName || sessionName; input.blur(); }
+      });
+    }
+
+    function showSessionContextMenu(e, sessionName) {
+      e.preventDefault(); e.stopPropagation();
+      const old = document.querySelector('.sb-context-menu');
+      if (old) old.remove();
+      const menu = el('div', 'sb-context-menu');
+      menu.style.left = e.clientX + 'px'; menu.style.top = e.clientY + 'px';
+      const renameItem = el('div', 'sb-context-menu-item', 'Rename');
+      renameItem.addEventListener('click', () => {
+        menu.remove();
+        const nameEl = document.querySelector(`.session-item[data-name="${sessionName}"] .name`);
+        const session = sessions.get(sessionName);
+        if (nameEl && session) startSessionRename(sessionName, session, nameEl);
+      });
+      menu.appendChild(renameItem);
+      const lockSession = sessions.get(sessionName);
+      const lockItem = el('div', 'sb-context-menu-item', lockSession?.titleLocked ? 'Unlock Title' : 'Lock Title');
+      lockItem.addEventListener('click', () => {
+        menu.remove();
+        if (lockSession) { lockSession.titleLocked = !lockSession.titleLocked; renderSidebar(); }
+      });
+      menu.appendChild(lockItem);
+      const clearItem = el('div', 'sb-context-menu-item', 'Clear Drawings');
+      clearItem.addEventListener('click', () => {
+        menu.remove();
+        const session = sessions.get(sessionName);
+        if (session && session.ws && session.connected) session.ws.send(JSON.stringify({ type: 'clear_ai_layer' }));
+        if (session) { session.aiPrimitiveCount = 0; renderSidebar(); }
+        if (sessionName === activeSessionName) {
+          if (terminal) terminal.update_ai_primitives('[]', 0);
+          syncAiOverlays([]);
+        }
+      });
+      menu.appendChild(clearItem);
+      document.body.appendChild(menu);
+      const dismissFn = (ev) => {
+        if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('click', dismissFn, true); }
+      };
+      setTimeout(() => document.addEventListener('click', dismissFn, true), 0);
+    }
+
+    // ── New Session Button ──
+    newSessionBtn.addEventListener('click', async () => {
+      try {
+        const resp = await fetch('/api/v1/registry/spawn', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ project_dir: currentProjectDir }),
+        });
+        const result = await resp.json();
+        if (result.error) { showStatus('Spawn failed: ' + result.error, 'error'); return; }
+        addSession(result.session_name, result.ws_port, result.display_name || result.session_name, null, false, result.window_id);
+      } catch (err) {
+        showStatus('Spawn failed: ' + err.message, 'error');
+      }
+    });
+
+    // ── Shared WebSocket Handlers ──
+    function setupWsHandlers(ws, sessionName, session, opts = {}) {
+      ws.onopen = () => {
+        session.connected = true;
+        dbg('ws.onopen: ' + sessionName + ' active=' + (sessionName === activeSessionName));
+        // Probe clipboard_check_image support — old daemons silently ignore
+        // unknown messages; flagging them stale lets paste skip the RPC for
+        // zero-delay text paste.
+        session.clipboardRpc = 'unknown';
+        try {
+          const probeId = 'cb-probe-' + (++clipboardCheckSeq);
+          clipboardCheckResolvers.set(probeId, () => { session.clipboardRpc = 'supports'; });
+          ws.send(JSON.stringify({ type: 'clipboard_check_image', request_id: probeId }));
+          setTimeout(() => { if (clipboardCheckResolvers.delete(probeId)) session.clipboardRpc = 'stale'; }, 1000);
+        } catch (_) { session.clipboardRpc = 'stale'; }
+        if (opts.onOpen) opts.onOpen(ws);
+        ws.send(JSON.stringify({ type: 'subscribe_raw' }));
+        renderSidebar();
+        if (sessionName === activeSessionName) showStatus(opts.connectStatus || 'Connected', 'connected');
+        if (session.pingInterval) clearInterval(session.pingInterval);
+        session.pingInterval = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
+          else clearInterval(session.pingInterval);
+        }, 30000);
+      };
+
+      ws.onmessage = (event) => {
+        if (event.data instanceof ArrayBuffer) {
+          if (!terminal) return;
+          const data = new Uint8Array(event.data);
+          if (_resizePending) {
+            if (_resizeDeadline && performance.now() > _resizeDeadline) {
+              _resizePending = false; _resizeDeadline = 0;
+              if (_resyncTimer) { clearTimeout(_resyncTimer); _resyncTimer = null; }
+              scheduleResync();
+            } else { scheduleResync(); return; }
+          }
+          if (sessionName === activeSessionName) {
+            const sbBefore = userScrollLock ? terminal.scrollback_len() : 0;
+            terminal.process(data);
+            dirty = true;
+            if (userScrollLock) {
+              const sbGrown = terminal.scrollback_len() - sbBefore;
+              if (sbGrown > 0) terminal.scroll(sbGrown);
+            } else if (!mouseDown && terminal.scroll_offset() > 0) {
+              terminal.scroll_to_bottom();
+            }
+            repositionScrollAnchoredCards();
+          } else {
+            const s = sessions.get(sessionName);
+            if (s && s.bgStateId !== null) {
+              try { terminal.process_background(s.bgStateId, data); }
+              catch (e) { dbg('process_background error: ' + e); }
+            }
+          }
+        } else {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'title_changed') {
+              const s = sessions.get(sessionName);
+              if (s && !s.titleLocked) {
+                s.displayName = msg.title;
+                renderSidebar();
+                if (sessionName === activeSessionName && terminal) {
+                  terminal.set_session_title(msg.title);
+                  dirty = true;
+                }
+              }
+              if (s && s.bgStateId !== null && terminal) {
+                try { terminal.set_background_session_title(s.bgStateId, msg.title); } catch {}
+              }
+            } else if (msg.type === 'snapshot') {
+              const s = sessions.get(sessionName);
+              if (sessionName === activeSessionName) {
+                handleServerMessage(msg);
+              } else if (s && s.bgStateId !== null && terminal && msg.snapshot_json) {
+                try { terminal.load_snapshot_background(s.bgStateId, msg.snapshot_json); } catch (e) { dbg('load_snapshot_background error: ' + e); }
+              } else if (s && s.bgStateId === null && terminal && msg.snapshot_json) {
+                try { s.bgStateId = terminal.create_background(msg.snapshot_json); dbg('created background state ' + s.bgStateId + ' for ' + sessionName); } catch (e) { dbg('create_background error: ' + e); }
+              }
+              if (s && msg.scrollback_total !== undefined) { s.scrollbackTotal = msg.scrollback_total || 0; s.daemonFetchedRows = 0; }
+              if (sessionName !== activeSessionName && s && msg.ai_stats) {
+                s.aiStats = msg.ai_stats;
+                if (s.bgStateId !== null && terminal) { try { terminal.set_background_ai_stats(s.bgStateId, msg.ai_stats); } catch {} }
+              }
+            } else if (msg.type === 'control_event') {
+              if (msg.last_user_prompt) { const s2 = sessions.get(sessionName); if (s2) s2.lastUserPrompt = msg.last_user_prompt; }
+              if (msg.claude) {
+                const s = sessions.get(sessionName);
+                if (s && msg.event === 'claude_exited') {
+                  s.claudeRaw = null; s.aiStats = '';
+                  if (s.bgStateId !== null && terminal) { try { terminal.set_background_ai_stats(s.bgStateId, ''); } catch {} }
+                  let anyActive = false;
+                  for (const [, sess] of sessions) { if (sess.claudeRaw) { anyActive = true; break; } }
+                  if (!anyActive) { stopAutoCycle(); stopHealthChecks(); }
+                } else if (s && msg.claude.active) {
+                  s.claudeRaw = msg.claude; s.aiStats = formatCurrentStats(msg.claude);
+                  startHealthChecks(); startAutoCycle();
+                  if (s.bgStateId !== null && terminal) { try { terminal.set_background_ai_stats(s.bgStateId, s.aiStats); } catch {} }
+                }
+              }
+              if (sessionName === activeSessionName) handleServerMessage(msg);
+            } else if (msg.type === 'expression_update') {
+              if (sessionName === activeSessionName && terminal && msg.state) {
+                try { terminal.set_expression(JSON.stringify(msg.state)); dirty = true; } catch {}
+              }
+            } else if (msg.type === 'clipboard_image_presence') {
+              const resolver = clipboardCheckResolvers.get(msg.request_id);
+              if (resolver) {
+                clipboardCheckResolvers.delete(msg.request_id);
+                resolver({ hasImage: !!msg.has_image, fileUrl: msg.file_url || null });
+              }
+            } else if (msg.type === 'clipboard_image_saved') {
+              const resolver = clipboardCheckResolvers.get(msg.request_id);
+              if (resolver) {
+                clipboardCheckResolvers.delete(msg.request_id);
+                resolver({ path: msg.path || null });
+              }
+            } else {
+              if (msg.type === 'ai_layer_update' && msg.data) trackAiPrimitiveCount(sessionName, msg);
+              if (sessionName === activeSessionName) handleServerMessage(msg);
+            }
+          } catch (e) { console.warn('Invalid WS JSON:', e); }
+        }
+      };
+
+      ws.onclose = () => {
+        session.connected = false;
+        if (session.pingInterval) clearInterval(session.pingInterval);
+        renderSidebar();
+        if (sessionName === activeSessionName) showStatus('Disconnected', 'error');
+        setTimeout(() => { if (sessions.has(sessionName) && !session.connected) reconnectSession(sessionName); }, 2000);
+      };
+      ws.onerror = () => { if (sessionName === activeSessionName) showStatus('Connection error', 'error'); };
+    }
+
+    // ── Session Management ──
+    function addSession(sessionName, wsPort, displayName, theme, titleLocked, windowId) {
+      if (sessions.has(sessionName)) return;
+      dbg('addSession: ' + sessionName + ' ws://127.0.0.1:' + wsPort);
+      if (theme) {
+        activeThemeName = theme;
+        const themeObj = THEMES.find(t => t.name === theme);
+        if (themeObj) updatePopupTheme(themeObj);
+        try { if (terminal) terminal.set_theme(theme); } catch {}
+      }
+      const session = { wsPort, ws: null, connected: false, displayName: displayName || sessionName, bgStateId: null, titleLocked: !!titleLocked, lastUserPrompt: null, scrollbackTotal: 0, daemonFetchedRows: 0, aiPrimitiveCount: 0, windowId: windowId || null };
+      sessions.set(sessionName, session);
+      if (!sessionOrder.includes(sessionName)) sessionOrder.push(sessionName);
+      let ws;
+      try { ws = new WebSocket('ws://127.0.0.1:' + wsPort); ws.binaryType = 'arraybuffer'; }
+      catch (e) { reportError('WebSocket creation', e); return; }
+      session.ws = ws;
+      setupWsHandlers(ws, sessionName, session, {
+        connectStatus: 'Connected',
+        onOpen: (ws) => {
+          if (terminal && wasmReady) {
+            const dims = terminal.dimensions();
+            if (dims[0] > 0 && dims[1] > 0) ws.send(JSON.stringify({ type: 'resize', cols: dims[0], rows: dims[1] }));
+          }
+        },
+      });
+      switchSession(sessionName);
+      renderSidebar();
+    }
+
+    function removeSession(sessionName) {
+      const session = sessions.get(sessionName);
+      if (!session) return;
+      if (session.pingInterval) clearInterval(session.pingInterval);
+      if (session.ws) { session.ws.onclose = null; session.ws.close(); }
+      if (session.bgStateId !== null && terminal) terminal.destroy_background(session.bgStateId);
+      sessions.delete(sessionName);
+      const orderIdx = sessionOrder.indexOf(sessionName);
+      if (orderIdx !== -1) sessionOrder.splice(orderIdx, 1);
+      localStorage.setItem(ORDER_KEY, JSON.stringify(sessionOrder));
+      if (sessionName === activeSessionName) {
+        activeSessionName = null;
+        const nextName = sessionOrder.length > 0 ? sessionOrder[0] : sessions.keys().next().value;
+        if (nextName) switchSession(nextName);
+        else { canvas.style.display = 'none'; emptyState.style.display = 'flex'; }
+      }
+      let anyActive = false;
+      for (const [, sess] of sessions) { if (sess.claudeRaw) { anyActive = true; break; } }
+      if (!anyActive) { stopAutoCycle(); stopHealthChecks(); }
+      renderSidebar();
+      // Close on daemon side (best-effort) — requires window_id
+      if (session.windowId) {
+        fetch('/api/v1/registry/close', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ window_id: session.windowId }),
+        }).catch(() => {});
+      }
+    }
+
+    function switchSession(sessionName) {
+      if (sessionName === activeSessionName) return;
+      const session = sessions.get(sessionName);
+      if (!session) return;
+      if (terminal) {
+        const oldSession = activeSessionName ? sessions.get(activeSessionName) : null;
+        if (oldSession) oldSession.bgStateId = terminal.save_active();
+        if (session.bgStateId !== null) {
+          try {
+            terminal.restore(session.bgStateId);
+            session.bgStateId = null;
+          } catch (e) {
+            dbg('restore error for ' + sessionName + ': ' + e);
+            if (session.ws && session.ws.readyState === WebSocket.OPEN) session.ws.send(JSON.stringify({ type: 'subscribe_raw' }));
+          }
+          try {
+            const primsJson = terminal.get_ai_primitives_json();
+            syncAiOverlays(JSON.parse(primsJson || '[]'));
+          } catch { syncAiOverlays([]); }
+        } else {
+          terminal.process(new Uint8Array([0x1b, 0x5b, 0x32, 0x4a, 0x1b, 0x5b, 0x48]));
+          terminal.update_ai_primitives('[]', 0);
+          syncAiOverlays([]);
+        }
+        terminal.set_session_title(session.displayName || sessionName);
+        setAiStatsWithOverlay(session.aiStats || '');
+        dirty = true;
+      }
+      activeSessionName = sessionName;
+      if (pendingShareBadge) pendingShareBadge.el.style.display = (pendingShareBadge.targetSession === sessionName) ? '' : 'none';
+      serverScrollbackTotal = session.scrollbackTotal || 0;
+      daemonFetchedRows = session.daemonFetchedRows || 0;
+      scrollRequestPending = false;
+      canvas.style.display = 'block';
+      emptyState.style.display = 'none';
+      if (session.ws && session.ws.readyState === WebSocket.OPEN) showStatus('Connected', 'connected');
+      else if (!session.connected) { showStatus('Reconnecting...', 'error'); reconnectSession(sessionName); }
+      canvas.focus();
+      renderSidebar();
+    }
+
+    function reconnectSession(sessionName) {
+      const session = sessions.get(sessionName);
+      if (!session || session.connected) return;
+      const ws = new WebSocket('ws://127.0.0.1:' + session.wsPort);
+      ws.binaryType = 'arraybuffer';
+      session.ws = ws;
+      setupWsHandlers(ws, sessionName, session, {
+        connectStatus: 'Reconnected',
+        onOpen: (ws) => {
+          if (terminal && wasmReady) {
+            const dims = terminal.dimensions();
+            if (dims[0] > 0 && dims[1] > 0) ws.send(JSON.stringify({ type: 'resize', cols: dims[0], rows: dims[1] }));
+          }
+        },
+      });
+    }
+
+    // ── WASM Initialization ──
+    function waitForCanvasDimensions(maxMs = 10000) {
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) return Promise.resolve(rect);
+      return new Promise((resolve) => {
+        const timeout = setTimeout(() => { observer.disconnect(); resolve(null); }, maxMs);
+        const observer = new ResizeObserver((entries) => {
+          for (const entry of entries) {
+            if (entry.contentRect.width > 0 && entry.contentRect.height > 0) {
+              clearTimeout(timeout); observer.disconnect();
+              resolve(canvas.getBoundingClientRect()); return;
+            }
+          }
+        });
+        observer.observe(canvas);
+      });
+    }
+
+    async function initWasm() {
+      if (wasmReady) return;
+      dbg('initWasm: start');
+      const mod = await import('/pkg/immorterm_wasm.js');
+      await mod.default();
+      dbg('initWasm: WASM loaded OK');
+      terminal = new mod.WasmTerminal(80, 24);
+      terminal.set_font_size(14);
+      terminal.set_line_height(1);
+
+      // Measure DOM char height
+      {
+        const span = document.createElement('span');
+        span.style.fontFamily = 'monospace';
+        span.style.fontSize = '14px';
+        span.style.lineHeight = 'normal';
+        span.style.position = 'absolute';
+        span.style.visibility = 'hidden';
+        span.textContent = 'W';
+        document.body.appendChild(span);
+        const charHeight = span.getBoundingClientRect().height;
+        document.body.removeChild(span);
+        terminal.set_char_height_css(charHeight);
+        dbg('initWasm: DOM charHeight=' + charHeight + 'px');
+      }
+      terminal.set_font_weight(400);
+      terminal.set_project_name(currentProjectName);
+
+      const padDpr = window.devicePixelRatio || 1;
+      // Right pad is 0 so status bar chrome (brand) sits flush against the canvas edge.
+      terminal.set_content_padding(2 * padDpr, 0, 0, 10 * padDpr);
+
+      canvas.style.display = 'block';
+      const rect = await waitForCanvasDimensions();
+      if (!rect) throw new Error('Canvas has 0x0 dimensions after 10s');
+
+      const realDpr = window.devicePixelRatio || 1;
+      lastDpr = realDpr;
+      canvas.width = Math.floor(rect.width * realDpr);
+      canvas.height = Math.floor(rect.height * realDpr);
+
+      await terminal.init_gpu('terminal-canvas', realDpr);
+      dbg('initWasm: GPU initialized, canvas=' + canvas.width + 'x' + canvas.height);
+
+      applyPrefs();
+      terminal.resize(canvas.width, canvas.height);
+      updateCellDimensions();
+
+      // Apply theme — use activeThemeName (set from config.json/localStorage) or fall back to first theme
+      const savedTheme = localStorage.getItem('immorterm-theme') || activeThemeName;
+      const matchedTheme = THEMES.find(t => t.name === savedTheme) || THEMES[0];
+      activeThemeName = matchedTheme.name;
+      updatePopupTheme(matchedTheme);
+      terminal.set_theme(matchedTheme.name);
+
+      wasmReady = true;
+      canvas.setAttribute('data-wasm-ready', 'true');
+      dirty = true;
+      renderErrorCount = 0;
+      renderLoopRunning = true;
+      requestAnimationFrame(renderLoop);
+
+      // Post-compositor surface reconfigure
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (terminal && wasmReady && canvas.width > 0 && canvas.height > 0) {
+            terminal.resize(canvas.width, canvas.height);
+          }
+        });
+      });
+    }
+
+    // ── Server Message Handling ──
+    function handleServerMessage(msg) {
+      switch (msg.type) {
+        case 'hello': break;
+        case 'snapshot':
+          serverScrollbackTotal = msg.scrollback_total || 0;
+          daemonFetchedRows = 0;
+          { const s = sessions.get(activeSessionName); if (s) { s.scrollbackTotal = serverScrollbackTotal; s.daemonFetchedRows = 0; } }
+          if (terminal && msg.snapshot_json) {
+            terminal.load_snapshot(msg.snapshot_json);
+            if (canvas.width > 0 && canvas.height > 0) {
+              terminal.resize(canvas.width, canvas.height);
+              updateCellDimensions();
+              const dims = terminal.dimensions();
+              if (dims[0] !== msg.cols || dims[1] !== msg.rows) sendResize();
+            }
+            dirty = true;
+            try {
+              if (typeof terminal.get_ai_primitives_json === 'function') {
+                const primsJson = terminal.get_ai_primitives_json();
+                const prims = JSON.parse(primsJson || '[]');
+                if (prims.length > 0) syncAiOverlays(prims);
+              }
+            } catch {}
+          }
+          if (msg.claude && terminal) {
+            const c = msg.claude;
+            const s = sessions.get(activeSessionName);
+            if (c.active) {
+              if (s) { s.claudeRaw = c; s.aiStats = formatCurrentStats(c); }
+              setAiStatsWithOverlay(s ? s.aiStats : formatCurrentStats(c));
+              if (terminal) terminal.set_ai_ctx_pct(c.context_pct || 0);
+              startHealthChecks(); startAutoCycle();
+            } else {
+              if (s) { s.claudeRaw = null; s.aiStats = ''; }
+              setAiStatsWithOverlay('');
+              if (terminal) terminal.set_ai_ctx_pct(0);
+            }
+            dirty = true;
+          }
+          break;
+        case 'scrollback_rows':
+          scrollRequestPending = false;
+          if (terminal && msg.rows_json) {
+            try {
+              terminal.prepend_scrollback(msg.rows_json);
+              serverScrollbackTotal = msg.total || serverScrollbackTotal;
+              daemonFetchedRows = serverScrollbackTotal - (msg.offset || 0);
+              { const s = sessions.get(activeSessionName); if (s) { s.scrollbackTotal = serverScrollbackTotal; s.daemonFetchedRows = daemonFetchedRows; } }
+              dirty = true;
+            } catch (e) { dbg('prepend_scrollback error: ' + e); }
+          }
+          break;
+        case 'control_event':
+          if (msg.claude && terminal) {
+            const c = msg.claude; const s = sessions.get(activeSessionName);
+            if (c.active) {
+              if (s) { s.claudeRaw = c; s.aiStats = formatCurrentStats(c); }
+              setAiStatsWithOverlay(s ? s.aiStats : formatCurrentStats(c));
+              if (terminal) terminal.set_ai_ctx_pct(c.context_pct || 0);
+              startHealthChecks(); startAutoCycle();
+            } else if (msg.event === 'claude_exited') {
+              if (s) { s.claudeRaw = null; s.aiStats = ''; }
+              setAiStatsWithOverlay('');
+              if (terminal) terminal.set_ai_ctx_pct(0);
+              let anyActive = false;
+              for (const [, sess] of sessions) { if (sess.claudeRaw) { anyActive = true; break; } }
+              if (!anyActive) { stopAutoCycle(); stopHealthChecks(); }
+            }
+            dirty = true;
+          }
+          if (msg.event === 'share_consumed') consumeShareBadge();
+          break;
+        case 'resize': if (terminal) { terminal.resize(canvas.width, canvas.height); dirty = true; } break;
+        case 'ai_layer_update':
+          if (msg.data && terminal) {
+            terminal.update_ai_primitives(JSON.stringify(msg.data.primitives), msg.data.sb_len);
+            dirty = true; syncAiOverlays(msg.data.primitives);
+          }
+          trackAiPrimitiveCount(activeSessionName, msg);
+          break;
+        case 'expression_update':
+          if (terminal && msg.state) { try { terminal.set_expression(JSON.stringify(msg.state)); dirty = true; } catch {} }
+          break;
+        case 'error': console.error('Server error:', msg.message); break;
+      }
+      if (msg.ai_events) for (const evt of msg.ai_events) handleAiEvent(evt);
+      if (msg.ai_primitives) syncAiOverlays(msg.ai_primitives);
+    }
+
+    // ── AI Overlays ──
+    function handleAiEvent(evt) {
+      if (evt.type === 'button_clicked') { const card = aiCards.get(evt.id); if (card) card.classList.add('clicked'); }
+    }
+    function unwrapPrimitive(prim) {
+      if (prim.kind && typeof prim.kind === 'object') {
+        const tag = Object.keys(prim.kind)[0];
+        const inner = prim.kind[tag] || {};
+        return { id: prim.id, alpha: prim.alpha, visible: prim.visible, anchor: prim.anchor, type: tag.toLowerCase(), ...inner };
+      }
+      return { ...prim, type: (prim.type || prim.ptype || '').toLowerCase() };
+    }
+    function anchorYOffset(anchor) {
+      if (!anchor || anchor === 'fixed') return 0;
+      const scrollData = anchor.scroll || anchor;
+      if (scrollData && typeof scrollData.scrollback_at_creation === 'number' && terminal) {
+        const sbAtCreation = scrollData.scrollback_at_creation;
+        const currentSb = terminal.scrollback_len();
+        const scrollOff = terminal.scroll_offset();
+        const dpr = window.devicePixelRatio || 1;
+        const ch = cellHeight * dpr;
+        const newLines = currentSb - sbAtCreation;
+        return (-newLines + scrollOff) * ch;
+      }
+      return 0;
+    }
+    function repositionScrollAnchoredCards() {
+      const dpr = window.devicePixelRatio || 1;
+      for (const [, card] of aiCards) {
+        if (card._primAnchor && card._primAnchor !== 'fixed') {
+          const scrollAdj = anchorYOffset(card._primAnchor);
+          card.style.top = ((card._primOrigY + scrollAdj) / dpr + 2) + 'px';
+        }
+      }
+    }
+    function syncAiOverlays(primitives) {
+      const seenIds = new Set();
+      for (const raw of primitives) {
+        const prim = unwrapPrimitive(raw);
+        seenIds.add(prim.id);
+        if (prim.type === 'button' || prim.type === 'html' || (prim.type === 'text' && prim.font_size_scale > 1.5)) upsertAiCard(prim);
+        if (prim.type === 'button') aiButtons.set(prim.id, { x: prim.x, y: prim.y, width: prim.width || 0, height: prim.height || 0, anchor: prim.anchor });
+      }
+      for (const [id, cardEl] of aiCards) { if (!seenIds.has(id)) { cardEl.remove(); aiCards.delete(id); } }
+      for (const id of aiButtons.keys()) { if (!seenIds.has(id)) aiButtons.delete(id); }
+    }
+
+    function upsertAiCard(prim) {
+      let card = aiCards.get(prim.id);
+      if (!card) {
+        card = document.createElement('div');
+        card.className = 'ai-card';
+        card.dataset.primId = String(prim.id);
+        card.addEventListener('wheel', (e) => { canvas.dispatchEvent(new WheelEvent('wheel', e)); e.preventDefault(); }, { passive: false });
+        card.addEventListener('mousedown', (e) => {
+          const path = e.composedPath();
+          const isInteractive = path.some(el => el instanceof HTMLElement && el !== card && (el.matches?.('button,input,select,textarea,a,[data-click],[contenteditable],[onclick]') || el.style?.cursor === 'pointer'));
+          if (isInteractive) return;
+          cardDrag = { card, startX: e.clientX, startY: e.clientY, origLeft: parseInt(card.style.left) || 0, origTop: parseInt(card.style.top) || 0, dragging: false };
+          e.preventDefault();
+        });
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'ai-card-close';
+        closeBtn.textContent = '\u00D7';
+        closeBtn.addEventListener('click', (e) => { e.stopPropagation(); card.remove(); aiCards.delete(prim.id); });
+        card.appendChild(closeBtn);
+        overlay.appendChild(card);
+        aiCards.set(prim.id, card);
+      }
+      const dpr = window.devicePixelRatio || 1;
+      const PAD_LEFT = 10, PAD_TOP = 2;
+      // Inline <<html>> blocks: convert anchor_row to physical pixel Y coordinate.
+      if (prim.anchor_row != null && typeof prim.anchor_row === 'number') {
+        prim.y = prim.anchor_row * cellHeight * dpr;
+        prim.x = 0;
+      }
+      const autoX = prim.x < 0, autoY = prim.y < 0;
+      if (!autoX) card.style.left = (prim.x / dpr + PAD_LEFT) + 'px';
+      const scrollAdj = anchorYOffset(prim.anchor);
+      if (!autoY) card.style.top = ((prim.y + scrollAdj) / dpr + PAD_TOP) + 'px';
+      card._primAnchor = prim.anchor;
+      card._primOrigY = prim.y;
+      if (prim.width) card.style.width = prim.width + 'px';
+      if (prim.height) card.style.height = prim.height + 'px';
+      while (card.firstChild) card.removeChild(card.firstChild);
+
+      if (prim.type === 'button') {
+        if (prim.bg_color) {
+          const [r, g, b, a] = prim.bg_color;
+          card.style.background = `rgba(${Math.round(r*255)}, ${Math.round(g*255)}, ${Math.round(b*255)}, ${a})`;
+          card.style.borderColor = `rgba(${Math.round(Math.min(r*1.3,1)*255)}, ${Math.round(Math.min(g*1.3,1)*255)}, ${Math.round(Math.min(b*1.3,1)*255)}, ${Math.min(a + 0.2, 1)})`;
+        }
+        if (prim.text_color) { const [r, g, b, a] = prim.text_color; card.style.color = `rgba(${Math.round(r*255)}, ${Math.round(g*255)}, ${Math.round(b*255)}, ${a})`; }
+        const body = document.createElement('div'); body.className = 'ai-card-body'; body.textContent = prim.text; card.appendChild(body);
+        const actions = document.createElement('div'); actions.className = 'ai-card-actions';
+        const selectBtn = document.createElement('button'); selectBtn.className = 'ai-card-btn primary'; selectBtn.textContent = 'Select';
+        selectBtn.addEventListener('click', () => {
+          launchConfetti();
+          const session = sessions.get(activeSessionName);
+          if (session && session.ws && session.connected) {
+            session.ws.send(JSON.stringify({ type: 'draw_button', text: '__click__:' + prim.id, x: prim.x, y: prim.y, width: 0, height: 0, bg_color: [0,0,0,0], text_color: [0,0,0,0] }));
+          }
+          card.style.borderColor = '#00ff88'; card.style.boxShadow = '0 0 30px rgba(0, 255, 136, 0.5)';
+          setTimeout(() => { card.remove(); aiCards.delete(prim.id); }, 2000);
+        });
+        const dismissBtn = document.createElement('button'); dismissBtn.className = 'ai-card-btn'; dismissBtn.textContent = 'Dismiss';
+        dismissBtn.addEventListener('click', () => {
+          const session = sessions.get(activeSessionName);
+          if (session && session.ws && session.connected) session.ws.send(JSON.stringify({ type: 'remove_primitive', id: prim.id }));
+          card.remove(); aiCards.delete(prim.id);
+        });
+        actions.appendChild(selectBtn); actions.appendChild(dismissBtn); card.appendChild(actions);
+      } else if (prim.type === 'html') {
+        card.style.background = 'transparent'; card.style.border = 'none'; card.style.padding = '0';
+        card.style.boxShadow = 'none'; card.style.backdropFilter = 'none'; card.style.maxWidth = 'none'; card.style.overflow = 'hidden';
+        const shadow = card.attachShadow({ mode: 'open' });
+        const defaultStyle = document.createElement('style');
+        defaultStyle.textContent = '[data-click]{cursor:pointer;transition:transform 0.1s ease,opacity 0.1s ease}[data-click]:active{transform:scale(0.95);opacity:0.8}';
+        shadow.appendChild(defaultStyle);
+        if (prim.css) { const style = document.createElement('style'); style.textContent = prim.css; shadow.appendChild(style); }
+        const wrapper = document.createElement('div'); wrapper.className = 'ai-html-content';
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(prim.html, 'text/html');
+        const scripts = [];
+        doc.body.querySelectorAll('script').forEach(s => { scripts.push(s.textContent || ''); s.remove(); });
+        while (doc.body.firstChild) wrapper.appendChild(doc.body.firstChild);
+        shadow.appendChild(wrapper);
+        const inlineEvents = ['click','mouseover','mouseout','mouseenter','mouseleave','mousedown','mouseup','input','change','keydown','keyup','focus','blur','submit','dblclick','contextmenu','wheel','pointerdown','pointerup','pointermove'];
+        wrapper.querySelectorAll('*').forEach(el => {
+          for (const evt of inlineEvents) {
+            const attr = el.getAttribute('on' + evt);
+            if (attr) { el.removeAttribute('on' + evt); el.addEventListener(evt, new Function('event', attr)); }
+          }
+        });
+        for (const code of scripts) {
+          try { new Function('root', 'wrapper', 'card', 'prim', code)(shadow, wrapper, card, prim); }
+          catch (e) { console.warn('[AI HTML] Script error in primitive ' + prim.id + ':', e); }
+        }
+        wrapper.querySelectorAll('[data-click]').forEach(el => {
+          el.style.cursor = 'pointer';
+          el.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const session = sessions.get(activeSessionName);
+            if (session && session.ws && session.connected) {
+              session.ws.send(JSON.stringify({ type: 'draw_button', text: '__click__:' + prim.id + ':' + el.getAttribute('data-click'), x: 0, y: 0, width: 0, height: 0, bg_color: [0,0,0,0], text_color: [0,0,0,0] }));
+            }
+          });
+        });
+      } else {
+        const body = document.createElement('div'); body.className = 'ai-card-body'; body.textContent = prim.text; card.appendChild(body);
+      }
+      if (autoX || autoY) {
+        requestAnimationFrame(() => {
+          const rect = card.getBoundingClientRect();
+          const vw = overlay.clientWidth || canvas.clientWidth;
+          const vh = overlay.clientHeight || canvas.clientHeight;
+          if (autoX) card.style.left = Math.max(0, (vw - rect.width) / 2) + 'px';
+          if (autoY) card.style.top = Math.max(0, (vh - rect.height) / 2) + 'px';
+        });
+      }
+    }
+
+    function launchConfetti() {
+      const colors = ['#b482ff', '#ff6b9d', '#00ff88', '#ffd700', '#00e5ff', '#ff4444', '#44ff44'];
+      for (let i = 0; i < 80; i++) {
+        const piece = document.createElement('div');
+        piece.className = 'confetti-piece';
+        piece.style.left = (Math.random() * 100) + '%'; piece.style.top = (-10 - Math.random() * 20) + 'px';
+        piece.style.background = colors[Math.floor(Math.random() * colors.length)];
+        piece.style.width = (6 + Math.random() * 8) + 'px'; piece.style.height = (6 + Math.random() * 8) + 'px';
+        piece.style.animationDuration = (1.5 + Math.random() * 2) + 's';
+        piece.style.animationDelay = (Math.random() * 0.5) + 's';
+        if (Math.random() > 0.5) piece.style.borderRadius = '50%';
+        document.body.appendChild(piece);
+        piece.addEventListener('animationend', () => piece.remove());
+      }
+    }
+
+    function updateCellDimensions() {
+      if (!terminal) return;
+      const cssDev = terminal.cell_size_device();
+      if (cssDev[0] > 0 && cssDev[1] > 0) {
+        const realDpr = window.devicePixelRatio || 1;
+        cellWidth = cssDev[0] / realDpr;
+        cellHeight = cssDev[1] / realDpr;
+      }
+    }
+
+    // ── Render Loop ──
+    let webviewVisible = false;
+    let renderErrorCount = 0;
+    let renderFrameCount = 0;
+    let renderLoopRunning = false;
+    let _switchPerfMark = 0;
+    let animationTickId = 0;
+
+    function renderLoop() {
+      if (!webviewVisible) { renderLoopRunning = false; return; }
+      if (terminal && dirty) {
+        dirty = false;
+        try { terminal.render(); renderFrameCount++; }
+        catch (e) {
+          renderErrorCount++;
+          if (renderErrorCount <= 3) reportError('renderLoop', e);
+          if (renderErrorCount > 10) { renderLoopRunning = false; return; }
+        }
+      }
+      requestAnimationFrame(renderLoop);
+    }
+    function ensureRenderLoop() {
+      if (!renderLoopRunning && wasmReady) { renderLoopRunning = true; requestAnimationFrame(renderLoop); }
+    }
+    function forceRestartRenderLoop() {
+      if (!wasmReady) return;
+      renderLoopRunning = false; dirty = true; ensureRenderLoop();
+    }
+
+    // ── Input Handling ──
+    function getActiveWs() {
+      const session = sessions.get(activeSessionName);
+      return (session && session.ws && session.connected) ? session.ws : null;
+    }
+
+    // Shift+Up/Down: switch sessions (document-level capture)
+    document.addEventListener('keydown', (e) => {
+      if (!terminal) return;
+      if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+        const names = sessionOrder.length > 0 ? [...sessionOrder] : Array.from(sessions.keys());
+        if (names.length > 1 && activeSessionName) {
+          const idx = names.indexOf(activeSessionName);
+          if (idx !== -1) {
+            const next = e.key === 'ArrowUp' ? (idx - 1 + names.length) % names.length : (idx + 1) % names.length;
+            switchSession(names[next]);
+          }
+        }
+        e.preventDefault(); e.stopPropagation();
+      }
+    }, true);
+
+    canvas.addEventListener('keydown', (e) => {
+      if (!terminal || (modals && modals.isActive())) return;
+      const ws = getActiveWs();
+      if (!ws) return;
+
+      // Cmd+C with selection = copy
+      if ((e.metaKey || e.ctrlKey) && e.key === 'c' && terminal.has_selection()) {
+        const text = terminal.get_selected_text();
+        if (text) navigator.clipboard.writeText(text);
+        terminal.selection_clear(); dirty = true; e.preventDefault(); return;
+      }
+
+      // Cmd+Option+V / Ctrl+Alt+V — paste image as temp file path so
+      // Claude Code reads it lazily and the inline-image dimension cap
+      // doesn't fire on big screenshots.
+      if ((e.metaKey || e.ctrlKey) && e.altKey && (e.key === 'v' || e.key === '√' || e.code === 'KeyV')) {
+        const aws = getActiveWs();
+        if (aws) {
+          const requestId = 'cb-save-' + (++clipboardCheckSeq);
+          clipboardCheckResolvers.set(requestId, (reply) => {
+            if (reply && reply.path) {
+              const aws2 = getActiveWs();
+              if (aws2) aws2.send(JSON.stringify({ type: 'input', data: reply.path }));
+            }
+          });
+          aws.send(JSON.stringify({ type: 'clipboard_save_image', request_id: requestId }));
+          setTimeout(() => { clipboardCheckResolvers.delete(requestId); }, 3000);
+        }
+        e.preventDefault(); return;
+      }
+      // Cmd+V / Ctrl+V = paste. Daemon RPC reports both image presence
+      // AND Finder file URL — file URL wins (so PDFs/docs aren't mistaken
+      // for the preview thumbnail macOS attaches), then image bytes go
+      // through empty bracketed paste so Claude Code's TUI shows [Image #N],
+      // then plain text fallback.
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key === 'v') {
+        const sendInput = (data) => {
+          const aws = getActiveWs();
+          if (aws && data) aws.send(JSON.stringify({ type: 'input', data }));
+        };
+        const sendEmptyPaste = () => {
+          const aws = getActiveWs();
+          if (aws) aws.send(JSON.stringify({ type: 'input_raw', data: btoa('\x1b[200~\x1b[201~') }));
+        };
+        const askDaemon = () => new Promise((resolve) => {
+          const aws = getActiveWs();
+          const empty = { hasImage: false, fileUrl: null };
+          if (!aws) { resolve(empty); return; }
+          const sess = sessions.get(activeSessionName);
+          if (sess && sess.clipboardRpc === 'stale') { resolve(empty); return; }
+          const requestId = 'cb-' + (++clipboardCheckSeq);
+          clipboardCheckResolvers.set(requestId, resolve);
+          aws.send(JSON.stringify({ type: 'clipboard_check_image', request_id: requestId }));
+          setTimeout(() => { if (clipboardCheckResolvers.delete(requestId)) resolve(empty); }, 200);
+        });
+        (async () => {
+          // Fast path catches PNG screenshots without involving the daemon —
+          // works even when the live daemon is the slow-osascript build.
+          try {
+            const items = await navigator.clipboard.read();
+            for (const item of items) {
+              if (item.types.some(t => t.startsWith('image/'))) { sendEmptyPaste(); return; }
+            }
+          } catch {}
+          const result = await askDaemon();
+          if (result.fileUrl) { sendInput(result.fileUrl); return; }
+          if (result.hasImage) { sendEmptyPaste(); return; }
+          try { sendInput(await navigator.clipboard.readText()); } catch {}
+        })();
+        e.preventDefault(); return;
+      }
+
+      // Keyboard selection (Shift+Arrow, Shift+Option+Arrow for word, Cmd+Shift for line)
+      if (e.shiftKey && ['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)) {
+        let dir;
+        if (e.metaKey) {
+          dir = e.key === 'ArrowLeft' ? 'home' : e.key === 'ArrowRight' ? 'end' : e.key === 'ArrowUp' ? 'up' : 'down';
+        } else if (e.altKey) {
+          dir = e.key === 'ArrowLeft' ? 'word_left' : e.key === 'ArrowRight' ? 'word_right' : e.key === 'ArrowUp' ? 'up' : 'down';
+        } else {
+          dir = e.key === 'ArrowLeft' ? 'left' : e.key === 'ArrowRight' ? 'right' : e.key === 'ArrowUp' ? 'up' : 'down';
+        }
+        terminal.selection_extend(dir); dirty = true; e.preventDefault(); return;
+      }
+
+      // Clear selection on non-modifier keystrokes (standard input behavior)
+      if (terminal.has_selection() && !['Shift','Meta','Alt','Control','CapsLock'].includes(e.key)) {
+        terminal.selection_clear();
+        dirty = true;
+      }
+
+      // Cmd+Arrow = Home/End
+      if (e.metaKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+        const seq = e.key === 'ArrowLeft' ? '\x01' : '\x05';
+        ws.send(JSON.stringify({ type: 'input_raw', data: btoa(seq) }));
+        e.preventDefault(); return;
+      }
+
+      if (e.metaKey) return;
+
+      const bytes = terminal.handle_key(e.key, e.ctrlKey, e.shiftKey, e.altKey);
+      if (bytes.length > 0) {
+        const b64 = btoa(String.fromCharCode(...bytes));
+        ws.send(JSON.stringify({ type: 'input_raw', data: b64 }));
+      }
+      dirty = true; e.preventDefault();
+    });
+
+    // ── Mouse Handling ──
+    const PAD_TOP_CSS = 2;
+    const PAD_LEFT_CSS = 10;
+    let mouseDownPos = null;
+    const DRAG_THRESHOLD = 3;
+    let autoScrollTimer = null;
+    let autoScrollSpeed = 0;
+    let lastDragCssX = 0;
+
+    function startAutoScroll(speed, cssX) {
+      autoScrollSpeed = speed; lastDragCssX = cssX;
+      if (autoScrollTimer) return;
+      autoScrollTimer = setInterval(() => {
+        if (!terminal || !terminal.has_selection()) { stopAutoScroll(); return; }
+        terminal.scroll(autoScrollSpeed);
+        userScrollLock = terminal.scroll_offset() > 0;
+        const edgeY = autoScrollSpeed > 0 ? PAD_TOP_CSS : PAD_TOP_CSS + terminal.visible_rows() * cellHeight;
+        terminal.selection_update(lastDragCssX, edgeY);
+        dirty = true;
+      }, 50);
+    }
+    function stopAutoScroll() { if (autoScrollTimer) { clearInterval(autoScrollTimer); autoScrollTimer = null; } autoScrollSpeed = 0; }
+
+    canvas.addEventListener('pointerdown', (e) => {
+      if (!terminal || !wasmReady || e.button !== 0) return;
+      const rect = canvas.getBoundingClientRect();
+      const cssX = e.clientX - rect.left, cssY = e.clientY - rect.top;
+      const dpr = window.devicePixelRatio || 1;
+      const physX = (cssX - 10) * dpr, physY = (cssY - 2) * dpr;
+      for (const [id, btn] of aiButtons) {
+        const btnYAdj = btn.y + anchorYOffset(btn.anchor);
+        if (physX >= btn.x && physX <= btn.x + btn.width && physY >= btnYAdj && physY <= btnYAdj + btn.height) {
+          launchConfetti();
+          const session = sessions.get(activeSessionName);
+          if (session && session.ws && session.connected) session.ws.send(JSON.stringify({ type: 'draw_button', text: '__click__:' + id, x: btn.x, y: btn.y, width: 0, height: 0, bg_color: [0,0,0,0], text_color: [0,0,0,0] }));
+          mouseDown = false; e.preventDefault(); return;
+        }
+      }
+      // Scroll indicator hit-test
+      const canvasCSSWidth = canvas.getBoundingClientRect().width;
+      const indicatorLeft = canvasCSSWidth - 26;
+      const sbLen = terminal.scrollback_len();
+      if (cssX >= indicatorLeft && sbLen > 0 && terminal.scroll_offset() > 0) {
+        scrollDrag = { startY: cssY, startOffset: terminal.scroll_offset() };
+        mouseDown = true; canvas.setPointerCapture(e.pointerId); e.preventDefault(); return;
+      }
+      mouseDownPos = { x: cssX, y: cssY };
+      lastClickPos = { x: mouseDownPos.x, y: mouseDownPos.y };
+      mouseDown = true; canvas.setPointerCapture(e.pointerId);
+      if (terminal.has_selection()) { terminal.selection_clear(); dirty = true; }
+    });
+
+    canvas.addEventListener('pointermove', (e) => {
+      if (scrollDrag && terminal) {
+        const rect = canvas.getBoundingClientRect();
+        const cy = e.clientY - rect.top;
+        const sbLen = terminal.scrollback_len();
+        if (sbLen === 0) return;
+        const dpr = window.devicePixelRatio || 1;
+        const visibleRows = Math.floor((rect.height - 2) / cellHeight);
+        const trackHeight = visibleRows * cellHeight;
+        const totalLines = sbLen + visibleRows;
+        const thumbHeight = Math.max(trackHeight * visibleRows / totalLines, 80 / dpr);
+        const scrollableRange = trackHeight - thumbHeight;
+        if (scrollableRange <= 0) return;
+        const deltaY = cy - scrollDrag.startY;
+        const deltaFraction = deltaY / scrollableRange;
+        const deltaOffset = Math.round(deltaFraction * sbLen);
+        terminal.set_scroll_offset(Math.max(0, scrollDrag.startOffset - deltaOffset));
+        userScrollLock = terminal.scroll_offset() > 0;
+        dirty = true; repositionScrollAnchoredCards();
+        return;
+      }
+      if (!terminal || !mouseDown || !mouseDownPos) return;
+      const rect = canvas.getBoundingClientRect();
+      const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
+      if (!terminal.has_selection()) {
+        const dx = cx - mouseDownPos.x, dy = cy - mouseDownPos.y;
+        if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
+        try { terminal.selection_start(mouseDownPos.x, mouseDownPos.y); } catch { return; }
+      }
+      terminal.selection_update(cx, cy); dirty = true;
+      const viewportTop = PAD_TOP_CSS;
+      const viewportBottom = PAD_TOP_CSS + terminal.visible_rows() * cellHeight;
+      if (cy < viewportTop && terminal.scroll_offset() < terminal.scrollback_len()) {
+        startAutoScroll(Math.ceil(Math.min((viewportTop - cy) / cellHeight * 1.1, 20)), cx);
+      } else if (cy > viewportBottom && terminal.scroll_offset() > 0) {
+        startAutoScroll(-Math.ceil(Math.min((cy - viewportBottom) / cellHeight * 1.1, 20)), cx);
+      } else { stopAutoScroll(); }
+    });
+
+    window.addEventListener('pointerup', () => { mouseDown = false; mouseDownPos = null; scrollDrag = null; stopAutoScroll(); });
+    canvas.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); });
+
+    function handleRightClick(e) {
+      const isRightClick = e.button === 2 || (e.button === 0 && e.ctrlKey);
+      if (!isRightClick) return;
+      if (terminal && terminal.has_selection()) {
+        const text = terminal.get_selected_text();
+        if (text) navigator.clipboard.writeText(text);
+        terminal.selection_clear(); dirty = true; return;
+      }
+      if (prefs.statusBarMode === 'hidden') {
+        const old = document.querySelector('.sb-context-menu');
+        if (old) old.remove();
+        const menu = el('div', 'sb-context-menu');
+        menu.style.left = e.clientX + 'px'; menu.style.top = e.clientY + 'px';
+        const item = el('div', 'sb-context-menu-item', 'Show Status Bar');
+        item.addEventListener('click', () => {
+          prefs.statusBarMode = 'always'; sbAnim.reveal = 1.0; sbAnim.target = 1.0;
+          applyPrefs(); localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); menu.remove();
+        });
+        menu.appendChild(item); document.body.appendChild(menu);
+        const dismiss = (ev) => { if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('click', dismiss, true); } };
+        setTimeout(() => document.addEventListener('click', dismiss, true), 0);
+      }
+    }
+    canvas.addEventListener('pointerdown', handleRightClick);
+
+    canvas.addEventListener('wheel', (e) => {
+      if (!terminal) return;
+      const pixelsPerLine = cellHeight || 16;
+      const delta = e.deltaMode === 1 ? e.deltaY : e.deltaY / pixelsPerLine;
+      scrollAccumulator += delta;
+      const lines = Math.trunc(scrollAccumulator);
+      if (lines !== 0) {
+        const needsMore = terminal.scroll(-lines);
+        scrollAccumulator -= lines;
+        if (needsMore && !scrollRequestPending && serverScrollbackTotal > 0) {
+          const remaining = serverScrollbackTotal - daemonFetchedRows;
+          if (remaining > 0) {
+            scrollRequestPending = true;
+            setTimeout(() => { scrollRequestPending = false; }, 5000);
+            const fetchCount = Math.min(100, remaining);
+            const fetchOffset = Math.max(0, remaining - fetchCount);
+            const activeWs = sessions.get(activeSessionName)?.ws;
+            if (activeWs && activeWs.readyState === WebSocket.OPEN) {
+              activeWs.send(JSON.stringify({ type: 'scroll_request', offset: fetchOffset, count: fetchCount }));
+            } else { scrollRequestPending = false; }
+          }
+        }
+      }
+      userScrollLock = terminal.scroll_offset() > 0;
+      dirty = true; repositionScrollAnchoredCards();
+      e.preventDefault();
+    }, { passive: false });
+
+    // ── Status Bar Hover Detection ──
+    canvas.addEventListener('mousemove', (e) => {
+      if (!terminal || mouseDown) return;
+      const rect = canvas.getBoundingClientRect();
+      const cssX = e.clientX - rect.left - PAD_LEFT_CSS;
+      const cssY = e.clientY - rect.top - PAD_TOP_CSS;
+      const dpr = window.devicePixelRatio || 1;
+      const physX = (e.clientX - rect.left - 10) * dpr;
+      const physY = (e.clientY - rect.top - 2) * dpr;
+      let overButton = false;
+      for (const [, btn] of aiButtons) {
+        const btnYAdj = btn.y + anchorYOffset(btn.anchor);
+        if (physX >= btn.x && physX <= btn.x + btn.width && physY >= btnYAdj && physY <= btnYAdj + btn.height) { overButton = true; break; }
+      }
+      if (overButton) { canvas.style.cursor = 'pointer'; return; }
+      if (cellWidth <= 0 || cellHeight <= 0) return;
+      const col = Math.floor(Math.max(0, cssX) / cellWidth);
+      const row = Math.floor(Math.max(0, cssY) / cellHeight);
+      const visibleRows = terminal.visible_rows();
+      let target = 'none';
+      if (row >= visibleRows) {
+        const sbX = e.clientX - rect.left;
+        const sbCol = Math.floor(Math.max(0, sbX) / cellWidth);
+        target = terminal.status_bar_hit_test(sbCol);
+      }
+      if (target !== currentHoverTarget) {
+        currentHoverTarget = target;
+        terminal.set_status_bar_hover(target);
+        canvas.style.cursor = (target !== 'none' && target !== 'theme') ? 'pointer' : '';
+        if (titleTooltipTimer) { clearTimeout(titleTooltipTimer); titleTooltipTimer = null; }
+        if (target === 'title') {
+          const s = sessions.get(activeSessionName);
+          if (s && s.lastUserPrompt) {
+            titleTooltipTimer = setTimeout(() => {
+              titleTooltip.textContent = s.lastUserPrompt;
+              const visRows = terminal.visible_rows();
+              const sbTopPx = 2 + visRows * cellHeight;
+              titleTooltip.style.left = '10px';
+              titleTooltip.style.bottom = (rect.height - sbTopPx + 4) + 'px';
+              titleTooltip.style.top = '';
+              titleTooltip.classList.add('visible');
+            }, 150);
+          }
+        } else { titleTooltip.classList.remove('visible'); }
+      }
+      const rawX = e.clientX - rect.left;
+      const distFromRight = rect.width - rawX;
+      const proximity = Math.max(0, 1 - distFromRight / 50);
+      terminal.set_scroll_indicator_proximity(proximity);
+      if (proximity > 0) dirty = true;
+      if (prefs.statusBarMode === 'auto' && cellHeight > 0) {
+        const distFromBottom = rect.height - (e.clientY - rect.top);
+        if (distFromBottom < sbAnim.PROX_SHOW * cellHeight) { showStatusBar(); scheduleAutoHide(); }
+        else if (distFromBottom > sbAnim.PROX_HIDE * cellHeight) { hideStatusBar(); }
+      }
+    });
+
+    canvas.addEventListener('mouseleave', () => {
+      if (terminal) { terminal.set_scroll_indicator_proximity(0); dirty = true; }
+      if (titleTooltipTimer) { clearTimeout(titleTooltipTimer); titleTooltipTimer = null; }
+      titleTooltip.classList.remove('visible');
+      if (prefs.statusBarMode === 'auto') {
+        if (sbAnim.autoHideTimer) { clearTimeout(sbAnim.autoHideTimer); sbAnim.autoHideTimer = null; }
+        hideStatusBar();
+      }
+    });
+
+    // ── Status Bar Click -> Popup Menu ──
+    canvas.addEventListener('click', (e) => {
+      if (!terminal) return;
+      const rect = canvas.getBoundingClientRect();
+      const cssY = e.clientY - rect.top - PAD_TOP_CSS;
+      if (cellWidth <= 0 || cellHeight <= 0) return;
+      const row = Math.floor(Math.max(0, cssY) / cellHeight);
+      const visibleRows = terminal.visible_rows();
+      if (row < visibleRows) { dismissPopup(); return; }
+      const sbX = e.clientX - rect.left;
+      const col = Math.floor(Math.max(0, sbX) / cellWidth);
+      const target = terminal.status_bar_hit_test(col);
+      if (target === 'brand') togglePopup('main');
+      else if (target === 'project') togglePopup('project');
+      else if (target === 'title') { if (modals) modals.showModal('session-summary'); }
+      else if (target === 'ai_stats') {
+        aiStatsMode = (aiStatsMode + 1) % 2;
+        const s = sessions.get(activeSessionName);
+        if (s && s.claudeRaw) { s.aiStats = formatCurrentStats(s.claudeRaw); setAiStatsWithOverlay(s.aiStats); dirty = true; }
+        startAutoCycle();
+      } else { dismissPopup(); }
+    });
+
+    // ── Popup Menu ──
+    let activeThemeName = 'Purple Haze';
+
+    const prefs = {
+      borderEnabled: true, borderOpacity: 1.0, statusBarMode: 'always',
+      animations: true, expressionEffects: true, celebrations: true, dangerEffects: true, textAnimations: true,
+    };
+    const sbAnim = {
+      reveal: 1.0, target: 1.0, animating: false, startTime: 0, startVal: 0, autoHideTimer: null,
+      DURATION: 250, PROX_SHOW: 2, PROX_HIDE: 4, AUTO_HIDE_MS: 3000,
+    };
+
+    function applyPrefs() {
+      if (!terminal) return;
+      terminal.set_border_enabled(prefs.borderEnabled);
+      terminal.set_border_opacity(prefs.borderOpacity);
+      terminal.set_status_bar_mode(prefs.statusBarMode);
+      terminal.set_status_bar_reveal(sbAnim.reveal);
+      const sp = (fn, val) => { if (typeof terminal[fn] === 'function') terminal[fn](val); };
+      sp('set_animations_enabled', prefs.animations);
+      sp('set_expression_effects', prefs.expressionEffects);
+      sp('set_celebrations_enabled', prefs.celebrations);
+      sp('set_danger_effects', prefs.dangerEffects);
+      sp('set_text_animations', prefs.textAnimations);
+      if (prefs.animations && !animationTickId) { animationTickId = setInterval(() => { dirty = true; }, 66); }
+      else if (!prefs.animations && animationTickId) { clearInterval(animationTickId); animationTickId = 0; }
+    }
+
+    function startStatusBarAnimation(target) {
+      if (sbAnim.target === target && sbAnim.animating) return;
+      sbAnim.target = target; sbAnim.startVal = sbAnim.reveal; sbAnim.startTime = performance.now();
+      if (!sbAnim.animating) { sbAnim.animating = true; requestAnimationFrame(animateStatusBarReveal); }
+    }
+    function animateStatusBarReveal(timestamp) {
+      const elapsed = timestamp - sbAnim.startTime;
+      const progress = Math.min(elapsed / sbAnim.DURATION, 1.0);
+      const eased = sbAnim.target > sbAnim.startVal ? 1 - Math.pow(1 - progress, 3) : Math.pow(1 - progress, 3);
+      sbAnim.reveal = sbAnim.target > sbAnim.startVal
+        ? sbAnim.startVal + (sbAnim.target - sbAnim.startVal) * eased
+        : sbAnim.startVal - (sbAnim.startVal - sbAnim.target) * (1 - eased);
+      sbAnim.reveal = Math.max(0, Math.min(1, sbAnim.reveal));
+      if (terminal) terminal.set_status_bar_reveal(sbAnim.reveal);
+      dirty = true;
+      if (progress >= 1.0) { sbAnim.reveal = sbAnim.target; if (terminal) terminal.set_status_bar_reveal(sbAnim.reveal); sbAnim.animating = false; }
+      else requestAnimationFrame(animateStatusBarReveal);
+    }
+    function showStatusBar() { if (sbAnim.autoHideTimer) { clearTimeout(sbAnim.autoHideTimer); sbAnim.autoHideTimer = null; } startStatusBarAnimation(1.0); }
+    function hideStatusBar() { startStatusBarAnimation(0.0); }
+    function scheduleAutoHide() { if (sbAnim.autoHideTimer) clearTimeout(sbAnim.autoHideTimer); sbAnim.autoHideTimer = setTimeout(() => hideStatusBar(), sbAnim.AUTO_HIDE_MS); }
+
+    let originalThemeName = null;
+    let previewThemeName = null;
+
+    function togglePopup(kind) { if (popupVisible) { dismissPopup(); return; } showPopup(kind); }
+    function showPopup(kind) {
+      while (sbPopup.firstChild) sbPopup.removeChild(sbPopup.firstChild);
+      sbPopup.classList.remove('theme-mode');
+      if (kind === 'main') {
+        addPopupHeader('Sessions');
+        for (const [name, sess] of sessions) {
+          const isActive = name === activeSessionName;
+          addPopupItem(sess.displayName || name, isActive, () => { switchSession(name); dismissPopup(); }, name);
+        }
+        addPopupSeparator();
+        addPopupItem('+ New session', false, () => { newSessionBtn.click(); dismissPopup(); });
+        addPopupSeparator();
+        addPopupItem('\uD83C\uDFA8 Theme', false, () => { dismissPopup(); setTimeout(() => showPopup('theme'), 50); });
+        addPopupItem('\uD83C\uDFA8 Appearance', false, () => { dismissPopup(); showModal('appearance'); });
+      } else if (kind === 'theme') {
+        sbPopup.classList.add('theme-mode');
+        originalThemeName = activeThemeName; previewThemeName = null;
+        addPopupHeader('Choose a theme');
+        const subtitle = document.createElement('div');
+        subtitle.className = 'sb-popup-subtitle';
+        subtitle.textContent = 'Current: ' + activeThemeName;
+        sbPopup.appendChild(subtitle);
+        addPopupSeparator();
+        const footer = document.createElement('div');
+        footer.className = 'theme-actions'; footer.style.display = 'none';
+        const applyBtn = document.createElement('button');
+        applyBtn.className = 'modal-btn primary'; applyBtn.textContent = 'Apply';
+        applyBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (previewThemeName) { activeThemeName = previewThemeName; localStorage.setItem('immorterm-theme', activeThemeName); }
+          previewThemeName = null; originalThemeName = null; dismissPopup();
+        });
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'modal-btn'; cancelBtn.textContent = 'Cancel';
+        cancelBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (originalThemeName && terminal) terminal.set_theme(originalThemeName);
+          previewThemeName = null; originalThemeName = null; dismissPopup();
+        });
+        footer.appendChild(cancelBtn); footer.appendChild(applyBtn);
+        for (const theme of THEMES) {
+          const isActive = theme.name === activeThemeName;
+          addThemeItem(theme, isActive, () => {
+            previewThemeName = theme.name;
+            if (terminal) terminal.set_theme(theme.name);
+            updatePopupTheme(theme);
+            subtitle.textContent = 'Preview: ' + theme.name;
+            footer.style.display = 'flex';
+            sbPopup.querySelectorAll('.sb-theme-item').forEach(el => {
+              const isThis = el.querySelector('.theme-label')?.textContent === theme.label;
+              el.classList.toggle('active', isThis);
+              const check = el.querySelector('.check');
+              if (check) check.textContent = isThis ? '\u2713' : '';
+            });
+          });
+        }
+        sbPopup.appendChild(footer);
+      } else if (kind === 'project') {
+        addPopupHeader(currentProjectName);
+        const pathDiv = document.createElement('div');
+        pathDiv.className = 'sb-popup-subtitle';
+        pathDiv.textContent = currentProjectDir || '';
+        sbPopup.appendChild(pathDiv);
+        addPopupSeparator();
+        // Other active projects from registry
+        const otherProjects = (_registryData?.projects || []).filter(p =>
+          p.session_count > 0 && p.project_dir !== currentProjectDir
+        );
+        if (otherProjects.length > 0) {
+          for (const proj of otherProjects) {
+            addPopupItem(proj.name, false, () => {
+              dismissPopup();
+              const sessList = (_registryData?.sessions || []).filter(s =>
+                s.project_dir === proj.project_dir && s.alive && s.ws_port
+              );
+              enterWorkspace(proj.project_dir, proj.name, sessList);
+            }, proj.project_dir, proj.session_count + ' session' + (proj.session_count === 1 ? '' : 's'));
+          }
+          addPopupSeparator();
+        }
+        addPopupItem('Switch Project\u2026', false, () => {
+          dismissPopup();
+          document.getElementById('workspace').style.display = 'none';
+          pickerEl.style.display = '';
+          projectsEl.innerHTML = '';
+          loadRegistry();
+        });
+        addPopupItem('Open Folder\u2026', false, () => {
+          dismissPopup();
+          document.getElementById('workspace').style.display = 'none';
+          pickerEl.style.display = '';
+          projectsEl.innerHTML = '';
+          loadRegistry();
+          setTimeout(() => manualInput.focus(), 100);
+        });
+      }
+      const rect = canvas.getBoundingClientRect();
+      const statusBarY = terminal ? terminal.visible_rows() * cellHeight : rect.height;
+      sbPopup.style.bottom = (rect.height - statusBarY + 2) + 'px';
+      sbPopup.style.left = kind === 'project' ? '0px' : '';
+      sbPopup.style.right = kind === 'project' ? '' : '0px';
+      sbPopup.classList.add('visible');
+      popupVisible = true;
+    }
+    function addPopupHeader(text) { const e = document.createElement('div'); e.className = 'sb-popup-header'; e.textContent = text; sbPopup.appendChild(e); }
+    function addPopupSeparator() { const e = document.createElement('div'); e.className = 'sb-popup-separator'; sbPopup.appendChild(e); }
+    function addPopupItem(text, isActive, onClick, title, desc) {
+      const item = document.createElement('div');
+      item.className = 'sb-popup-item' + (isActive ? ' active' : '');
+      const check = document.createElement('span'); check.className = 'check'; check.textContent = isActive ? '\u2713' : '';
+      item.appendChild(check);
+      const labelWrap = document.createElement('span'); labelWrap.className = 'sb-popup-label-wrap';
+      const label = document.createElement('span'); label.textContent = text; if (title) label.title = title;
+      labelWrap.appendChild(label);
+      if (desc) { const d = document.createElement('span'); d.className = 'sb-popup-item-desc'; d.textContent = desc; labelWrap.appendChild(d); }
+      item.appendChild(labelWrap);
+      item.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
+      sbPopup.appendChild(item);
+    }
+    function addThemeItem(theme, isActive, onClick) {
+      const item = document.createElement('div');
+      item.className = 'sb-theme-item' + (isActive ? ' active' : '');
+      const check = document.createElement('span'); check.className = 'check'; check.textContent = isActive ? '\u2713' : '';
+      item.appendChild(check);
+      const label = document.createElement('span'); label.className = 'theme-label'; label.textContent = theme.label;
+      item.appendChild(label);
+      const desc = document.createElement('span'); desc.className = 'sb-theme-desc'; desc.textContent = theme.desc;
+      item.appendChild(desc);
+      if (isActive) { const badge = document.createElement('span'); badge.className = 'sb-theme-badge current'; badge.textContent = '(current)'; item.appendChild(badge); }
+      const preview = document.createElement('span'); preview.className = 'sb-theme-preview';
+      for (const hex of theme.stops) { const block = document.createElement('span'); block.style.backgroundColor = hex; preview.appendChild(block); }
+      item.appendChild(preview);
+      item.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
+      sbPopup.appendChild(item);
+    }
+    function dismissPopup() {
+      if (previewThemeName && originalThemeName && terminal) terminal.set_theme(originalThemeName);
+      previewThemeName = null; originalThemeName = null;
+      sbPopup.classList.remove('visible'); sbPopup.classList.remove('theme-mode');
+      popupVisible = false;
+    }
+    document.addEventListener('click', (e) => {
+      if (popupVisible && !sbPopup.contains(e.target) && e.target !== canvas) dismissPopup();
+    });
+
+    function showModal(kind) { if (modals) modals.showModal(kind); }
+    function dismissModal() { if (modals) modals.dismissModal(); }
+
+    // ── Resize Handling ──
+    let lastDpr = window.devicePixelRatio || 1;
+    const resizeObserver = new ResizeObserver((entries) => {
+      if (!terminal || !wasmReady) return;
+      for (const entry of entries) {
+        const realDpr = window.devicePixelRatio || 1;
+        const width = Math.floor(entry.contentRect.width * realDpr);
+        const height = Math.floor(entry.contentRect.height * realDpr);
+        if (width > 0 && height > 0) {
+          canvas.width = width; canvas.height = height;
+          const sbBefore = terminal.scrollback_len();
+          const wasScrolled = terminal.scroll_offset() > 0;
+          try { terminal.resize(width, height); } catch (e) { console.warn('[GPU] resize skipped:', e.message); }
+          if (wasScrolled) { const sbDelta = terminal.scrollback_len() - sbBefore; if (sbDelta !== 0) terminal.scroll(sbDelta); }
+          try { terminal.resize_backgrounds(); } catch {}
+          updateCellDimensions();
+          dirty = true; sendResize();
+        }
+      }
+    });
+    resizeObserver.observe(canvas);
+
+    // Visibility recovery
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && terminal && wasmReady && canvas.width > 0) {
+        forceRestartRenderLoop();
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            if (terminal && wasmReady && canvas.width > 0 && canvas.height > 0) {
+              try { terminal.resize(canvas.width, canvas.height); dirty = true; } catch {}
+            }
+          });
+        });
+      }
+    });
+
+    window.addEventListener('focus', () => { if (terminal && wasmReady) { dirty = true; ensureRenderLoop(); } });
+
+    // DPR change detection (zoom)
+    function watchDpr() {
+      const mq = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+      mq.addEventListener('change', () => {
+        const newDpr = window.devicePixelRatio || 1;
+        if (terminal && Math.abs(newDpr - lastDpr) > 0.01) {
+          lastDpr = newDpr;
+          try {
+            terminal.reinit_renderer(newDpr);
+            const rect = canvas.getBoundingClientRect();
+            canvas.width = Math.floor(rect.width * newDpr);
+            canvas.height = Math.floor(rect.height * newDpr);
+            terminal.resize(canvas.width, canvas.height);
+            updateCellDimensions(); dirty = true; sendResize();
+          } catch (e) { console.warn('reinit_renderer failed:', e); }
+        }
+        watchDpr();
+      }, { once: true });
+    }
+    watchDpr();
+
+    let _resizeTimer = null;
+    let _resyncTimer = null;
+    let _resizePending = false;
+    let _resizeDeadline = 0;
+    function scheduleResync() {
+      if (_resyncTimer) clearTimeout(_resyncTimer);
+      _resyncTimer = setTimeout(() => {
+        _resyncTimer = null; _resizePending = false; _resizeDeadline = 0;
+        for (const [, sess] of sessions) {
+          if (sess.ws && sess.ws.readyState === WebSocket.OPEN) sess.ws.send(JSON.stringify({ type: 'subscribe_raw' }));
+        }
+      }, 300);
+    }
+    function sendResize() {
+      if (!terminal) return;
+      if (_resizeTimer) clearTimeout(_resizeTimer);
+      if (_resyncTimer) clearTimeout(_resyncTimer);
+      _resizePending = true;
+      _resizeDeadline = performance.now() + 2000;
+      _resizeTimer = setTimeout(() => {
+        _resizeTimer = null;
+        const dims = terminal.dimensions();
+        const resizeMsg = JSON.stringify({ type: 'resize', cols: dims[0], rows: dims[1] });
+        let sent = false;
+        for (const [, sess] of sessions) {
+          if (sess.ws && sess.ws.readyState === WebSocket.OPEN) { sess.ws.send(resizeMsg); sent = true; }
+        }
+        if (!sent) return;
+        scheduleResync();
+      }, 80);
+    }
+
+    // ── Expose controls for testing ──
+    window.showModal = showModal;
+    window.dismissModal = dismissModal;
+    window.togglePopup = togglePopup;
+    window.showPopup = showPopup;
+    window.dismissPopup = dismissPopup;
+    window.__immortermDebug = function() {
+      console.group('[ImmorTerm Debug]');
+      console.log('WASM ready:', wasmReady);
+      console.log('Terminal:', terminal ? 'initialized' : 'null');
+      console.log('Canvas:', canvas.width + 'x' + canvas.height, 'DPR:', lastDpr);
+      console.log('Sessions:', sessions.size, 'Active:', activeSessionName);
+      console.groupEnd();
+    };
+
+    // ── Bootstrap: discover memory URL, then load registry ──
+    fetch('/api/v1/config', { signal: AbortSignal.timeout(2000) })
+      .then(r => r.json())
+      .then(cfg => { if (cfg.memory_url) MEMORY_URL = cfg.memory_url; })
+      .catch(() => {})
+      .finally(() => loadRegistry());
+  </script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+language: "typescript"
+layer: "library"
+stack: "frontend"
+
+project:
+  title: "Design Tokens"
+  description: "Brand colors, fonts, and spacing tokens"
+  owner: "@immorterm/core"
+
+tasks:
+  typecheck:
+    command: "bun run tsc --noEmit"
+    inputs:
+      - "src/**/*"
+      - "tsconfig.json"

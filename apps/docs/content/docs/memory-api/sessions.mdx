@@ -1,0 +1,126 @@
+---
+title: Sessions
+description: Register, heartbeat, end — plus session context, tasks, and plans.
+---
+
+A session row tracks one AI session: who ran it, in which terminal window
+(`immorterm_id`), when it started, whether it's still breathing.
+
+## POST /api/v1/sessions
+
+Register a session. Alias: `POST /api/v1/sessions/register`.
+
+Body: `{ session_id, user_id?, immorterm_id?, terminal_name?, ai_tool?, project_context?, registry_snapshot? }`.
+
+```bash
+curl -X POST http://localhost:8765/api/v1/sessions \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"SESSION_ID","user_id":"you@example.com","ai_tool":"claude-code"}'
+```
+
+Response: `{ "status": "registered", "session_id": "…" }`.
+
+## GET /api/v1/sessions
+
+List sessions. Query params: `user_id`, `hours_ago` (default 72), `status`,
+`ai_tool`, `immorterm_id`, `limit` (default 20).
+
+```bash
+curl 'http://localhost:8765/api/v1/sessions?user_id=you@example.com&hours_ago=24&limit=5'
+```
+
+Response:
+
+```json
+{
+  "sessions": [
+    {
+      "number": "#1", "session_id": "…", "status": "alive",
+      "started_at": "…", "edit_count": 12, "accessible": true,
+      "terminal_name": "…", "immorterm_id": "…", "ai_tool": "claude-code",
+      "last_heartbeat": "…", "summary": "…"
+    }
+  ],
+  "count": 1,
+  "tier": "free"
+}
+```
+
+Optional per-session fields (`ended_at`, `files_edited`, `last_active`,
+`title`, `registry_snapshot`) appear when set. `terminal_name` falls back to
+the display name in `~/.immorterm/registry.json` when the DB value is empty.
+
+**Free-tier gating:** sessions older than the retention window are still
+listed but marked `"accessible": false, "requires_pro": true`; the response
+gains `gated_count` + `upgrade`.
+
+## POST /api/v1/sessions/end
+
+Mark a session ended. Sets `ended_at` (idempotent — first write wins) and
+`status = 'ended'`, and merges `exit_reason` into metadata (last write
+wins). Body: `{ session_id, user_id?, exit_reason? }` where `exit_reason`
+is the triggering event (`"SessionEnd"`, `"Stop"`, `"PreCompact"`,
+`"/exit"`, …).
+
+```bash
+curl -X POST http://localhost:8765/api/v1/sessions/end \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"SESSION_ID","exit_reason":"SessionEnd"}'
+```
+
+Response: `{ "status": "ended", "session_id", "ended_at", "exit_reason" }` —
+or `{ "status": "not_found", "session_id" }`.
+
+## POST /api/v1/sessions/heartbeat
+
+Keep a session alive and optionally update its running stats. Body:
+`{ session_id, summary?, edit_count?, files_edited?, registry_snapshot? }`.
+
+```bash
+curl -X POST http://localhost:8765/api/v1/sessions/heartbeat \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"SESSION_ID","edit_count":42}'
+```
+
+Response: `{ "status": "ok" }`.
+
+## GET /api/v1/sessions/context
+
+Full context for resuming a session — summary, facts, decisions, code
+changes. Query params: `user_id`, `session_id`, `immorterm_id`. Returns the
+same JSON as the `get_session_context` MCP tool.
+
+```bash
+curl 'http://localhost:8765/api/v1/sessions/context?session_id=SESSION_ID'
+```
+
+## GET /api/v1/sessions/tasks
+
+Tasks for a session. Query params: `user_id`, `session_id`,
+`immorterm_id`. Returns the same JSON as the `list_tasks` MCP tool.
+
+```bash
+curl 'http://localhost:8765/api/v1/sessions/tasks?immorterm_id=IMMORTERM_ID'
+```
+
+## POST /api/v1/tasks/reconcile
+
+Archives stale tasks — `type='task'` memories with status
+`pending`/`in_progress` older than `stale_days`. Run by the digest daemon
+on a schedule. Query params: `user_id`, `stale_days` (default 7).
+
+```bash
+curl -X POST 'http://localhost:8765/api/v1/tasks/reconcile?user_id=you@example.com&stale_days=7'
+```
+
+Response: `{ "archived": N }`.
+
+## GET /api/v1/plans
+
+Stored plans. Query params: `user_id`, `session_id`, `immorterm_id`,
+`query`, `limit` (default 3). Returns the same JSON as the `get_plan` MCP
+tool.
+
+```bash
+curl 'http://localhost:8765/api/v1/plans?user_id=you@example.com&limit=3'
+```

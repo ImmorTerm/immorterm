@@ -1,0 +1,219 @@
+---
+title: Stats & health
+description: Dashboard stats, service health, the write-ahead queue, and proactive intelligence.
+---
+
+Vitals off the monitor: counts, queue depths, engagement rates. Plus the
+write-ahead queue hooks write into, and the proactive-intelligence endpoint
+that surfaces context before you ask.
+
+## Health
+
+### GET /health
+
+Liveness (top-level, not under `/api/v1`). Returns
+`{ "status": "ok", "service": "immorterm-memory", "version", "git" }`.
+
+```bash
+curl http://localhost:8765/health
+```
+
+### GET /api/v1/stats/health
+
+Runtime internals: WAL queue, embed queue depth, caches, vector index, DB
+pool, dedup counters.
+
+```bash
+curl 'http://localhost:8765/api/v1/stats/health?user_id=you@example.com'
+```
+
+```json
+{
+  "wal_queue": { "pending": 0, "failed": 0, "dead_letter": 0, "total_sent": 1234 },
+  "embed_queue_depth": 0,
+  "hot_cache_size": 12, "hot_cache_max": 256,
+  "query_cache_size": 3, "query_cache_max": 128,
+  "vector_count": 5210,
+  "db_pool_connections": 4, "db_pool_idle": 3,
+  "dedup": { … },
+  "tier": "free"
+}
+```
+
+## Dashboard stats
+
+All take `user_id` (defaults to resolved identity); `overview` and
+`insights` also accept `immorterm_id`.
+
+### GET /api/v1/stats/overview
+
+High-level counts.
+
+```bash
+curl 'http://localhost:8765/api/v1/stats/overview?user_id=you@example.com'
+```
+
+Response: `{ "memories": { "active", "archived", "total" }, "sessions": { "total", "active" }, "code_changes", "graph": { "entities", "relations" }, "vectors", "db_size_bytes" }`.
+
+### GET /api/v1/stats/quality
+
+Memory quality metrics.
+
+```bash
+curl 'http://localhost:8765/api/v1/stats/quality?user_id=you@example.com'
+```
+
+Response: `{ "type_distribution": […], "category_distribution": […], "avg_content_length", "embedding_coverage_pct", "duplicate_groups" }`.
+
+### GET /api/v1/stats/timeline
+
+Daily memory + session creation counts for sparklines. Query params:
+`user_id`, `days` (default 30, clamped to 1–365).
+
+```bash
+curl 'http://localhost:8765/api/v1/stats/timeline?user_id=you@example.com&days=30'
+```
+
+Response: `{ "days": 30, "memories": [{ "date", "count" }], "sessions": [{ "date", "count" }] }`.
+
+### GET /api/v1/stats/dedup
+
+Scan for near-duplicate memory groups by vector similarity. Query params:
+`user_id`, `threshold` (default 0.92), `limit` (max memories to scan,
+default 500).
+
+```bash
+curl 'http://localhost:8765/api/v1/stats/dedup?user_id=you@example.com&threshold=0.92'
+```
+
+Response: `{ "duplicate_groups", "total_duplicate_memories", "threshold", "scanned", "groups": […], "runtime_stats": { … } }`.
+
+### GET /api/v1/stats/insights
+
+Aggregated insights: engagement stats, top-10 failure patterns, category
+distribution, 7-day session activity, lessons-learned count, and active
+guardrails (failure patterns seen 3+ times). Query params: `user_id`,
+`immorterm_id` (scopes the memory/session numbers to one terminal window).
+
+```bash
+curl 'http://localhost:8765/api/v1/stats/insights?user_id=you@example.com'
+```
+
+Response: `{ "engagement": { "total_shown", "total_acted_on", "overall_rate", "by_signal" }, "failure_patterns": [{ "description", "frequency", "last_seen" }], "memory_categories": […], "session_summary": { "total_7d", "active_today" }, "lessons_count", "guardrails_active" }`.
+
+### GET /api/v1/stats/projects
+
+Distinct `user_id` partitions with active-memory counts, sorted by count.
+No parameters.
+
+```bash
+curl http://localhost:8765/api/v1/stats/projects
+```
+
+Response: `{ "projects": [{ "user_id", "memory_count" }] }`.
+
+## Write-ahead queue
+
+The reliable path for hooks: enqueue returns in under a millisecond and the
+payload is flushed to the real save path later.
+
+### POST /api/v1/wal/enqueue
+
+Accepts the exact same JSON payload as `POST /api/v1/memories` and stores
+it as-is in the queue.
+
+```bash
+curl -X POST http://localhost:8765/api/v1/wal/enqueue \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"you@example.com","text":"fact captured mid-crash"}'
+```
+
+Response: `{ "status": "queued", "queue_id": N }`.
+
+### GET /api/v1/wal/stats
+
+Queue monitoring: `{ "pending", "failed", "dead_letter", "total_sent" }`.
+
+```bash
+curl http://localhost:8765/api/v1/wal/stats
+```
+
+## Proactive intelligence
+
+### POST /api/v1/intelligence/context
+
+One call replaces multiple searches: the server runs semantic, file-context,
+error-pattern, decision, topic-continuation, and resumption signals in
+parallel and returns attributed results. This is what the ambient hook calls
+on every prompt.
+
+Body (`IntelligenceRequest`):
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `prompt` | string | — | Required — the user's prompt text. |
+| `user_id` | string | — | Required. |
+| `session_id`, `immorterm_id` | string | — | Optional. |
+| `file_paths` | string[] | `[]` | Files currently being worked on. |
+| `terminal_output` | string | — | Recent output, for error detection. |
+| `memory_limit` | number | 5 | Max memories returned. |
+| `warning_limit` | number | 3 | Max warnings returned. |
+
+```bash
+curl -X POST http://localhost:8765/api/v1/intelligence/context \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"you@example.com","prompt":"continue with the auth refactor","session_id":"SESSION_ID"}'
+```
+
+Response (`IntelligenceResponse`):
+
+- `memories` — `[{ id, content, score, attribution, reason, category?, type?, created_at }]` where `attribution` is one of `semantic_match`, `file_context`, `error_pattern`, `decision`, `topic_continuation`.
+- `warnings` — `[{ content, severity: "low"|"medium"|"high", source, frequency?, fix_memory_id? }]`.
+- `decisions` — `[{ id, content, status, age_days, category? }]`.
+- `stats` — per-signal hit counts, `rate_limited`, `session_suggestion_count`, `elapsed_ms`.
+- `trailer` — attribution text the consumer emits verbatim.
+- `resumption` — present only when the prompt expresses resumption intent ("where were we") and a recently ended session exists; carries a pre-rendered `formatted_block` plus raw fields (`prior_session_id`, `ended_at`, `exit_reason?`, `decisions`, `state`, `handoff?`, `commit_refs`, `blockers`).
+- `empty_search_reason` — present only when the search ran and found nothing worth surfacing: `kind: "no_candidates"` or `kind: "below_threshold"` (0.25 confidence gate), each with a pre-rendered `message`.
+
+Supplementary signals (file-context, error patterns, topic continuation)
+are rate-limited to 10 suggestions per session; core semantic search always
+runs.
+
+### GET /api/v1/intelligence/stats
+
+Engagement rates — how often surfaced suggestions were acted on. Query
+param: `user_id` (required; `{ "error": "user_id required" }` otherwise).
+
+```bash
+curl 'http://localhost:8765/api/v1/intelligence/stats?user_id=you@example.com'
+```
+
+Response: `{ "total_shown", "total_acted_on", "overall_rate", "by_signal": { "<signal>": { "shown", "acted_on", "rate" } } }`.
+
+### POST /api/v1/intelligence/engagement
+
+Record that a surfaced suggestion was acted on. Body:
+`{ memory_id, user_id }`.
+
+```bash
+curl -X POST http://localhost:8765/api/v1/intelligence/engagement \
+  -H 'Content-Type: application/json' \
+  -d '{"memory_id":"MEMORY_ID","user_id":"you@example.com"}'
+```
+
+Response: `{ "ok": true }`.
+
+### POST /api/v1/failure-patterns/store
+
+Extract and store error patterns (Rust panics, compilation errors, Python
+tracebacks, JS errors, shell errors) from raw text — the digest hook sends
+transcript excerpts here. Body: `{ text, user_id, session_id? }`.
+
+```bash
+curl -X POST http://localhost:8765/api/v1/failure-patterns/store \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"you@example.com","text":"error[E0382]: borrow of moved value…"}'
+```
+
+Response: `{ "stored": N, "pattern_ids": […] }` — `{ "stored": 0 }` when no
+patterns were found.

@@ -1,0 +1,48 @@
+/* ImmorTerm docs — terminal-dark Tank skin (the brand design tokens).
+ * Fumadocs 14 reads HSL triplets from --fd-* vars; map them onto the Tank
+ * palette (mort tokens in libs/ui/src/tokens.ts — hexes mirrored as HSL here). */
+@import "fumadocs-ui/style.css";
+@import "../../../libs/ui/src/styles.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+	/* Custom Nav (@immorterm/ui, h-16) replaces the fumadocs navbar — tell the
+	   layout how tall it is so the sidebar/content offset stays correct. */
+	--fd-banner-height: 0px;
+	--fd-nav-height: 64px;
+}
+
+/* Forced dark — the tank has no light mode. Same values on :root as a belt-and-braces
+ * for anything rendered before next-themes applies the class. */
+:root,
+.dark {
+	--fd-background: 227 29% 6%; /* tank #0b0d14 */
+	--fd-foreground: 280 12% 95%; /* foam #f4f2f5 */
+	--fd-card: 226 27% 10%; /* tank-glass #12151f */
+	--fd-card-foreground: 280 12% 95%;
+	--fd-popover: 226 25% 14%; /* elevated #1a1e2b */
+	--fd-popover-foreground: 280 12% 95%;
+	--fd-primary: 352 100% 68%; /* coral #ff5c73 */
+	--fd-primary-foreground: 227 29% 6%;
+	--fd-secondary: 226 25% 14%;
+	--fd-secondary-foreground: 280 12% 95%;
+	--fd-muted: 226 25% 14%;
+	--fd-muted-foreground: 224 12% 65%; /* foam-soft #9aa0b0 */
+	--fd-accent: 226 25% 14%;
+	--fd-accent-foreground: 280 12% 95%;
+	--fd-border: 226 23% 18%; /* tank-line #232838 */
+	--fd-ring: 352 100% 68%;
+}
+
+body {
+	background-color: hsl(var(--fd-background));
+	color: hsl(var(--fd-foreground));
+	font-family: "Inter", system-ui, sans-serif;
+}
+
+::selection {
+	background-color: color-mix(in srgb, var(--brand-coral) 40%, transparent);
+}

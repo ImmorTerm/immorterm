@@ -1,0 +1,69 @@
+---
+title: Updating
+description: How each component gets new versions, and the one command that does it.
+---
+
+ImmorTerm is several components on several channels. One command covers what
+can be upgraded today:
+
+```bash
+immorterm upgrade             # everything with an update available
+immorterm upgrade memory      # one component
+immorterm upgrade --dry-run   # show the plan, change nothing
+```
+
+Full flag reference on the [CLI page](/docs/cli#upgrade).
+
+## Channels
+
+| Component | Channel | Command |
+|---|---|---|
+| CLI (`immorterm`) | npm | `immorterm upgrade cli` |
+| Memory binary | GitHub Releases | `immorterm upgrade memory` |
+| VS Code extension | Marketplace | `immorterm upgrade extension` — not yet published; local installs update via `immorterm install extension --force` |
+| Terminal binary (C) | Homebrew | `immorterm upgrade terminal` — formula not yet live |
+| AI daemon (`immorterm-ai`) | — | no public channel yet; `immorterm upgrade ai` says so honestly |
+| Desktop app (Tauri) | built-in updater | none needed — checks on launch, banner → install → relaunch |
+| MCP Gateway | npm | automatic — the extension polls every 6 hours |
+
+Channels marked "not yet" are coded and waiting on their first publish; the
+CLI reports the honest state rather than failing cryptically.
+
+## Update detection
+
+`immorterm status` shows a Component Versions table with `→ x.y.z available`
+markers. The CLI also prints a one-line upgrade hint after commands, at most
+once per check interval — governed by `autoUpdate` in
+`~/.immorterm/config.json` (default: enabled, 24 h). It only ever hints; it
+never installs anything on its own.
+
+## Memory binary specifics
+
+`immorterm upgrade memory` stops the daemon, downloads the latest release,
+replaces the binary, and restarts. If the download fails, it restarts the
+**old** daemon — memory never stays down because an upgrade didn't land.
+
+Two things worth knowing:
+
+- **Version stamp.** The binary has no `--version`; the installed version is
+  the release tag stamped at install time. A binary installed before
+  stamping existed reports `unknown` — one `immorterm upgrade memory --force`
+  fixes it permanently.
+- **Linux glibc floor: 2.38+** (Ubuntu 24.04, Debian 13). The ONNX runtime
+  inside the binary references symbols older distros don't ship. On such a
+  system `memory up` and `doctor` fail a preflight with an explanation
+  instead of a timeout.
+
+To restart the daemon by hand, use `immorterm memory down` /
+`immorterm memory up` — it signals only the daemon's own PID. Don't kill by
+port: everything attached to port 8765 is a *client* of the memory service,
+and they'd like to stay attached.
+
+## After upgrading
+
+```bash
+immorterm doctor
+```
+
+Verifies binaries are executable, services are healthy, and hooks are still
+active. Extension updates additionally need a VS Code reload.

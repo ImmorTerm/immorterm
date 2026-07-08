@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Kill all screen sessions for this project
+
+PROJECT_DIR="${SCREEN_PROJECT_DIR:-$(pwd)}"
+PROJECT="$(basename "$PROJECT_DIR" | tr '[:upper:]' '[:lower:]')"
+RESTORE_FILE="$PROJECT_DIR/.immorterm/restore-terminals.json"
+LOGS_DIR="$PROJECT_DIR/.immorterm/terminals/logs"
+RENAMES_DIR="$PROJECT_DIR/.immorterm/terminals/renames"
+
+# Use configured screen binary
+SCREEN="${IMMORTERM_SCREEN_BINARY:-immorterm}"
+SCREEN_DIR="${SCREENDIR:-$HOME/.screen}"
+
+echo "Killing all $PROJECT screen sessions..."
+
+# Find and kill all project screen sessions
+$SCREEN -ls 2>/dev/null | grep -oE "[0-9]+\.${PROJECT}-[^[:space:]]+" | while read session; do
+  echo "  Killing $session"
+  $SCREEN -S "$session" -X quit 2>/dev/null || true
+  # Also delete socket file directly (screen -X quit fails for "Remote or dead" sessions)
+  socket="$SCREEN_DIR/$session"
+  [[ -S "$socket" ]] && rm -f "$socket" && echo "  Deleted socket: $session"
+done
+
+# Clear restore-terminals.json
+echo '{"artificialDelayMilliseconds": 0, "terminals": []}' | jq '.' > "$RESTORE_FILE"
+echo "Cleared restore-terminals.json"
+
+# Delete all log files
+if [[ -d "$LOGS_DIR" ]]; then
+  rm -f "$LOGS_DIR"/*.log 2>/dev/null || true
+  echo "Deleted all log files"
+fi
+
+# Delete all rename title files
+if [[ -d "$RENAMES_DIR" ]]; then
+  rm -f "$RENAMES_DIR"/* 2>/dev/null || true
+  echo "Deleted all rename files"
+fi
+
+# Clean up dead sessions
+$SCREEN -wipe >/dev/null 2>&1 || true
+
+echo "Done!"

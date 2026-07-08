@@ -1,0 +1,40 @@
+language: "typescript"
+layer: "application"
+stack: "frontend"
+tags: ["nextjs"]
+
+project:
+  title: "ImmorTerm Docs"
+  description: "Public docs site (Fumadocs, static export → CF Pages)"
+  owner: "@immorterm/frontend"
+
+# No typecheck task on purpose: `next build` type-gates this app; a separate
+# tsc over the Next+Fumadocs type graph is redundant, slow, and OOM-prone.
+tasks:
+  dev:
+    command: "bun run dev"
+    options:
+      persistent: true
+      runInCI: false
+
+  build:
+    command: "bun run build"
+    inputs:
+      - "app/**/*"
+      - "content/**/*"
+      - "lib/**/*"
+      - "public/**/*"
+      - "next.config.mjs"
+      - "postcss.config.mjs"
+      - "tailwind.config.ts"
+      - "source.config.ts"
+      - "tsconfig.json"
+    outputs:
+      - "out"
+
+  deploy:
+    command: "wrangler pages deploy out --project-name=immorterm-docs"
+    deps:
+      - "~:build"
+    options:
+      runInCI: false

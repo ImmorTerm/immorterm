@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Reconciles pending terminal files into restore-terminals.json
+# Runs in background, handles its own locking to prevent concurrent JSON writes
+
+set -euo pipefail
+
+# Scripts are global ($HOME/.immorterm/scripts/), get project dir from environment
+PROJECT_DIR="${SCREEN_PROJECT_DIR:-$PWD}"
+cd "$PROJECT_DIR"
+PROJECT="$(basename "$PWD" | tr '[:upper:]' '[:lower:]')"
+JSON=".immorterm/restore-terminals.json"
+PENDING_DIR="$PROJECT_DIR/.immorterm/terminals/pending"
+LOCKFILE="/tmp/vscode-screen-${PROJECT}-reconcile.lock"
+
+# Wait a bit to let multiple terminals queue up their pending files
+sleep 0.3
+
+# Use a simple lockfile - if another reconciler is running, just exit
+# (that one will pick up our pending files too)
+if ! mkdir "$LOCKFILE" 2>/dev/null; then
+  exit 0
+fi
+trap 'rm -rf "$LOCKFILE"' EXIT
+
+# Process all pending files
+for pending_file in "$PENDING_DIR"/*; do
+  [[ -f "$pending_file" ]] || continue
+
+  # Read pending file: "windowId displayName"
+  read -r WINDOW DISPLAY_NAME < "$pending_file"
+  # Fallback if no display name (old format)
+  [[ -z "$DISPLAY_NAME" ]] && DISPLAY_NAME="$WINDOW"
+
+  # Check if windowId already in JSON (avoid duplicates on restore)
+  if jq -e --arg w "$WINDOW" '.terminals[] | select(.splitTerminals[0].windowId == $w)' "$JSON" >/dev/null 2>&1; then
+    rm -f "$pending_file"
+    continue
+  fi
+
+  # Add to JSON with friendly name and windowId
+  # Command includes display name so screen-auto uses it on restore
+  tmp="$(mktemp)"
+  if jq --arg name "$DISPLAY_NAME" --arg wid "$WINDOW" --arg cmd "exec $HOME/.immorterm/scripts/screen-auto $WINDOW \"$DISPLAY_NAME\"" '
+    .terminals = (.terminals // []) |
+    .terminals += [{"splitTerminals":[{"name":$name,"windowId":$wid,"shellPath":"/bin/zsh","commands":[$cmd]}]}]
+  ' "$JSON" > "$tmp"; then
+    mv "$tmp" "$JSON"
+  else
+    rm -f "$tmp"
+  fi
+
+  # Remove pending file
+  rm -f "$pending_file"
+done

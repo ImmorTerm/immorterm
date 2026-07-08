@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #1e1e2e; }
+
+    /* ── Main Layout: panes + dashboard sidebar ── */
+    #container {
+      display: flex; width: 100%; height: 100%;
+    }
+    #panes-area {
+      flex: 1; display: flex; flex-direction: column;
+      min-width: 0; position: relative;
+    }
+    #panes-grid {
+      flex: 1; display: grid; gap: 2px; padding: 2px;
+      min-height: 0;
+    }
+
+    /* ── Pane ── */
+    .pane {
+      display: flex; flex-direction: column;
+      background: #11111b;
+      border: 1px solid #313244;
+      border-radius: 4px;
+      overflow: hidden;
+      position: relative;
+    }
+    .pane.focused { border-color: var(--accent-color, #b482ff); }
+    .pane-header {
+      display: flex; align-items: center; gap: 6px;
+      padding: 3px 8px; min-height: 22px;
+      background: #181825;
+      border-bottom: 1px solid #313244;
+      font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+      font-size: 11px; color: #cdd6f4;
+      cursor: pointer; user-select: none;
+    }
+    .pane-header .status-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .pane-header .status-dot.active { background: #a6e3a1; }
+    .pane-header .status-dot.idle { background: #f9e2af; }
+    .pane-header .status-dot.done { background: #89b4fa; }
+    .pane-header .status-dot.unknown { background: #585b70; }
+    .pane-header .status-dot.disconnected { background: #f38ba8; }
+    .pane-header .member-name {
+      font-weight: 600;
+      color: var(--accent-color, #b482ff);
+    }
+    .pane-header .agent-type {
+      color: #585b70; font-size: 10px;
+    }
+    .pane-header .task-label {
+      flex: 1; overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap; color: #a6adc8; font-size: 10px;
+      text-align: right;
+    }
+    .pane-canvas-wrap {
+      flex: 1; position: relative; min-height: 0;
+    }
+    .pane-canvas {
+      width: 100%; height: 100%; display: block; outline: none;
+    }
+    .pane-placeholder {
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      width: 100%; height: 100%;
+      color: #585b70; font-family: system-ui; text-align: center;
+      font-size: 12px;
+    }
+    .pane-placeholder .icon { font-size: 28px; opacity: 0.4; margin-bottom: 6px; }
+
+    /* ── Message Input Bar ── */
+    #message-bar {
+      display: none; align-items: center; gap: 8px;
+      padding: 6px 10px;
+      background: #181825;
+      border-top: 1px solid #313244;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+    }
+    #message-bar.visible { display: flex; }
+    #message-bar .recipient {
+      color: #b482ff; font-weight: 600; white-space: nowrap;
+    }
+    #message-bar input {
+      flex: 1; background: #11111b; border: 1px solid #313244;
+      border-radius: 4px; padding: 4px 8px;
+      color: #cdd6f4; font-family: inherit; font-size: 12px;
+      outline: none;
+    }
+    #message-bar input:focus { border-color: #b482ff; }
+    #message-bar button {
+      background: rgba(180, 130, 255, 0.2); border: 1px solid #b482ff;
+      border-radius: 4px; padding: 4px 12px;
+      color: #b482ff; cursor: pointer; font-family: inherit; font-size: 11px;
+    }
+    #message-bar button:hover { background: rgba(180, 130, 255, 0.3); }
+    #message-bar .close-btn {
+      background: none; border: none; color: #585b70;
+      cursor: pointer; font-size: 16px; padding: 0 4px;
+    }
+
+    /* ── Dashboard Sidebar ── */
+    #dashboard {
+      width: 220px; min-width: 180px;
+      background: #181825;
+      border-left: 1px solid #313244;
+      display: flex; flex-direction: column;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      font-size: 12px; color: #cdd6f4;
+      overflow-y: auto;
+    }
+    .dash-section {
+      padding: 8px 10px;
+      border-bottom: 1px solid #313244;
+    }
+    .dash-section-title {
+      font-size: 10px; text-transform: uppercase;
+      letter-spacing: 0.5px; color: #585b70;
+      margin-bottom: 6px;
+    }
+
+    /* Team header */
+    .team-header {
+      padding: 10px;
+      border-bottom: 1px solid #313244;
+    }
+    .team-name {
+      font-size: 14px; font-weight: 600; color: #cdd6f4;
+    }
+    .team-desc {
+      font-size: 11px; color: #585b70; margin-top: 2px;
+    }
+
+    /* Members list */
+    .member-item {
+      display: flex; align-items: center; gap: 6px;
+      padding: 3px 0; cursor: pointer;
+    }
+    .member-item:hover { opacity: 0.8; }
+    .member-item .m-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+    }
+    .member-item .m-name { flex: 1; font-size: 12px; }
+    .member-item .m-status {
+      font-size: 10px; color: #585b70;
+    }
+
+    /* Task list */
+    .task-item {
+      padding: 4px 0;
+      display: flex; align-items: flex-start; gap: 6px;
+    }
+    .task-item .t-icon {
+      width: 14px; text-align: center; flex-shrink: 0;
+      font-size: 11px; line-height: 18px;
+    }
+    .task-item .t-icon.completed { color: #a6e3a1; }
+    .task-item .t-icon.in_progress { color: #f9e2af; }
+    .task-item .t-icon.pending { color: #585b70; }
+    .task-item .t-body { flex: 1; }
+    .task-item .t-subject {
+      font-size: 11px; line-height: 1.3;
+    }
+    .task-item .t-owner {
+      font-size: 10px; color: #585b70;
+    }
+
+    /* Message feed */
+    .msg-item {
+      padding: 4px 0;
+      border-bottom: 1px solid rgba(49, 50, 68, 0.5);
+    }
+    .msg-item:last-child { border-bottom: none; }
+    .msg-item .msg-from {
+      font-size: 10px; font-weight: 600;
+      margin-bottom: 2px;
+    }
+    .msg-item .msg-text {
+      font-size: 11px; color: #a6adc8;
+      overflow: hidden; text-overflow: ellipsis;
+      display: -webkit-box; -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+    }
+    .msg-item .msg-time {
+      font-size: 9px; color: #585b70; margin-top: 1px;
+    }
+
+    /* Progress bar */
+    .progress-bar {
+      height: 4px; background: #313244; border-radius: 2px;
+      overflow: hidden; margin-top: 4px;
+    }
+    .progress-fill {
+      height: 100%; background: #a6e3a1; border-radius: 2px;
+      transition: width 0.3s ease;
+    }
+
+    /* ── Empty team state ── */
+    #no-team {
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      width: 100%; height: 100%;
+      color: #585b70; font-family: system-ui; text-align: center;
+    }
+    #no-team .icon { font-size: 48px; margin-bottom: 12px; opacity: 0.4; }
+    #no-team .title { font-size: 16px; color: #a6adc8; margin-bottom: 4px; }
+    #no-team .hint { font-size: 12px; line-height: 1.6; }
+    #no-team kbd {
+      background: #313244; padding: 2px 6px; border-radius: 3px;
+      font-family: monospace; font-size: 11px; color: #cdd6f4;
+    }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <div id="panes-area">
+      <div id="no-team">
+        <div class="icon">&#9874;</div>
+        <div class="title">ImmorTerm Team View</div>
+        <div class="hint">
+          No active agent team detected.<br>
+          Create a team in Claude Code with <kbd>TeamCreate</kbd><br>
+          or start one from the command palette.
+        </div>
+      </div>
+      <div id="panes-grid" style="display:none;"></div>
+      <div id="message-bar">
+        <span class="recipient">@researcher</span>
+        <input type="text" placeholder="Type a message..." id="msg-input" />
+        <button id="msg-send">Send</button>
+        <button class="close-btn" id="msg-close">&times;</button>
+      </div>
+    </div>
+    <div id="dashboard" style="display:none;">
+      <div class="team-header">
+        <div class="team-name" id="team-name">Team</div>
+        <div class="team-desc" id="team-desc"></div>
+      </div>
+      <div class="dash-section">
+        <div class="dash-section-title">Members</div>
+        <div id="member-list"></div>
+      </div>
+      <div class="dash-section">
+        <div class="dash-section-title">Tasks</div>
+        <div id="task-list"></div>
+        <div class="progress-bar"><div class="progress-fill" id="task-progress"></div></div>
+      </div>
+      <div class="dash-section">
+        <div class="dash-section-title">Messages</div>
+        <div id="message-feed"></div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    const vscode = acquireVsCodeApi();
+
+    // ── DOM refs ──
+    const noTeamEl = document.getElementById('no-team');
+    const panesGrid = document.getElementById('panes-grid');
+    const dashboard = document.getElementById('dashboard');
+    const teamNameEl = document.getElementById('team-name');
+    const teamDescEl = document.getElementById('team-desc');
+    const memberListEl = document.getElementById('member-list');
+    const taskListEl = document.getElementById('task-list');
+    const taskProgress = document.getElementById('task-progress');
+    const messageFeed = document.getElementById('message-feed');
+    const messageBar = document.getElementById('message-bar');
+    const msgInput = document.getElementById('msg-input');
+    const msgSend = document.getElementById('msg-send');
+    const msgClose = document.getElementById('msg-close');
+    const msgRecipient = messageBar.querySelector('.recipient');
+
+    // ── State ──
+    let teamState = null;
+    let wasmModule = null;
+    let wasmReady = false;
+    let wasmJsUri = null;
+    let wasmBgUri = null;
+    const panes = new Map();
+    let focusedPane = null;
+    let messageTarget = null;
+
+    // ── Color mapping ──
+    const COLOR_MAP = {
+      blue: '#6699ff', green: '#66e580', yellow: '#ffda4d',
+      purple: '#cc80ff', magenta: '#cc80ff', red: '#ff6666',
+      cyan: '#4de6e6', orange: '#ff9933',
+    };
+    function memberColor(color) {
+      if (!color) return '#b482ff';
+      if (color.startsWith('#')) return color;
+      return COLOR_MAP[color] || '#b482ff';
+    }
+
+    function statusClass(status) {
+      const map = { active: 'active', idle: 'idle', done: 'done', unknown: 'unknown' };
+      return map[status] || 'unknown';
+    }
+
+    // ── Grid layout for N panes ──
+    function gridTemplate(n) {
+      if (n <= 1) return { cols: '1fr', rows: '1fr' };
+      if (n === 2) return { cols: '1fr 1fr', rows: '1fr' };
+      if (n <= 4) return { cols: '1fr 1fr', rows: Array(Math.ceil(n / 2)).fill('1fr').join(' ') };
+      if (n <= 6) return { cols: '1fr 1fr 1fr', rows: Array(Math.ceil(n / 3)).fill('1fr').join(' ') };
+      return { cols: '1fr 1fr 1fr', rows: Array(Math.ceil(n / 3)).fill('1fr').join(' ') };
+    }
+
+    // ── Build panes from team state (safe DOM construction) ──
+    function buildPanes(state) {
+      while (panesGrid.firstChild) panesGrid.removeChild(panesGrid.firstChild);
+      panes.clear();
+
+      const members = state.config.members.filter(m => m.agentType !== 'team-lead');
+      if (members.length === 0) return;
+
+      const grid = gridTemplate(members.length);
+      panesGrid.style.gridTemplateColumns = grid.cols;
+      panesGrid.style.gridTemplateRows = grid.rows;
+
+      members.forEach((member, idx) => {
+        const color = memberColor(member.color);
+        const status = state.member_status?.[member.name] || 'unknown';
+        const currentTask = state.tasks?.find(
+          t => t.owner === member.name && t.status === 'in_progress'
+        );
+
+        const pane = document.createElement('div');
+        pane.className = 'pane' + (idx === 0 ? ' focused' : '');
+        pane.style.setProperty('--accent-color', color);
+        pane.dataset.member = member.name;
+
+        // Header
+        const header = document.createElement('div');
+        header.className = 'pane-header';
+
+        const dot = document.createElement('span');
+        dot.className = 'status-dot ' + statusClass(status);
+        header.appendChild(dot);
+
+        const nameEl = document.createElement('span');
+        nameEl.className = 'member-name';
+        nameEl.textContent = member.name;
+        nameEl.style.color = color;
+        header.appendChild(nameEl);
+
+        const typeEl = document.createElement('span');
+        typeEl.className = 'agent-type';
+        typeEl.textContent = member.agentType || '';
+        header.appendChild(typeEl);
+
+        if (currentTask) {
+          const taskEl = document.createElement('span');
+          taskEl.className = 'task-label';
+          taskEl.textContent = currentTask.activeForm || currentTask.subject;
+          header.appendChild(taskEl);
+        }
+
+        header.addEventListener('click', () => focusPane(member.name));
+        header.addEventListener('dblclick', () => openMessageBar(member.name));
+        pane.appendChild(header);
+
+        // Canvas + placeholder
+        const wrap = document.createElement('div');
+        wrap.className = 'pane-canvas-wrap';
+
+        const canvasId = 'pane-canvas-' + idx;
+        const canvas = document.createElement('canvas');
+        canvas.className = 'pane-canvas';
+        canvas.id = canvasId;
+        canvas.tabIndex = 0;
+        canvas.style.display = 'none';
+
+        const placeholder = document.createElement('div');
+        placeholder.className = 'pane-placeholder';
+
+        const phIcon = document.createElement('div');
+        phIcon.className = 'icon';
+        phIcon.textContent = '\u2328'; // keyboard symbol
+        placeholder.appendChild(phIcon);
+
+        const phName = document.createElement('div');
+        phName.textContent = member.name;
+        placeholder.appendChild(phName);
+
+        const phHint = document.createElement('div');
+        phHint.style.cssText = 'color:#585b70;font-size:10px;margin-top:4px';
+        phHint.textContent = 'Waiting for connection...';
+        placeholder.appendChild(phHint);
+
+        wrap.appendChild(canvas);
+        wrap.appendChild(placeholder);
+        pane.appendChild(wrap);
+        panesGrid.appendChild(pane);
+
+        panes.set(member.name, {
+          canvas, placeholder, pane, header, dot,
+          terminal: null, ws: null, connected: false,
+          wsPort: null, member,
+        });
+      });
+
+      if (members.length > 0) focusedPane = members[0].name;
+    }
+
+    // ── Focus a pane ──
+    function focusPane(memberName) {
+      if (focusedPane === memberName) return;
+      focusedPane = memberName;
+      for (const [name, p] of panes) {
+        p.pane.classList.toggle('focused', name === memberName);
+        if (name === memberName) p.canvas.focus();
+      }
+    }
+
+    // ── Message bar ──
+    function openMessageBar(memberName) {
+      messageTarget = memberName;
+      const p = panes.get(memberName);
+      const color = p ? memberColor(p.member.color) : '#b482ff';
+      msgRecipient.textContent = '@' + memberName;
+      msgRecipient.style.color = color;
+      messageBar.classList.add('visible');
+      msgInput.value = '';
+      msgInput.focus();
+    }
+
+    function closeMessageBar() {
+      messageBar.classList.remove('visible');
+      messageTarget = null;
+    }
+
+    function sendMessage() {
+      const content = msgInput.value.trim();
+      if (!content || !messageTarget || !teamState) return;
+      vscode.postMessage({
+        type: 'send-team-message',
+        teamName: teamState.config.name,
+        recipient: messageTarget,
+        content,
+      });
+      msgInput.value = '';
+      closeMessageBar();
+    }
+
+    msgSend.addEventListener('click', sendMessage);
+    msgClose.addEventListener('click', closeMessageBar);
+    msgInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') sendMessage();
+      if (e.key === 'Escape') closeMessageBar();
+    });
+
+    // ── Dashboard rendering ──
+    function renderDashboard(state) {
+      teamNameEl.textContent = state.config.name || 'Team';
+      teamDescEl.textContent = state.config.description || '';
+
+      // Members
+      while (memberListEl.firstChild) memberListEl.removeChild(memberListEl.firstChild);
+      for (const member of state.config.members) {
+        const status = state.member_status?.[member.name] || 'unknown';
+        const item = document.createElement('div');
+        item.className = 'member-item';
+
+        const dot = document.createElement('span');
+        dot.className = 'm-dot';
+        dot.style.background = memberColor(member.color);
+        item.appendChild(dot);
+
+        const name = document.createElement('span');
+        name.className = 'm-name';
+        name.textContent = member.name;
+        item.appendChild(name);
+
+        const statusEl = document.createElement('span');
+        statusEl.className = 'm-status';
+        statusEl.textContent = status;
+        item.appendChild(statusEl);
+
+        item.addEventListener('click', () => {
+          if (member.agentType !== 'team-lead') focusPane(member.name);
+        });
+        memberListEl.appendChild(item);
+      }
+
+      // Tasks
+      while (taskListEl.firstChild) taskListEl.removeChild(taskListEl.firstChild);
+      let completed = 0, total = 0;
+      for (const task of (state.tasks || [])) {
+        if (task.status === 'deleted') continue;
+        total++;
+        if (task.status === 'completed') completed++;
+
+        const item = document.createElement('div');
+        item.className = 'task-item';
+
+        const icon = document.createElement('span');
+        icon.className = 't-icon ' + task.status;
+        if (task.status === 'completed') icon.textContent = '\u2713';
+        else if (task.status === 'in_progress') icon.textContent = '\u25B6';
+        else icon.textContent = '\u25CB';
+        item.appendChild(icon);
+
+        const body = document.createElement('div');
+        body.className = 't-body';
+        const subj = document.createElement('div');
+        subj.className = 't-subject';
+        subj.textContent = task.subject;
+        body.appendChild(subj);
+        if (task.owner) {
+          const owner = document.createElement('div');
+          owner.className = 't-owner';
+          owner.textContent = task.owner;
+          body.appendChild(owner);
+        }
+        item.appendChild(body);
+        taskListEl.appendChild(item);
+      }
+      taskProgress.style.width = total > 0 ? (completed / total * 100) + '%' : '0%';
+
+      // Messages
+      while (messageFeed.firstChild) messageFeed.removeChild(messageFeed.firstChild);
+      const messages = getRecentMessages(state, 10);
+      for (const msg of messages) {
+        const item = document.createElement('div');
+        item.className = 'msg-item';
+
+        const from = document.createElement('div');
+        from.className = 'msg-from';
+        from.textContent = msg.from;
+        from.style.color = memberColor(
+          state.config.members.find(m => m.name === msg.from)?.color
+        );
+        item.appendChild(from);
+
+        const text = document.createElement('div');
+        text.className = 'msg-text';
+        text.textContent = msg.summary || (msg.text?.length > 100 ? msg.text.slice(0, 100) + '...' : msg.text);
+        item.appendChild(text);
+
+        messageFeed.appendChild(item);
+      }
+    }
+
+    function getRecentMessages(state, limit) {
+      if (!state.inboxes) return [];
+      const all = [];
+      for (const [agent, msgs] of Object.entries(state.inboxes)) {
+        for (const msg of msgs) {
+          if (msg.text?.includes('"type":"idle_notification"')) continue;
+          all.push(msg);
+        }
+      }
+      all.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+      return all.slice(0, limit);
+    }
+
+    // ── Connect pane to daemon WebSocket ──
+    function connectPane(memberName, wsPort) {
+      const p = panes.get(memberName);
+      if (!p) return;
+
+      p.wsPort = wsPort;
+      const ws = new WebSocket('ws://127.0.0.1:' + wsPort);
+      ws.binaryType = 'arraybuffer';
+      p.ws = ws;
+
+      ws.onopen = () => {
+        p.connected = true;
+        p.dot.className = 'status-dot active';
+        ws.send(JSON.stringify({ type: 'subscribe_raw' }));
+        initPaneTerminal(memberName);
+      };
+
+      ws.onmessage = (event) => {
+        if (event.data instanceof ArrayBuffer) {
+          if (p.terminal) p.terminal.process(new Uint8Array(event.data));
+        } else {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'snapshot' && p.terminal && msg.snapshot_json) {
+              p.terminal.load_snapshot(msg.snapshot_json);
+            }
+          } catch (e) { /* ignore */ }
+        }
+      };
+
+      ws.onclose = () => {
+        p.connected = false;
+        p.dot.className = 'status-dot disconnected';
+        setTimeout(() => {
+          if (panes.has(memberName) && !p.connected) {
+            connectPane(memberName, wsPort);
+          }
+        }, 3000);
+      };
+    }
+
+    // ── Initialize WASM terminal for a pane ──
+    async function initPaneTerminal(memberName) {
+      const p = panes.get(memberName);
+      if (!p || !wasmReady) return;
+
+      try {
+        const terminal = new wasmModule.WasmTerminal(80, 24);
+        const realDpr = window.devicePixelRatio || 1;
+        const dpr = realDpr * 0.75;
+
+        const rect = p.canvas.getBoundingClientRect();
+        p.canvas.width = Math.floor(rect.width * realDpr);
+        p.canvas.height = Math.floor(rect.height * realDpr);
+
+        await terminal.init_gpu(p.canvas.id, dpr);
+        terminal.set_status_bar_enabled(false);
+
+        p.terminal = terminal;
+        p.canvas.style.display = 'block';
+        p.placeholder.style.display = 'none';
+
+        function render() {
+          if (p.terminal) p.terminal.render();
+          requestAnimationFrame(render);
+        }
+        requestAnimationFrame(render);
+
+        // Keyboard input
+        p.canvas.addEventListener('keydown', (e) => {
+          if (focusedPane !== memberName) return;
+          if (!p.terminal || !p.ws || !p.connected) return;
+
+          if ((e.metaKey || e.ctrlKey) && e.key === 'c' && p.terminal.has_selection()) {
+            const text = p.terminal.get_selected_text();
+            if (text) navigator.clipboard.writeText(text);
+            p.terminal.selection_clear();
+            e.preventDefault();
+            return;
+          }
+          if ((e.metaKey || e.ctrlKey) && e.key === 'v') {
+            navigator.clipboard.readText().then(text => {
+              if (text && p.ws?.readyState === WebSocket.OPEN) {
+                p.ws.send(JSON.stringify({ type: 'input', data: text }));
+              }
+            });
+            e.preventDefault();
+            return;
+          }
+          if (e.metaKey) return;
+
+          const bytes = p.terminal.handle_key(e.key, e.ctrlKey, e.shiftKey, e.altKey);
+          if (bytes.length > 0) {
+            const b64 = btoa(String.fromCharCode(...bytes));
+            p.ws.send(JSON.stringify({ type: 'input_raw', data: b64 }));
+          }
+          e.preventDefault();
+        });
+
+        // Resize observer
+        const resizeObs = new ResizeObserver((entries) => {
+          for (const entry of entries) {
+            const realDpr = window.devicePixelRatio || 1;
+            const w = Math.floor(entry.contentRect.width * realDpr);
+            const h = Math.floor(entry.contentRect.height * realDpr);
+            if (w > 0 && h > 0 && p.terminal) {
+              p.canvas.width = w;
+              p.canvas.height = h;
+              p.terminal.resize(w, h);
+              if (p.ws?.readyState === WebSocket.OPEN) {
+                const dims = p.terminal.dimensions();
+                p.ws.send(JSON.stringify({ type: 'resize', cols: dims[0], rows: dims[1] }));
+              }
+            }
+          }
+        });
+        resizeObs.observe(p.canvas);
+      } catch (e) {
+        console.error('Failed to init WASM terminal for', memberName, e);
+      }
+    }
+
+    // ── WASM Initialization ──
+    async function initWasm() {
+      if (wasmReady || !wasmJsUri) return;
+      const mod = await import(wasmJsUri);
+      await mod.default(wasmBgUri);
+      wasmModule = mod;
+      wasmReady = true;
+    }
+
+    // ── Apply team state ──
+    function applyTeamState(state) {
+      teamState = state;
+      noTeamEl.style.display = 'none';
+      panesGrid.style.display = 'grid';
+      dashboard.style.display = 'flex';
+
+      const members = state.config.members.filter(m => m.agentType !== 'team-lead');
+      if (panes.size !== members.length) {
+        buildPanes(state);
+      } else {
+        for (const member of members) {
+          const p = panes.get(member.name);
+          if (!p) continue;
+          const status = state.member_status?.[member.name] || 'unknown';
+          p.dot.className = 'status-dot ' + (p.connected ? statusClass(status) : 'disconnected');
+        }
+      }
+      renderDashboard(state);
+    }
+
+    // ── VS Code Message Handling ──
+    window.addEventListener('message', async (event) => {
+      const msg = event.data;
+      switch (msg.type) {
+        case 'wasm-init':
+          wasmJsUri = msg.wasmJsUri;
+          wasmBgUri = msg.wasmBgUri;
+          try { await initWasm(); } catch (e) { console.error('WASM init failed:', e); }
+          break;
+
+        case 'team-state':
+          applyTeamState(msg.state);
+          break;
+
+        case 'team-update':
+          if (msg.state) applyTeamState(msg.state);
+          break;
+
+        case 'connect-member':
+          if (msg.memberName && msg.wsPort) {
+            connectPane(msg.memberName, msg.wsPort);
+          }
+          break;
+
+        case 'disconnect-member': {
+          const p = panes.get(msg.memberName);
+          if (p) {
+            if (p.ws) { p.ws.onclose = null; p.ws.close(); }
+            p.connected = false;
+            p.dot.className = 'status-dot disconnected';
+            p.canvas.style.display = 'none';
+            p.placeholder.style.display = 'flex';
+          }
+          break;
+        }
+
+        case 'no-team':
+          teamState = null;
+          noTeamEl.style.display = 'flex';
+          panesGrid.style.display = 'none';
+          dashboard.style.display = 'none';
+          break;
+      }
+    });
+
+    vscode.postMessage({ type: 'loaded' });
+  </script>
+</body>
+</html>

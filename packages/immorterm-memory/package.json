@@ -1,0 +1,36 @@
+{
+	"name": "immorterm-memory",
+	"version": "0.1.2",
+	"description": "ImmorTerm Memory \u2014 persistent AI memory service with embedded SQLite + ONNX embeddings",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/ImmorTerm/immorterm.git",
+		"directory": "packages/immorterm-memory"
+	},
+	"homepage": "https://immorterm.com",
+	"keywords": [
+		"memory",
+		"ai",
+		"sqlite",
+		"embeddings",
+		"mcp",
+		"onnx"
+	],
+	"bin": {
+		"immorterm-memory": "bin/immorterm-memory"
+	},
+	"files": [
+		"bin",
+		"postinstall.js"
+	],
+	"scripts": {
+		"postinstall": "node postinstall.js"
+	},
+	"optionalDependencies": {
+		"immorterm-memory-darwin-arm64": "0.1.2",
+		"immorterm-memory-darwin-x64": "0.1.2",
+		"immorterm-memory-linux-x64": "0.1.2",
+		"immorterm-memory-linux-arm64": "0.1.2"
+	}
+}

@@ -1,0 +1,93 @@
+---
+title: Search
+description: Semantic search, recent recall, output modes, scopes, and branch-aware scoring.
+---
+
+Search is the read path everything else feeds. Hybrid retrieval (dense +
+sparse) with reranking, scoped by session or knowledge, filtered by time and
+branch — recalled in about 8ms.
+
+## POST /api/v1/memories/search
+
+Body (`SearchRequest`):
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `query` | string | — | Required. |
+| `user_id` | string | resolved identity | |
+| `limit` | number | 10 | Free tier caps returned results at 5 regardless. |
+| `scope` | string | `"session"` | `session` (excludes knowledge-pack types + `plan`), `knowledge` (only pack types), `all` (no type filter). |
+| `session_id`, `immorterm_id` | string | — | Optional filters. |
+| `categories` | string | — | Category filter. |
+| `include_archived` | bool | false | |
+| `include_graph` | bool | true | When true and results exist, response gains `entities` + `relations`. |
+| `start_date`, `end_date` | string | — | ISO-8601 bounds. |
+| `output_mode` | string | `"full"` | `full`, `gated` (compact per-result format), or `index` (id/one-line index only). |
+| `search_mode` | string | hybrid | `hybrid`, `dense`, `sparse`, or `fast` (hybrid without reranking). |
+| `current_branch` | string | — | Caller's git branch; enables branch-aware scoring. |
+| `branch_scope` | string | `"current"` | `current` = 0.85× penalty on cross-branch non-merged hits, `merged` = hard-filter them, `all` = no branch scoping. |
+| `filters` | object | — | Docker-API compat dict; keys `type`/`memory_type`, `category`, `session_id`, `immorterm_id`, `start_date`, `end_date` merge into the typed fields. A `type` filter forces `scope=all`. |
+| `page_size` | number | — | Compat alias for `limit`. |
+
+```bash
+curl -X POST http://localhost:8765/api/v1/memories/search \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"you@example.com","query":"how did we handle auth tokens","limit":5}'
+```
+
+Response (`output_mode: "full"`):
+
+```json
+{
+  "results": [
+    {
+      "id": "…", "content": "…", "score": 0.87,
+      "type": "digest_extraction", "category": "decisions",
+      "session_id": "…", "immorterm_id": "…",
+      "created_at": "…", "branch": "main", "merged_to_main": true
+    }
+  ],
+  "count": 1,
+  "tier": "free",
+  "output_mode": "full"
+}
+```
+
+With `include_graph` and graph hits, `entities` and `relations` arrays are
+added. `index` mode returns `{ "index", "output_mode", "tier" }` instead.
+
+**Free-tier gating:** results older than the 72-hour window are filtered
+out and counted; results beyond the 5-result cap are trimmed. When either
+happens the response gains `gated_count` and an `upgrade` object (see
+[Overview](/docs/memory-api)).
+
+## GET /api/v1/memories/search
+
+Same search via query params — a subset of the POST body: `query`
+(required), `user_id`, `limit` (default 10), `scope` (default `session`),
+`session_id`, `immorterm_id`, `categories`, `include_archived`,
+`include_graph` (default true), `start_date`, `end_date`, `output_mode`,
+`current_branch`, `branch_scope`. No `filters` dict, no `search_mode` —
+GET always runs hybrid.
+
+```bash
+curl 'http://localhost:8765/api/v1/memories/search?query=embed+queue+crash&user_id=you@example.com&limit=5'
+```
+
+## GET /api/v1/memories/recent
+
+Time-based recall — "what were we working on?" without knowing the terms.
+
+Query params: `user_id`, `hours_ago` (default 24; clamped to the retention
+window on free), `query` (optional text filter), `limit` (default 10),
+`scope` (default `session`), `session_id`, `immorterm_id`, `categories`,
+`include_archived`, `page` (default 1), `page_size` (default 20),
+`start_date`, `end_date`.
+
+```bash
+curl 'http://localhost:8765/api/v1/memories/recent?user_id=you@example.com&hours_ago=4&limit=10'
+```
+
+Response: `{ "results": […], "count": N, "tier": "free" }` — plus
+`retention_window` (e.g. `"72h"`) and `upgrade` when the window clamped
+the request or the cap trimmed results.

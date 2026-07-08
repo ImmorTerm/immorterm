@@ -1,0 +1,59 @@
+{
+	"name": "@immorterm/opencode-plugin",
+	"version": "0.1.0",
+	"description": "ImmorTerm bridge for opencode \u2014 maps opencode plugin SDK events to Claude-shape hook envelopes and forwards them to the ImmorTerm hook pipeline.",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/ImmorTerm/immorterm.git",
+		"directory": "packages/immorterm-opencode-plugin"
+	},
+	"homepage": "https://immorterm.com",
+	"keywords": [
+		"opencode",
+		"immorterm",
+		"plugin",
+		"ai",
+		"memory",
+		"hooks"
+	],
+	"type": "module",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		},
+		"./envelopes": {
+			"types": "./dist/envelopes.d.ts",
+			"import": "./dist/envelopes.js"
+		},
+		"./socket": {
+			"types": "./dist/socket.d.ts",
+			"import": "./dist/socket.js"
+		}
+	},
+	"files": [
+		"dist",
+		"README.md"
+	],
+	"scripts": {
+		"build": "tsc",
+		"test": "vitest run",
+		"prepublishOnly": "npm run build"
+	},
+	"peerDependencies": {
+		"@opencode-ai/plugin": ">=1.0.0"
+	},
+	"peerDependenciesMeta": {
+		"@opencode-ai/plugin": {
+			"optional": true
+		}
+	},
+	"devDependencies": {
+		"@types/node": "catalog:",
+		"typescript": "catalog:",
+		"vitest": "^3.0.0"
+	}
+}

@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# vscode-screen-forget-all - Kill ALL screen sessions for this project and clear everything
+#
+# Usage: vscode-screen-forget-all
+#
+# WARNING: This kills all screen sessions and deletes all logs!
+
+set -euo pipefail
+
+PROJECT_DIR="${SCREEN_PROJECT_DIR:-$(pwd)}"
+PROJECT="$(basename "$PROJECT_DIR" | tr '[:upper:]' '[:lower:]')"
+RESTORE_FILE="$PROJECT_DIR/.immorterm/restore-terminals.json"
+LOGS_DIR="$PROJECT_DIR/.immorterm/terminals/logs"
+RENAMES_DIR="$PROJECT_DIR/.immorterm/terminals/renames"
+
+echo "Cleaning up all screen sessions for project: $PROJECT"
+
+# FIRST: Clear restore-terminals.json (prevents VS Code from restoring old terminals)
+if [[ -f "$RESTORE_FILE" ]]; then
+  echo '{ "artificialDelayMilliseconds": 0, "terminals": [] }' > "$RESTORE_FILE"
+  echo "Cleared restore-terminals.json"
+fi
+
+# Clean up any stale lock directories
+rm -rf "/tmp/vscode-screen-${PROJECT}.lock" 2>/dev/null || true
+
+# Use configured screen binary
+SCREEN="${IMMORTERM_SCREEN_BINARY:-immorterm}"
+SCREEN_DIR="${SCREENDIR:-$HOME/.screen}"
+
+# Kill all descendant processes before quitting screen sessions
+# screen -X quit alone doesn't reliably kill Claude (it catches SIGHUP)
+kill_session_processes() {
+  local screen_pid="$1"
+  [[ -z "$screen_pid" ]] && return
+  local pids
+  pids=$(ps -eo pid,ppid | awk -v root="$screen_pid" '
+    BEGIN { pids[root]=1 }
+    { if ($2 in pids) pids[$1]=1 }
+    END { for (p in pids) if (p != root) print p }
+  ')
+  [[ -z "$pids" ]] && return
+  kill $pids 2>/dev/null || true
+  sleep 2
+  kill -9 $pids 2>/dev/null || true
+}
+
+# Kill all sessions matching project-* pattern (handles any ID format)
+# Note: || true prevents script exit if grep finds no matches (pipefail)
+$SCREEN -ls 2>/dev/null | grep -oE "[0-9]+\\.${PROJECT}-[^[:space:]]+" | while read -r sess; do
+  # Extract the screen PID (part before the dot)
+  screen_pid="${sess%%.*}"
+  kill_session_processes "$screen_pid"
+  $SCREEN -S "$sess" -X quit 2>/dev/null && echo "Killed: $sess" || true
+  # Also delete socket file directly (screen -X quit fails for "Remote or dead" sessions)
+  socket="$SCREEN_DIR/$sess"
+  [[ -S "$socket" ]] && rm -f "$socket" && echo "Deleted socket: $sess"
+done || true
+
+# Wipe dead sessions
+$SCREEN -wipe >/dev/null 2>&1 || true
+
+# Brief pause to let screens finish logging
+sleep 0.2
+
+# Delete all log files
+if [[ -d "$LOGS_DIR" ]]; then
+  rm -f "$LOGS_DIR"/*.log 2>/dev/null || true
+  echo "Deleted all log files"
+fi
+
+# Delete all rename title files
+if [[ -d "$RENAMES_DIR" ]]; then
+  rm -f "$RENAMES_DIR"/* 2>/dev/null || true
+  echo "Deleted all rename files"
+fi
+
+echo ""
+echo "Done. Close all VS Code terminal tabs manually."
+echo "When you open a new terminal, it will create a fresh screen session."

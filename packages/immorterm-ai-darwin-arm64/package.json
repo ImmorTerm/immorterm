@@ -1,0 +1,20 @@
+{
+	"name": "@immorterm/ai-darwin-arm64",
+	"version": "0.1.0",
+	"description": "ImmorTerm AI binary for macOS Apple Silicon (aarch64)",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/ImmorTerm/immorterm.git",
+		"directory": "packages/immorterm-ai-darwin-arm64"
+	},
+	"os": [
+		"darwin"
+	],
+	"cpu": [
+		"arm64"
+	],
+	"files": [
+		"bin"
+	]
+}

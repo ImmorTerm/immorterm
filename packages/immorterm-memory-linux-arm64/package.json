@@ -1,0 +1,20 @@
+{
+	"name": "immorterm-memory-linux-arm64",
+	"version": "0.1.2",
+	"description": "ImmorTerm Memory binary for Linux ARM64",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/ImmorTerm/immorterm.git",
+		"directory": "packages/immorterm-memory-linux-arm64"
+	},
+	"os": [
+		"linux"
+	],
+	"cpu": [
+		"arm64"
+	],
+	"files": [
+		"bin"
+	]
+}

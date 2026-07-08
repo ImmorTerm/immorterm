@@ -1,0 +1,444 @@
+---
+title: CLI
+description: The immorterm command — setup, services, license, upgrades, diagnostics.
+---
+
+## Install
+
+```bash
+npm install -g immorterm
+```
+
+This installs the `immorterm` control-plane CLI (Node). The persistent
+terminal engine and memory binaries are installed separately by
+`immorterm memory install`, which downloads them from GitHub Releases.
+
+One-shot use without a global install also works:
+
+```bash
+npx immorterm status
+```
+
+## Usage
+
+```bash
+immorterm                  # no args: interactive menu (TTY required)
+immorterm <command> [...]  # one-shot subcommand
+```
+
+Commands: `init`, `start`, `stop`, `status`, `enable`, `disable`, `pro`
+(alias: `license`), `upgrade`, `install`, `doctor`, `dashboard`, `config`,
+`serve`, `logs`, `memory`, `insights`.
+
+With no arguments in a non-TTY environment (CI, piped stdin), the CLI does not
+attempt the interactive menu — it prints a warning plus the command list and
+exits `0`:
+
+```text
+Interactive mode requires a terminal (TTY). Use a subcommand instead: immorterm status, immorterm start, etc.
+Available commands: init, start, stop, status, enable, disable, pro, upgrade, install, doctor, dashboard, config, serve, logs, memory, insights
+```
+
+After any subcommand except `upgrade`, when stdout is a TTY, the CLI may print
+a one-line update hint. The check runs at most once per
+`autoUpdate.checkIntervalHours` (config), only when `autoUpdate.enabled` is
+true, and never creates a config file for users who haven't run `immorterm init`.
+
+---
+
+## init
+
+Setup wizard. Configures the terminal backend, theme, services, and license,
+then writes `~/.immorterm/config.json`.
+
+```bash
+immorterm init             # interactive wizard (rich TUI)
+immorterm init --yes       # no prompts, write defaults
+```
+
+Three paths, picked automatically:
+
+1. **Interactive terminal** — full-screen TUI wizard.
+2. **Interactive, but the TUI fails to start** — plain-prompt fallback wizard.
+3. **Non-TTY stdin/stdout, or `--yes`** — no prompts at all. Defaults plus any
+   flags are written directly.
+
+### Flags
+
+| Flag | Type | Description |
+|---|---|---|
+| `--yes`, `-y` | boolean | Non-interactive: skip prompts and accept defaults |
+| `--memory` | boolean | Enable AI Memory (non-interactive; default `true`) |
+| `--gateway` | boolean | Enable MCP Gateway (non-interactive; default `false`) |
+| `--theme` | string | Theme name (non-interactive; default `Purple Haze`) |
+| `--licenseKey` | string | License key to activate (non-interactive) |
+| `--terminalMode` | string | Terminal backend: `regular`, `ai`, `both` (non-interactive; default `regular`) |
+
+An invalid `--terminalMode` value silently falls back to `regular`.
+
+### Non-interactive output
+
+```text
+ImmorTerm initialized (non-interactive)
+  Config: ~/.immorterm/config.json
+  Terminal: regular
+  Theme: Purple Haze
+  Memory: enabled
+  Gateway: disabled
+  License: Free
+```
+
+After every path (interactive or not), `init` also:
+
+- attempts to install the VS Code extension (non-fatal on failure), and
+- if memory ended up enabled but the memory binary is missing, prompts to
+  install it (interactive) or prints
+  `Memory binary not found. Install it with: immorterm memory install`
+  (non-interactive).
+
+---
+
+## start / stop
+
+Start or stop the background services.
+
+```bash
+immorterm start            # start all enabled services
+immorterm start memory     # start one service (even if disabled in config)
+immorterm start gateway
+immorterm stop             # stop all
+immorterm stop memory
+immorterm stop gateway
+```
+
+With no service argument, `start` skips services that are disabled in config
+and prints how to enable them. Naming a service explicitly starts it
+regardless of its enabled flag. `stop` always stops what you name (or both).
+
+---
+
+## status
+
+Service states, component versions, license, and free-tier limits.
+
+```bash
+immorterm status
+```
+
+Shows, in order: a themed banner; Memory state (healthy / starting / stopped,
+plus MCP health and the free-tier retrieval window); Gateway state (server
+count, active children, free-tier server cap); a **Component Versions** table
+(with `→ x.y.z available` markers when updates exist); auto-update status and
+when it last checked; and the license tier. On the free tier a limits summary
+is appended (max terminals, projects, memory retention hours, MCP servers).
+
+---
+
+## enable / disable
+
+Toggle a service in config, globally or per-project. This does not start or
+stop anything — pair with `immorterm start` / `stop`.
+
+```bash
+immorterm enable memory
+immorterm enable gateway
+immorterm disable memory --project .
+```
+
+| Arg / flag | Description |
+|---|---|
+| `service` (positional, required) | `memory` or `gateway` (also accepts `mcpgateway`, `mcp-gateway`) |
+| `--project`, `-p` | Project path for per-project config; `.` means the current directory |
+
+Per-project use ensures the project has an identity file and writes the
+service flag into project-level config; without `--project` it writes
+`defaults.services.<service>.enabled` in the global config.
+
+---
+
+## memory
+
+Manage the native memory service (a local binary; your data never leaves the
+machine).
+
+```bash
+immorterm memory install   # download and install the binary
+immorterm memory up        # start the daemon
+immorterm memory status    # default action when no subcommand is given
+immorterm memory down      # stop the daemon (SIGTERM)
+```
+
+| Action | Behavior |
+|---|---|
+| `install` | Downloads the binary if not already present. On failure, exits `1` and points at the GitHub Releases page. |
+| `up` | Starts the daemon and waits for the health endpoint. First boot downloads ~150 MB of models, so the wait is 180 s instead of the usual 10 s. Exits `1` if the binary is missing, if it can't run on this OS (glibc preflight), or on health timeout — in which case it prints the daemon log path and the last 10 log lines. |
+| `status` | Binary path, running PID, health, URL, and log path; when healthy, uptime and RSS too. |
+| `down` | Reads the PID file, sends SIGTERM, waits up to 5 s for exit. No PID file → "Service may not be running." |
+
+The service port is read from `~/.immorterm/memory.state.json` (written by the
+service on startup) and defaults to `8765`:
+
+```text
+Memory service is already running and healthy.
+Memory service: http://127.0.0.1:8765/health
+```
+
+An unknown action prints the usage line
+`npx immorterm memory [up|down|status|install]` and exits `0`.
+
+---
+
+## pro (alias: license)
+
+Upgrade to Pro or manage the subscription. `immorterm license ...` is a
+backward-compatible alias — same command, same subcommands.
+
+```bash
+immorterm pro                       # free tier: upgrade flow · pro: management menu
+immorterm pro status                # show license details + validate with the server
+immorterm pro activate <key>        # activate a license key
+immorterm pro deactivate            # remove license (transfer to another machine)
+immorterm pro dev <tier>            # dev-only tier override
+```
+
+**No subcommand:** on the free tier this runs the upgrade flow — fetches live
+pricing, prompts for an email, opens checkout in the browser, polls up to
+3 minutes for purchase confirmation, then asks you to paste the license key
+(the full key is only ever delivered by email). On an active license it shows
+a management menu instead (view status, deactivate, open the pro page).
+
+**`status`** prints tier, email, expiry, masked key, instance, and last
+validation time, then validates the key against the license server.
+
+**`activate <key>`** (positional, required) activates and persists the
+license, then lists what's unlocked and offers to enable the MCP Gateway.
+
+**`deactivate`** releases the license so it can be activated on another
+machine, and reverts the local config to the free tier.
+
+**`dev <tier>`** sets a development tier override that bypasses license
+validation: `pro`, `memory-pro`, `free`, or `off` (also `clear`) to remove it.
+It creates a `~/.immorterm/.dev` sentinel file; delete that file to disable
+dev overrides entirely.
+
+Environment variables used by the checkout flow:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `IMMORTERM_API_URL` | `https://api.immorterm.com` | Pricing + purchase-confirmation API |
+| `IMMORTERM_CHECKOUT_URL` | — | Overrides the checkout link from the API |
+
+---
+
+## upgrade
+
+Upgrade ImmorTerm components, or check what's outdated.
+
+```bash
+immorterm upgrade                   # upgrade everything with an update available
+immorterm upgrade cli               # one component
+immorterm upgrade --dry-run         # show what would happen, change nothing
+immorterm upgrade memory --force    # upgrade even if already up to date
+```
+
+| Arg / flag | Description |
+|---|---|
+| `component` (positional, optional) | `cli`, `memory` (`mem`), `extension` (`ext`), `terminal` (`term`), `ai` (`ai-binary`). Omit to target all. |
+| `--dry-run` | Print the planned actions without making changes (default `false`) |
+| `--force` | Upgrade installed components even when already up to date (default `false`) |
+
+Per-component strategy:
+
+| Component | How it upgrades |
+|---|---|
+| `cli` | `npm install -g immorterm@latest` |
+| `memory` | Stop the daemon → download the latest GitHub release → replace the binary → restart. On failure it attempts to restart the old daemon so memory doesn't stay down. |
+| `extension` | `code --install-extension immorterm.immorterm-extension --force` (reload VS Code afterwards) |
+| `terminal` | Re-downloaded from GitHub Releases |
+| `ai` | No public release channel exists yet — prints a pointer to the updating doc and reports failure |
+
+An unknown component name prints the valid list and exits `0`. When nothing
+needs upgrading, it prints each component's version with a checkmark.
+
+---
+
+## install
+
+Install ImmorTerm components. Currently one subcommand:
+
+```bash
+immorterm install extension          # stable
+immorterm install extension --pre    # pre-release
+immorterm install extension --force  # reinstall over an existing install
+```
+
+| Flag | Description |
+|---|---|
+| `--pre` | Install the pre-release version (default `false`) |
+| `--force` | Reinstall even if already installed (default `false`) |
+
+Requires the VS Code `code` CLI on `PATH` (Command Palette → "Shell Command:
+Install 'code' command in PATH"). Without `--force`, an already-installed
+extension is left alone and its version is printed.
+
+---
+
+## doctor
+
+Full diagnostics.
+
+```bash
+immorterm doctor
+```
+
+Runs eight checks, each `pass` / `warn` / `fail` with a one-line fix hint on
+anything that isn't a pass:
+
+| Check | What it verifies |
+|---|---|
+| Config | `~/.immorterm/config.json` exists (warn: run `immorterm init`) |
+| Memory Binary | Binary found **and executable** — a binary built against a newer glibc exists on disk but dies in the dynamic loader, so doctor actually runs it |
+| Memory Service | API healthy; also reports MCP health |
+| MCP Gateway | Healthy when enabled (server count, active children, memory); passes as "Disabled" otherwise |
+| C Binary | `immorterm -v` prints `ImmorTerm x.y.z (built ...)` — anything else means the name on `PATH` resolves to this npm CLI, not the terminal binary |
+| Disk Usage | Size of `~/.immorterm` |
+| Hooks | Hooks installed, recently active, error counts, digest daemon running |
+| License | Pro (with email) or free tier |
+
+Example line format:
+
+```text
+  ✓ C Binary: ImmorTerm 0.9.3 (built 2026-01-01)
+  ! Memory Binary: Not found
+      fix: npx immorterm memory install
+```
+
+Exit code is `1` when any check **fails**; warnings alone exit `0`.
+
+---
+
+## config
+
+Read and write global config values using dot notation.
+
+```bash
+immorterm config get defaults.services.memory.enabled
+immorterm config set theme "Ocean Depths"
+immorterm config set defaults.terminalMode ai
+```
+
+Both `key` and (for `set`) `value` are required positionals. Values are
+parsed: `true`, `false`, `null`, and numbers become their typed values;
+everything else stays a string. Objects print as pretty JSON on `get`.
+Missing intermediate objects are created automatically on `set`, so paths
+that the wizard hasn't materialized yet still work.
+
+---
+
+## dashboard
+
+Interactive TUI dashboard with live service polling.
+
+```bash
+immorterm dashboard
+```
+
+Free tier runs read-only (view status only); Pro gets full control hotkeys.
+It auto-starts the local API server (`immorterm serve`) so session data is
+available — non-fatal if that fails. Exits `1` if the TUI itself can't launch.
+
+---
+
+## serve
+
+Local API server for the web dashboard and TUI. Serves session data from the
+registry and structured log files — no data leaves the machine.
+
+```bash
+immorterm serve               # default port 3847
+immorterm serve --port 4000
+```
+
+| Flag | Description |
+|---|---|
+| `--port` | Port to listen on (default `3847`; unparseable values fall back to the default) |
+
+Writes a PID file to `~/.immorterm/serve.pid` so other entry points (the
+dashboard, the TUI log explorer) can detect and reuse a running instance —
+starting it twice is a no-op. CORS allows `immorterm.com` and localhost
+origins. On startup it prints its endpoint list:
+
+```text
+ImmorTerm API server running on http://localhost:3847
+Endpoints:
+  GET  /api/health
+  GET  /api/health/daemons
+  GET  /api/health/services
+  GET  /api/sessions[?include_archived=true]
+  GET  /api/sessions/:id/snapshot
+  GET  /api/sessions/:id/grid
+  GET  /api/sessions/:id/ai
+  GET  /api/sessions/:id/cast
+  GET  /api/sessions/:id/daemon-log[?lines=100]
+  POST /api/sessions/:id/restart
+  POST /api/sessions/:id/remove
+  POST /api/health/daemons/prune
+  GET  /api/search?q=...[&include_archived=false]
+
+Press Ctrl+C to stop
+```
+
+---
+
+## logs
+
+Browse terminal session logs for the current project in a TUI explorer.
+
+```bash
+immorterm logs                # pick a session interactively
+immorterm logs <session-id>   # jump straight to one session
+```
+
+Sessions are scoped to the current working directory's project. Exits `1` if
+the explorer can't launch.
+
+---
+
+## insights
+
+Proactive-intelligence stats from the memory service: suggestion engagement
+rates, per-signal effectiveness bars, top failure patterns, 7-day session
+counts, and memory category distribution.
+
+```bash
+immorterm insights
+```
+
+Requires the memory service to be running — otherwise it prints
+`Memory service unavailable. Start it with: immorterm memory up` and exits `1`.
+
+---
+
+## Exit codes
+
+The CLI exits `0` unless something listed here happens:
+
+| Command | Exits `1` when |
+|---|---|
+| `doctor` | Any check reports `fail` (warnings don't count) |
+| `memory up` | Binary missing, glibc preflight failure, or health-check timeout |
+| `memory install` | Download/install failure |
+| `insights` | Memory service unreachable, or the API returns an error |
+| `dashboard` / `logs` | The TUI fails to launch |
+
+Notably `0`: running with no subcommand in a non-TTY environment, unknown
+`memory` actions, and unknown `upgrade` components (each prints an error and
+valid usage instead).
+
+## Default ports
+
+| Service | Port | Source |
+|---|---|---|
+| Memory service | `8765` | Read from `~/.immorterm/memory.state.json` when the daemon is alive; this is the fallback |
+| MCP Gateway | `9100` | Fixed |
+| Local API server (`serve`) | `3847` | `--port` flag |

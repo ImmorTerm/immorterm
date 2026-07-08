@@ -1,0 +1,114 @@
+/*
+ * @immorterm/ui — theme CSS variables.
+ *
+ * ponytail: static Purple Haze defaults, hand-mirrored from
+ * libs/menu-data THEME_DEFS["Purple Haze"] (statusBarStops + fgAccent).
+ * Runtime theme switching: apply `themeCssVars(name)` from tokens.ts as
+ * an inline style on any container to override these.
+ */
+:root {
+	/* 7-color statusBarStops palette (dark → light) */
+	--theme-1: #2d004d;
+	--theme-2: #3d1a6d;
+	--theme-3: #4d2a7d;
+	--theme-4: #5b2c8a;
+	--theme-5: #6b3fa0;
+	--theme-6: #7b52b8;
+	--theme-7: #8b008b;
+	--theme-accent: #e0b0ff;
+	--theme-fg: #ffffff;
+
+	/* derived */
+	--theme-glow: color-mix(in srgb, var(--theme-5) 45%, transparent);
+	--theme-tint: color-mix(in srgb, var(--theme-5) 12%, transparent);
+
+	/* Mort brand tokens (the brand design tokens) — brand surfaces
+	   only; they sit alongside --theme-* and never replace it. */
+	--brand-tank: #0b0d14;
+	--brand-tank-glass: #12151f;
+	--brand-tank-line: #232838;
+	--brand-foam: #f4f2f5;
+	--brand-foam-soft: #9aa0b0;
+	--brand-ink: #252a3d;
+	--brand-mort-body: #f7cfd6;
+	--brand-mort-frond: #ef8189;
+	--brand-coral: #ff5c73;
+	--brand-coral-deep: #e5455d;
+	--brand-vitals: #4ade80;
+	--brand-warn: #f5a54c;
+	--brand-danger: #e0546c;
+	--shadow-soft: 0 8px 24px -12px rgba(11, 13, 20, 0.6);
+
+	/* v2 water column (design-lock v2 §2) — layer fields, additive */
+	--brand-coral-wash: #ffe1e7;
+	--brand-aqua: #3ee6d2;
+	--brand-lagoon: #0b7373; /* deep enough that foam text passes AA */
+	--brand-deepwater: #0a2e3d;
+	--brand-depths: var(--brand-tank);
+
+	/* motion */
+	--motion-instant: 100ms;
+	--motion-fast: 180ms;
+	--motion-base: 260ms;
+	--motion-slow: 420ms;
+	--ease-spring: cubic-bezier(0.32, 0.72, 0, 1);
+	--ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Terminal-accent glow, keyed to the active theme palette */
+.ui-terminal-glow {
+	box-shadow:
+		0 0 30px color-mix(in srgb, var(--theme-glow) 60%, transparent),
+		0 0 80px color-mix(in srgb, var(--theme-glow) 30%, transparent),
+		inset 0 1px 0 color-mix(in srgb, white 5%, transparent);
+}
+
+/* ─── Aquarium-glass panel (design-lock v2 §6) — demos, code, frames
+       on water layers. The surface you look through into the Depths. ─── */
+.tank-glass {
+	background: color-mix(in srgb, var(--brand-depths) 90%, var(--brand-lagoon) 10%);
+	border: 1px solid color-mix(in srgb, var(--brand-foam) 18%, transparent);
+	border-top: 1px solid color-mix(in srgb, var(--brand-foam) 35%, transparent); /* lit glass edge */
+	border-radius: 16px;
+	box-shadow:
+		0 12px 32px -16px rgb(10 46 61 / 0.55),
+		inset 0 1px 0 0 rgb(255 255 255 / 0.1);
+}
+
+/* ─── Bold card, v4 terminal-noir — dark panel, hairline border, coral
+       arrives on hover. Serious geometry; no comic offset shadows. ─── */
+.bold-card {
+	background: var(--brand-tank-glass);
+	color: var(--brand-foam);
+	border: 1px solid var(--brand-tank-line);
+	border-radius: 14px;
+	box-shadow: var(--shadow-soft);
+	transition:
+		transform var(--motion-fast) var(--ease-out),
+		border-color var(--motion-fast) var(--ease-out);
+}
+.bold-card:hover {
+	transform: translateY(-2px);
+	border-color: color-mix(in srgb, var(--brand-coral) 45%, var(--brand-tank-line));
+}
+
+/* ─── Marquee drift (design-lock v2 §5) — 60–90s/loop, linear, pausable ─── */
+@keyframes tank-drift {
+	from {
+		transform: translateX(0);
+	}
+	to {
+		transform: translateX(-50%);
+	}
+}
+.tank-marquee-track {
+	animation: tank-drift 75s linear infinite;
+}
+.tank-marquee:hover .tank-marquee-track {
+	animation-play-state: paused;
+}
+@media (prefers-reduced-motion: reduce) {
+	.tank-marquee-track {
+		animation: none;
+	}
+}

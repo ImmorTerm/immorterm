@@ -1,0 +1,9 @@
+{"type":"user_input","status":"completed","content":"list files in the current directory","trajectory_id":"traj-001","timestamp":"2026-04-01T10:00:00Z"}
+{"type":"planner_response","status":"completed","reasoning":"User wants a directory listing. Use run_command with ls.","content":"Running `ls` to list the directory.","toolCalls":[{"id":"call-1","name":"run_command","args":{"command":"ls","cwd":"/tmp/demo"}}],"trajectory_id":"traj-001","timestamp":"2026-04-01T10:00:01Z"}
+{"type":"code_action","status":"success","tool_call_id":"call-1","tool_info":{"name":"run_command","exit_code":0},"output":"alpha.txt\nbeta.txt\ngamma.md","trajectory_id":"traj-001","timestamp":"2026-04-01T10:00:02Z"}
+{"type":"user_input","status":"completed","content":"create a hello.py file","trajectory_id":"traj-001","timestamp":"2026-04-01T10:00:10Z"}
+{"type":"planner_response","status":"completed","content":"Creating hello.py with a print statement.","toolCalls":[{"id":"call-2","name":"write_file","args":{"path":"/tmp/demo/hello.py","content":"print('hi')\n"}}],"trajectory_id":"traj-001","timestamp":"2026-04-01T10:00:11Z"}
+{"type":"code_action","status":"success","tool_call_id":"call-2","tool_info":{"name":"write_file"},"output":"Wrote 13 bytes to /tmp/demo/hello.py","trajectory_id":"traj-001","timestamp":"2026-04-01T10:00:12Z"}
+{"type":"user_input","status":"completed","content":"now run it","trajectory_id":"traj-001","timestamp":"2026-04-01T10:00:20Z"}
+{"type":"planner_response","status":"completed","content":"Executing python3 hello.py.","toolCalls":[{"id":"call-3","name":"run_command","args":{"command":"python3 hello.py","cwd":"/tmp/demo"}}],"trajectory_id":"traj-001","timestamp":"2026-04-01T10:00:21Z"}
+{"type":"code_action","status":"success","tool_call_id":"call-3","tool_info":{"name":"run_command","exit_code":0},"output":"hi","trajectory_id":"traj-001","timestamp":"2026-04-01T10:00:22Z"}

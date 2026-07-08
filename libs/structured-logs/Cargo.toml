@@ -1,0 +1,19 @@
+[package]
+name = "structured-logs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared structured terminal logging — grid snapshots, asciicast, AI extraction"
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+immorterm-core = { path = "../../apps/immorterm-ai/immorterm-core" }
+regex = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

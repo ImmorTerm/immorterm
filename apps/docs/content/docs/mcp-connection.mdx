@@ -1,0 +1,103 @@
+---
+title: Connecting over MCP
+description: The Streamable HTTP endpoint and how Claude Code registers it in .mcp.json.
+---
+
+The memory service speaks MCP over **Streamable HTTP**: one POST endpoint,
+standard request/response, no persistent connections. It shares the same
+port as the REST API (default `8765`).
+
+## The endpoint
+
+```text
+POST http://127.0.0.1:8765/mcp/{client_name}/{user_id}
+```
+
+- `{client_name}` identifies the connecting AI tool (`claude-code`, `cursor`,
+  …). It's recorded as the session's `ai_tool` and injected into saved
+  memories as `source_app`.
+- `{user_id}` is the memory partition for this connection. The VS Code
+  extension puts the project ID here, so each project gets its own
+  partition on one shared server.
+
+The body is a standard JSON-RPC 2.0 MCP request. Behavior worth knowing:
+
+- `GET` and `DELETE` on the endpoint return `405` — Streamable HTTP is
+  POST-only here.
+- `notifications/initialized` (no `id`) returns `202 Accepted` with an empty
+  body.
+- If the request's `Accept` header contains `text/event-stream`, the response
+  is framed as a single SSE `message` event; otherwise it's plain JSON.
+- Malformed JSON gets a JSON-RPC parse error (`-32700`) with HTTP 200, per
+  JSON-RPC convention.
+
+Host and port are configurable: `--port` / `IMMORTERM_MEMORY_PORT` (default
+`8765`) and `--host` / `IMMORTERM_MEMORY_HOST` (default `127.0.0.1`). After a
+successful bind the service writes its actual port to
+`~/.immorterm/memory.state.json`, so consumers discover it instead of
+guessing.
+
+```bash
+curl http://localhost:8765/health
+# {"status":"ok","service":"immorterm-memory","version":"..."}
+```
+
+## How Claude Code registers it
+
+Claude Code reads MCP server definitions from `.mcp.json` at the project root
+(project scope) or `~/.claude.json` (user scope) — **not** from
+`.claude/settings.local.json`, which only holds permissions, hooks, and
+settings.
+
+The extension writes this shape:
+
+```json
+{
+  "mcpServers": {
+    "immorterm-memory": {
+      "type": "http",
+      "url": "http://127.0.0.1:8765/mcp/claude-code/<project-id>"
+    }
+  }
+}
+```
+
+Flat format: just `type` and `url`. The project ID in the URL path is what
+scopes memories per project — one server, zero extra cost per project.
+
+The extension also registers the **terminal** MCP server (screen reading,
+overlays, tasks) in the same file, over stdio:
+
+```json
+{
+  "mcpServers": {
+    "immorterm": {
+      "type": "stdio",
+      "command": "~/.immorterm/bin/immorterm-ai",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
+```
+
+(The extension writes the absolute path to your home directory, not `~`.)
+This entry is add-if-absent: an existing hand-authored entry — say, a dev
+`target/debug` build — is left untouched. It's only written for workspaces
+where ImmorTerm is enabled, and when the MCP Gateway is on it transparently
+wraps this stdio server as a shared singleton; the registration is identical
+either way.
+
+## Reconnecting after a restart
+
+Claude Code watches `.mcp.json` for changes. After a memory-service restart,
+the extension writes a `_reconnect_ts` field into the file, forcing Claude
+Code to re-read the config and establish a fresh connection. If you're wiring
+this up by hand, touching the file the same way works.
+
+## Migration notes
+
+Earlier versions used SSE transport (`/mcp/{client}/sse/{user_id}`) and
+sometimes wrote MCP config into `.claude/settings.local.json` or the global
+`~/.claude.json`. The extension migrates all of these automatically: SSE
+entries become `http` on the next project-ID update, and stale `mcpServers`
+blocks are removed from the legacy locations.

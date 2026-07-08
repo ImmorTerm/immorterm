@@ -1,0 +1,55 @@
+[package]
+name = "immorterm-app"
+version = "0.1.0"
+description = "ImmorTerm — persistent AI terminal (Tauri shell)"
+authors = ["Shai Snir"]
+license = "MIT"
+repository = "https://github.com/ImmorTerm/immorterm"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "immorterm_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.6", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.10.3", features = ["devtools", "unstable"] }
+url = "2"
+tauri-plugin-log = "2"
+tauri-plugin-dialog = "2"
+# Auto-updater: downloads a signed .app or .dmg from the configured feed,
+# verifies ed25519 signature with the embedded pubkey, then replaces the
+# current install + relaunches. Sidecar binaries (memory, mcp-gateway)
+# are re-downloaded from the manifest on next boot by sidecar_registry.
+tauri-plugin-updater = "2"
+# `process` plugin exposes window.__TAURI__.process.relaunch() to JS so
+# the updater UI can restart the app after apply.
+tauri-plugin-process = "2"
+# Clipboard read/write — webview's navigator.clipboard.read() is unreliable
+# in WKWebView (requires user gesture + permission, sometimes silently
+# denied). The Tauri plugin gives JS a stable IPC-backed clipboard API
+# via window.__TAURI__.clipboardManager.readText() etc. — used by the
+# gpu-terminal Cmd+V handler as the primary path, with navigator.clipboard
+# as a fallback for VS Code's webview (where the plugin isn't loaded).
+tauri-plugin-clipboard-manager = "2"
+# Sidecar downloader: rustls-tls keeps the binary free of the system
+# OpenSSL dep — important on Windows where OpenSSL isn't pre-installed.
+# reqwest drags tokio in transitively; we don't declare it separately.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+sha2 = "0.10"
+futures-util = "0.3"
+# tokio is transitive through tauri + reqwest, but we use its fs + io
+# modules directly so we pin it explicitly. Feature set matches Tauri's
+# default runtime so we don't accidentally enable duplicate variants.
+tokio = { version = "1", features = ["fs", "io-util", "rt", "macros"] }
+# Control API — agent-driven app shell (open_tab, snapshot, etc.).
+# See src/control_api.rs. Localhost-only HTTP server on :1443.
+axum = "0.8"
+anyhow = "1"
+base64 = "0.22"

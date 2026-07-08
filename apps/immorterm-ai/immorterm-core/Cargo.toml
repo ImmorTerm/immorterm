@@ -1,0 +1,21 @@
+[package]
+name = "immorterm-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure terminal emulation engine — no I/O, WASM-compatible"
+
+[dependencies]
+vte = { workspace = true }
+unicode-width = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+bitflags = { version = "2", features = ["serde"] }
+smallvec = { workspace = true }
+image = { workspace = true }
+base64 = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = "1"
+proptest = { workspace = true }

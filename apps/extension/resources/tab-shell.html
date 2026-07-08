@@ -1,0 +1,1256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>ImmorTerm Tabs</title>
+  <!--
+    Shell webview — hosts the project-tab strip above the project webviews.
+    Every project tab's contents live in a sibling child Webview that Tauri
+    keeps alive. This webview NEVER hosts a project itself — it only owns
+    the strip + (later) the project picker modal and the "+" add-tab button.
+
+    See internal design notes.
+  -->
+  <link rel="stylesheet" href="/gpu-terminal.css" />
+  <style>
+    /* Shell body always renders the tab bar. No flex-column override. */
+    html, body {
+      width: 100%; height: 100%;
+      margin: 0; padding: 0;
+      background: var(--sidebar-bg, #181825);
+      overflow: hidden;
+    }
+    /* The tab-bar CSS in gpu-terminal.css is absolute-positioned inside
+     * its parent. In the shell webview we want it to fill the entire
+     * child webview bounds (set by Rust to exactly the strip height). */
+    #tab-bar {
+      position: absolute; top: 0; left: 0; right: 0;
+      height: 44px;
+      border-bottom: none;   /* no separator — Rust puts the project webview flush below */
+      /* Reserve 80 px on the left for macOS traffic lights (title bar is
+       * overlay, lights float on top of this webview). Any OS that does
+       * not overlay the title bar will still just see 80 px of padding. */
+      padding-left: 80px;
+      -webkit-app-region: drag;
+    }
+    /* Only the actual interactive tab/button hit areas cut out from the
+     * tab-bar drag region — empty flex-space stays draggable so users can
+     * grab anywhere the strip is blank to move the window. */
+    .tab, .tab-btn { -webkit-app-region: no-drag; }
+
+    /* Picker modal. Only visible while the shell webview has been expanded
+     * by Rust (cmd_expand_shell(true)). Covers everything below the tab
+     * strip with a dim backdrop + centred card. */
+    #picker-overlay {
+      position: absolute;
+      top: 44px; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.55);
+      backdrop-filter: blur(4px);
+      display: none;
+      align-items: flex-start; justify-content: center;
+      padding-top: 80px;
+      z-index: 100;
+    }
+    #picker-overlay.visible { display: flex; }
+    #picker-card {
+      background: var(--sidebar-bg, #1e1e2e);
+      border: 1px solid var(--sidebar-border, #313244);
+      border-radius: 12px;
+      width: min(90vw, 560px);
+      max-height: 70vh;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.6);
+      display: flex; flex-direction: column;
+      color: var(--sidebar-text, #cdd6f4);
+      overflow: hidden;
+    }
+    #picker-header {
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--sidebar-border, #313244);
+      font-size: 14px; font-weight: 600;
+    }
+    /* Remote selector row — sits between header and the path input.
+     * "Source: [Local ▼]" dropdown switches the picker's project list
+     * between the local hub registry and SSH-fetched remote registries.
+     * See routes/remote_api.rs for the backend. */
+    #picker-remote-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 18px 0 18px;
+      font-size: 13px;
+      color: rgba(255,255,255,0.65);
+    }
+    #picker-remote-row label { font-weight: 600; color: inherit; }
+    #picker-remote {
+      flex: 1;
+      background: transparent;
+      color: var(--sidebar-text, #cdd6f4);
+      border: 1px solid var(--sidebar-border, #313244);
+      border-radius: 8px;
+      padding: 6px 10px;
+      font: inherit;
+      cursor: pointer;
+    }
+    #picker-remote:focus { outline: none; border-color: #b482ff; }
+    #picker-manage-btn {
+      background: transparent; color: rgba(255,255,255,0.65);
+      border: 1px solid var(--sidebar-border, #313244);
+      border-radius: 8px; padding: 6px 10px;
+      cursor: pointer; font: inherit; font-size: 12px;
+    }
+    #picker-manage-btn:hover { border-color: #b482ff; color: #f0e6ff; }
+
+    /* Remotes Manager modal — opens over the picker. Lets users
+       add / remove / test SSH remotes without dropping to the CLI. */
+    #remotes-overlay {
+      position: absolute;
+      top: 44px; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.65);
+      backdrop-filter: blur(4px);
+      display: none;
+      align-items: flex-start; justify-content: center;
+      padding-top: 60px;
+      z-index: 200;
+    }
+    #remotes-overlay.visible { display: flex; }
+    #remotes-card {
+      background: var(--sidebar-bg, #1e1e2e);
+      border: 1px solid var(--sidebar-border, #313244);
+      border-radius: 12px;
+      width: min(92vw, 640px);
+      max-height: 80vh;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.6);
+      display: flex; flex-direction: column;
+      color: var(--sidebar-text, #cdd6f4);
+      overflow: hidden;
+    }
+    #remotes-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--sidebar-border, #313244);
+      font-size: 14px; font-weight: 600;
+    }
+    #remotes-close {
+      background: none; border: none; color: #a6adc8;
+      cursor: pointer; font-size: 18px; line-height: 1; padding: 0 6px;
+    }
+    #remotes-add-toggle {
+      margin: 12px 18px 4px;
+      padding: 8px 12px;
+      background: rgba(180, 130, 255, 0.12);
+      border: 1px dashed rgba(180, 130, 255, 0.45);
+      border-radius: 8px;
+      cursor: pointer;
+      color: #e0c8ff;
+      font: inherit; font-size: 12px;
+    }
+    #remotes-add-toggle:hover { background: rgba(180, 130, 255, 0.2); }
+    #remotes-add-form {
+      display: none;
+      padding: 8px 18px 12px 18px;
+      gap: 8px; flex-direction: column;
+    }
+    #remotes-add-form.visible { display: flex; }
+    #remotes-add-form .ra-row { display: flex; align-items: center; gap: 8px; }
+    #remotes-add-form .ra-row label { width: 110px; font-size: 12px; color: rgba(255,255,255,0.6); }
+    #remotes-add-form .ra-row input {
+      flex: 1;
+      background: transparent; color: inherit;
+      border: 1px solid var(--sidebar-border, #313244);
+      border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 12px;
+      outline: none;
+    }
+    #remotes-add-form .ra-row input:focus { border-color: #b482ff; }
+    #remotes-add-form .ra-buttons { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
+    #remotes-add-form .ra-buttons button {
+      padding: 6px 14px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 12px;
+    }
+    .ra-btn-primary { background: #b482ff; color: white; border: 1px solid #b482ff; }
+    .ra-btn-primary:hover { background: #c89bff; }
+    .ra-btn-ghost {
+      background: transparent; color: inherit;
+      border: 1px solid var(--sidebar-border, #313244);
+    }
+    .ra-btn-ghost:hover { border-color: #b482ff; }
+    #remotes-list { flex: 1; overflow-y: auto; padding: 4px 0 12px 0; }
+    .remote-row {
+      padding: 10px 18px;
+      border-left: 3px solid transparent;
+      display: flex; flex-direction: column; gap: 4px;
+    }
+    .remote-row + .remote-row { border-top: 1px solid var(--sidebar-border, #313244); }
+    .remote-row .rr-line1 { display: flex; align-items: center; gap: 8px; }
+    .remote-row .rr-dot { width: 8px; height: 8px; border-radius: 50%; background: #6b7280; flex: 0 0 8px; }
+    .remote-row .rr-dot.ok { background: #7be8a6; box-shadow: 0 0 6px rgba(123,232,166,0.5); }
+    .remote-row .rr-dot.err { background: #ff8a9c; }
+    .remote-row .rr-name { font-weight: 600; }
+    .remote-row .rr-target { font-family: monospace; font-size: 11px; opacity: 0.65; flex: 1; }
+    .remote-row .rr-meta { font-size: 11px; opacity: 0.6; margin-left: 16px; }
+    .remote-row .rr-actions { display: flex; gap: 6px; }
+    .remote-row .rr-actions button {
+      background: transparent; color: rgba(255,255,255,0.78);
+      border: 1px solid var(--sidebar-border, #313244);
+      border-radius: 5px; padding: 3px 8px;
+      cursor: pointer; font: inherit; font-size: 11px;
+    }
+    .remote-row .rr-actions button:hover { border-color: #b482ff; color: #f0e6ff; }
+    .remote-row .rr-actions .rr-remove:hover { border-color: #ff8a9c; color: #ff8a9c; }
+    .rr-edit-form {
+      display: none;
+      margin-top: 8px;
+      padding: 10px 12px;
+      background: rgba(180, 130, 255, 0.06);
+      border-left: 2px solid #b482ff;
+      border-radius: 0 6px 6px 0;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .rr-edit-form.visible { display: flex; }
+    .rr-edit-form .ef-row { display: flex; align-items: center; gap: 8px; }
+    .rr-edit-form .ef-row label { width: 130px; font-size: 11px; color: rgba(255,255,255,0.58); }
+    .rr-edit-form .ef-row input[type=text],
+    .rr-edit-form .ef-row input[type=number] {
+      flex: 1;
+      background: transparent; color: inherit;
+      border: 1px solid var(--sidebar-border, #313244);
+      border-radius: 4px; padding: 4px 8px; font: inherit; font-size: 12px;
+      outline: none;
+    }
+    .rr-edit-form .ef-row input:focus { border-color: #b482ff; }
+    .rr-edit-form .ef-buttons { display: flex; gap: 6px; justify-content: flex-end; margin-top: 4px; }
+    .rr-edit-form .ef-buttons button {
+      padding: 4px 10px; border-radius: 5px; font: inherit; font-size: 11px;
+      cursor: pointer;
+    }
+    #remotes-empty {
+      padding: 24px 18px;
+      text-align: center;
+      color: rgba(255,255,255,0.45);
+      font-size: 12px;
+    }
+    .picker-row .pr-remote {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 1px 6px;
+      font-size: 10px;
+      border-radius: 4px;
+      background: rgba(180, 130, 255, 0.18);
+      border: 1px solid rgba(180, 130, 255, 0.45);
+      color: #e0c8ff;
+      vertical-align: middle;
+    }
+    #picker-input-row {
+      display: flex; gap: 8px;
+      padding: 12px 18px;
+      border-bottom: 1px solid var(--sidebar-border, #313244);
+    }
+    #picker-input {
+      flex: 1;
+      background: transparent;
+      color: inherit;
+      border: 1px solid var(--sidebar-border, #313244);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font: inherit;
+      outline: none;
+    }
+    #picker-input:focus { border-color: #b482ff; }
+    #picker-open-btn, #picker-browse-btn {
+      border: 1px solid transparent; border-radius: 8px;
+      padding: 8px 16px;
+      cursor: pointer; font-weight: 600;
+      font: inherit; white-space: nowrap;
+      transition: background 120ms, border-color 120ms;
+    }
+    #picker-open-btn { background: #b482ff; color: white; }
+    #picker-open-btn:hover { background: #c89bff; }
+    /* Browse is the secondary action — ghost button that still reads
+       as interactive. Matches the picker input's border language. */
+    #picker-browse-btn {
+      background: transparent;
+      color: rgba(255,255,255,0.82);
+      border-color: var(--sidebar-border, #313244);
+      display: inline-flex; align-items: center; gap: 6px;
+    }
+    #picker-browse-btn:hover {
+      background: rgba(180, 130, 255, 0.12);
+      border-color: #b482ff;
+      color: #f0e6ff;
+    }
+    #picker-browse-btn::before {
+      content: '📁'; font-size: 14px; opacity: 0.9;
+    }
+    #picker-list { flex: 1; overflow-y: auto; padding: 8px 0; }
+    .picker-row {
+      padding: 10px 18px;
+      cursor: pointer;
+      display: flex; flex-direction: column; gap: 2px;
+      border-left: 3px solid transparent;
+    }
+    .picker-row:hover,
+    .picker-row.selected {
+      background: rgba(180, 130, 255, 0.08);
+      border-left-color: #b482ff;
+    }
+    .picker-row.hidden { display: none; }
+    .picker-row .pr-name { font-weight: 600; font-size: 13px; }
+    .picker-row .pr-dir { font-family: monospace; font-size: 11px; opacity: 0.6; }
+    .picker-row .pr-meta { font-size: 11px; opacity: 0.5; }
+  </style>
+</head>
+<body>
+  <div id="tab-bar">
+    <div id="tab-strip"></div>
+    <button id="add-tab" class="tab-btn" title="Open project (⌘T)">+</button>
+  </div>
+  <!-- Picker modal. Hidden until Cmd+T / "+". While open, Rust expands
+       the shell webview to cover the full window so this overlay is on
+       top of the project webview(s). -->
+  <div id="picker-overlay">
+    <div id="picker-card">
+      <div id="picker-header">Open Project</div>
+      <!-- Remote selector — Local by default. Switching to a registered
+           remote re-populates the project list below from that remote's
+           registry.json over SSH (see /api/v1/remotes/{name}/registry). -->
+      <div id="picker-remote-row">
+        <label for="picker-remote">Source:</label>
+        <select id="picker-remote">
+          <option value="">Local</option>
+        </select>
+        <button id="picker-manage-btn" title="Add or remove SSH remotes">Manage…</button>
+      </div>
+      <div id="picker-input-row">
+        <input id="picker-input" type="text" placeholder="/absolute/path/to/project" autocomplete="off" spellcheck="false" />
+        <button id="picker-browse-btn" title="Pick a folder">Browse…</button>
+        <button id="picker-open-btn">Open</button>
+      </div>
+      <div id="picker-list"></div>
+    </div>
+  </div>
+  <!-- Remotes Manager modal. Opened via "Manage…" button in picker.
+       Mirrors `immorterm-ai remote add/list/remove/test` CLI but with
+       liveness probes + session-count badges per row. -->
+  <div id="remotes-overlay">
+    <div id="remotes-card">
+      <div id="remotes-header">
+        <span>SSH Remotes</span>
+        <button id="remotes-close" title="Close">×</button>
+      </div>
+      <button id="remotes-add-toggle">+ Add Remote</button>
+      <div id="remotes-add-form">
+        <div class="ra-row">
+          <label for="ra-name">Name</label>
+          <input id="ra-name" type="text" placeholder="hetzner-prod" autocomplete="off" spellcheck="false" />
+        </div>
+        <div class="ra-row">
+          <label for="ra-target">SSH target</label>
+          <input id="ra-target" type="text" placeholder="user@host.example.com or ~/.ssh/config alias"
+                 autocomplete="off" spellcheck="false" list="ra-target-suggestions" />
+          <!-- Populated from /api/v1/ssh-config-hosts at modal-open time
+               so users with existing ~/.ssh/config Host blocks can pick
+               them by alias. SSH resolves HostName/Port/User/ProxyJump/
+               IdentityFile from the config — we just store the alias. -->
+          <datalist id="ra-target-suggestions"></datalist>
+        </div>
+        <div class="ra-row">
+          <label for="ra-port">Port</label>
+          <input id="ra-port" type="number" placeholder="22" value="22" />
+        </div>
+        <div class="ra-row">
+          <label for="ra-home">Remote home</label>
+          <input id="ra-home" type="text" placeholder="~/.immorterm" value="~/.immorterm" />
+        </div>
+        <div class="ra-buttons">
+          <button class="ra-btn-ghost" id="ra-cancel">Cancel</button>
+          <button class="ra-btn-primary" id="ra-add">Add</button>
+        </div>
+      </div>
+      <div id="remotes-list"></div>
+    </div>
+  </div>
+
+  <!-- Update available banner — slides in after the updater plugin
+       confirms a newer signed release exists on the feed. Dismiss
+       just hides for this session; Update downloads + replaces the
+       .app + relaunches. -->
+  <style>
+    #update-banner {
+      position: fixed; right: 16px; bottom: 16px;
+      z-index: 10001;
+      max-width: 360px;
+      padding: 12px 14px;
+      background: linear-gradient(135deg, rgba(26,36,77,0.96), rgba(64,90,170,0.96));
+      color: #eaf1ff;
+      border: 1px solid rgba(128,176,255,0.35);
+      border-radius: 10px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.38);
+      font-family: -apple-system, system-ui, sans-serif;
+      font-size: 13px;
+      display: none;
+      gap: 10px;
+      align-items: center;
+    }
+    #update-banner.visible { display: flex; }
+    #update-banner .up-msg { flex: 1; line-height: 1.35; }
+    #update-banner .up-ver { font-weight: 600; color: #b0c8ff; }
+    #update-banner .up-body { color: rgba(234,241,255,0.7); font-size: 12px; margin-top: 2px; }
+    #update-banner button {
+      padding: 6px 12px; border-radius: 6px; cursor: pointer;
+      font: inherit; line-height: 1;
+    }
+    #update-banner .up-go {
+      border: 0; background: #b0c8ff; color: #08122b; font-weight: 600;
+    }
+    #update-banner .up-skip {
+      padding: 6px 10px;
+      border: 1px solid rgba(128,176,255,0.35);
+      background: transparent; color: #eaf1ff;
+    }
+    #update-banner .up-progress {
+      font-size: 12px; color: rgba(234,241,255,0.7);
+      font-variant-numeric: tabular-nums;
+    }
+  </style>
+  <div id="update-banner" role="status" aria-live="polite">
+    <span class="up-msg">
+      <span>ImmorTerm <span class="up-ver" id="update-version">—</span> is available.</span>
+      <div class="up-body" id="update-body"></div>
+    </span>
+    <span class="up-progress" id="update-progress" hidden></span>
+    <button type="button" class="up-go" id="update-go">Update</button>
+    <button type="button" class="up-skip" id="update-skip">Later</button>
+  </div>
+
+  <script src="/immorterm-shortcuts.js"></script>
+  <script type="module">
+    // ── Tauri IPC bridge ──
+    // Tauri v2 auto-injects __TAURI__ into every child webview. We use
+    // core.invoke for commands and core.event.listen for push events.
+    const tauri = (window.__TAURI__ && window.__TAURI__.core) || null;
+    const tauriEvent = (window.__TAURI__ && window.__TAURI__.event) || null;
+    const tauriWindow = (window.__TAURI__ && window.__TAURI__.window) || null;
+
+    // Keyboard shortcuts are handled by the shared dispatcher in
+    // /immorterm-shortcuts.js — one keymap, one Rust entry point.
+
+    // ── Window drag ──
+    // -webkit-app-region: drag works on local Tauri content but is
+    // unreliable for remote-URL child webviews (our shell loads from
+    // http://localhost:1440). Use the Tauri Window API to start a
+    // native drag on mousedown over empty tab-bar space. Interactive
+    // children (.tab, .tab-btn) short-circuit out via target.closest().
+    document.addEventListener('mousedown', (ev) => {
+      if (ev.button !== 0) return;
+      if (ev.target.closest('.tab, .tab-btn, #picker-card, #picker-input, #picker-open-btn, .picker-row')) return;
+      if (document.getElementById('picker-overlay').classList.contains('visible')) return;
+      if (!tauriWindow) return;
+      try {
+        const win = tauriWindow.getCurrentWindow();
+        if (win && typeof win.startDragging === 'function') {
+          win.startDragging().catch(() => {});
+        }
+      } catch(_) {}
+    });
+
+    async function invoke(cmd, args) {
+      if (!tauri) {
+        console.warn('[shell] __TAURI__ unavailable, cannot invoke', cmd);
+        return null;
+      }
+      try { return await tauri.invoke(cmd, args || {}); }
+      catch (e) {
+        const errMsg = e && e.message ? e.message : String(e);
+        fetch('/api/dev-log', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({level:'error', msg:'[invoke] ' + cmd + ' threw: ' + errMsg + ' | args=' + JSON.stringify(args)}) });
+        return null;
+      }
+    }
+
+    // ── Theme lookup (fetched once from hub) ──
+    // The hub already aggregates menu-data themes at /api/v1/config. We
+    // cache it so each tab render is a map lookup, not a network call.
+    let _themes = [];
+    async function loadThemes() {
+      try {
+        const r = await fetch('/api/v1/config');
+        const cfg = await r.json();
+        _themes = (cfg && cfg.themes) || [];
+      } catch(_) { _themes = []; }
+    }
+    // Resolve a tab-accent colour from a theme definition. The menu-data
+    // schema uses statusBarStops[] (gradient) + fgAccent (bright contrast
+    // glyph colour); there's no literal "accent" field. fgAccent reads as
+    // the theme's recognisable signature — green for Matrix, pink for
+    // Purple Haze, neon for Cyberpunk — so we prefer it and fall back to
+    // the middle stop of the gradient if it's missing.
+    function accentFor(themeName) {
+      const t = _themes.find(x => x && x.name === themeName);
+      if (!t) return '#b482ff';
+      if (t.accent) return t.accent;
+      if (t.fgAccent) return t.fgAccent;
+      const stops = t.statusBarStops || [];
+      if (stops.length) return stops[Math.floor(stops.length / 2)];
+      return '#b482ff';
+    }
+
+    // ── Project metadata (tab name → theme) ──
+    // The tab registry in Rust stores project_dir + project_name but not
+    // theme. We fetch project configs per-dir from the hub on demand.
+    const _themeCache = new Map();
+    async function themeForProject(projectDir) {
+      if (_themeCache.has(projectDir)) return _themeCache.get(projectDir);
+      try {
+        // Cache-bust so theme changes picked up — browser otherwise keeps
+        // serving the pre-change body for the same URL on rapid re-fetch.
+        const url = '/api/v1/config?project_dir=' + encodeURIComponent(projectDir)
+          + '&t=' + Date.now();
+        const r = await fetch(url, { cache: 'no-store' });
+        const cfg = await r.json();
+        const name = (cfg && cfg.projectTheme) || null;
+        const accent = accentFor(name);
+        _themeCache.set(projectDir, accent);
+        return accent;
+      } catch(_) { return '#b482ff'; }
+    }
+
+    // ── Render strip ──
+    // DnD contract: each .tab is draggable. Drag over another tab decides
+    // before/after by horizontal midpoint; drop sends the new order to
+    // cmd_reorder_tabs, which persists + fires "tabs-changed" to re-render.
+    let _dragId = null;
+    async function renderStrip() {
+      const state = await invoke('cmd_list_tabs');
+      const strip = document.getElementById('tab-strip');
+      strip.replaceChildren();
+      if (!state) return;
+      const tabs = state.tabs || [];
+      const activeId = state.active_id;
+      for (const t of tabs) {
+        const el = document.createElement('div');
+        el.className = 'tab' + (t.id === activeId ? ' active' : '');
+        el.draggable = true;
+        el.dataset.tabId = t.id;
+        themeForProject(t.project_dir).then(accent => {
+          el.style.setProperty('--tab-accent', accent);
+          // Force reflow — WebKit can be slow to re-compute color-mix()
+          // when a CSS custom property changes after initial paint. The
+          // no-op read of offsetHeight forces a layout/paint cycle so
+          // the new tint lands immediately instead of on next interaction.
+          void el.offsetHeight;
+        });
+        const name = document.createElement('span');
+        name.className = 'tab-name';
+        name.textContent = t.project_name || t.project_dir;
+        name.title = t.project_dir;
+        const close = document.createElement('span');
+        close.className = 'tab-close';
+        close.textContent = '×';
+        close.onclick = (ev) => { ev.stopPropagation(); closeTab(t.id); };
+        el.appendChild(name);
+        el.appendChild(close);
+        el.onclick = () => focusTab(t.id);
+
+        // ── Drag source ──
+        el.addEventListener('dragstart', (ev) => {
+          _dragId = t.id;
+          el.classList.add('dragging');
+          try {
+            ev.dataTransfer.effectAllowed = 'move';
+            ev.dataTransfer.setData('text/plain', t.id);
+          } catch(_) {}
+        });
+        el.addEventListener('dragend', () => {
+          _dragId = null;
+          el.classList.remove('dragging');
+          strip.querySelectorAll('.tab.drop-before, .tab.drop-after')
+            .forEach(n => n.classList.remove('drop-before', 'drop-after'));
+        });
+
+        // ── Drop target (other tabs) ──
+        el.addEventListener('dragover', (ev) => {
+          if (!_dragId || _dragId === t.id) return;
+          ev.preventDefault();
+          ev.dataTransfer.dropEffect = 'move';
+          const rect = el.getBoundingClientRect();
+          const before = (ev.clientX - rect.left) < rect.width / 2;
+          el.classList.toggle('drop-before', before);
+          el.classList.toggle('drop-after', !before);
+        });
+        el.addEventListener('dragleave', () => {
+          el.classList.remove('drop-before', 'drop-after');
+        });
+        el.addEventListener('drop', async (ev) => {
+          ev.preventDefault();
+          const srcId = _dragId || (ev.dataTransfer && ev.dataTransfer.getData('text/plain'));
+          const before = el.classList.contains('drop-before');
+          el.classList.remove('drop-before', 'drop-after');
+          if (!srcId || srcId === t.id) return;
+          const current = Array.from(strip.querySelectorAll('.tab'))
+            .map(n => n.dataset.tabId)
+            .filter(Boolean);
+          const without = current.filter(x => x !== srcId);
+          const targetIdx = without.indexOf(t.id);
+          if (targetIdx < 0) return;
+          const insertAt = before ? targetIdx : targetIdx + 1;
+          without.splice(insertAt, 0, srcId);
+          try { await invoke('cmd_reorder_tabs', { orderedIds: without }); }
+          catch (e) { console.error('[shell] reorder failed:', e); }
+        });
+
+        strip.appendChild(el);
+      }
+    }
+
+    async function focusTab(id) {
+      await invoke('cmd_focus_tab', { id });
+      renderStrip();
+    }
+    async function closeTab(id) {
+      await invoke('cmd_close_tab', { id });
+      renderStrip();
+    }
+
+    // ── Project picker ──
+    const pickerOverlay = document.getElementById('picker-overlay');
+    const pickerInput = document.getElementById('picker-input');
+    const pickerList = document.getElementById('picker-list');
+    const pickerRemote = document.getElementById('picker-remote');
+
+    let _pickerRows = [];       // live rows after filter
+    let _pickerSelected = 0;    // index into _pickerRows
+    let _pickerCurrentRemote = ''; // '' = local, else remote name
+
+    /// Refresh dropdown options from /api/v1/remotes. Idempotent.
+    async function refreshRemoteOptions() {
+      try {
+        const r = await fetch('/api/v1/remotes');
+        const d = await r.json();
+        const have = new Set(Array.from(pickerRemote.options).map(o => o.value));
+        for (const rem of (d.remotes || [])) {
+          if (!have.has(rem.name)) {
+            const opt = document.createElement('option');
+            opt.value = rem.name;
+            opt.textContent = rem.name + ' (' + rem.ssh_target + ')';
+            pickerRemote.appendChild(opt);
+          }
+        }
+      } catch (e) {
+        console.error('[picker] failed to load remotes:', e);
+      }
+    }
+
+    /// Load the project list for the current remote selection.
+    /// Local → /api/v1/registry (existing path). Remote → SSH-fetched
+    /// registry from /api/v1/remotes/<name>/registry, transformed into
+    /// the same {projects: [...]} shape the local renderer expects.
+    async function loadProjectsForCurrentSource() {
+      pickerList.replaceChildren();
+      pickerList.textContent = 'Loading…';
+      try {
+        let projects = [];
+        const remoteName = _pickerCurrentRemote;
+        if (!remoteName) {
+          // Local — existing flow.
+          const r = await fetch('/api/v1/registry');
+          const d = await r.json();
+          projects = (d.projects || []).map(p => ({ ...p, remote: '' }));
+        } else {
+          // Remote — registry.json comes back with raw sessions, not
+          // grouped by project. Group them client-side so the UI
+          // matches the local shape.
+          const r = await fetch('/api/v1/remotes/' + encodeURIComponent(remoteName) + '/registry');
+          if (!r.ok) {
+            const err = await r.text();
+            pickerList.textContent = 'Remote unreachable: ' + err;
+            return;
+          }
+          const d = await r.json();
+          const byDir = new Map();
+          for (const s of (d.sessions || [])) {
+            // Key by REAL path string (possibly empty). Only the display
+            // label substitutes "(no project)" for empties — the
+            // project_dir we hand to cmd_open_tab must round-trip back to
+            // the remote registry's exact filter value, otherwise the
+            // webview's session-restore lookup returns 0 and spawns a
+            // local fallback session.
+            const dir = s.project_dir || '';
+            if (!byDir.has(dir)) {
+              byDir.set(dir, {
+                name: dir ? (dir.split('/').filter(Boolean).pop() || dir) : '(no project)',
+                project_dir: dir,
+                session_count: 0,
+                last_activity: 0,
+                remote: remoteName,
+              });
+            }
+            const p = byDir.get(dir);
+            p.session_count += 1;
+            if ((s.created_at || 0) > p.last_activity) p.last_activity = s.created_at;
+          }
+          projects = Array.from(byDir.values());
+        }
+
+        projects.sort((a, b) => (b.last_activity || 0) - (a.last_activity || 0));
+
+        pickerList.replaceChildren();
+        for (const p of projects) {
+          const row = document.createElement('div');
+          row.className = 'picker-row';
+          const name = document.createElement('div'); name.className = 'pr-name';
+          name.textContent = p.name;
+          if (p.remote) {
+            const badge = document.createElement('span');
+            badge.className = 'pr-remote';
+            badge.textContent = p.remote;
+            name.appendChild(badge);
+          }
+          const dir = document.createElement('div'); dir.className = 'pr-dir';  dir.textContent = p.project_dir;
+          const meta = document.createElement('div'); meta.className = 'pr-meta'; meta.textContent = (p.session_count || 0) + ' session' + (p.session_count === 1 ? '' : 's');
+          row.appendChild(name); row.appendChild(dir); row.appendChild(meta);
+          row.dataset.projectDir = p.project_dir;
+          row.dataset.projectName = p.name;
+          row.dataset.remote = p.remote || '';
+          row.onclick = () => pickProject(p.project_dir, p.name, p.remote || '');
+          pickerList.appendChild(row);
+        }
+        if (projects.length === 0) {
+          pickerList.textContent = remoteName
+            ? 'No projects on ' + remoteName + ' yet.'
+            : 'No local projects yet.';
+        }
+        filterPicker(pickerInput.value || '');
+      } catch (e) {
+        pickerList.textContent = 'Failed to load: ' + e;
+      }
+    }
+
+    function applyPickerSelection() {
+      _pickerRows.forEach((r, i) => {
+        r.classList.toggle('selected', i === _pickerSelected);
+      });
+      const active = _pickerRows[_pickerSelected];
+      if (active) active.scrollIntoView({ block: 'nearest' });
+    }
+
+    function filterPicker(query) {
+      const q = query.toLowerCase().trim();
+      _pickerRows = [];
+      for (const row of pickerList.children) {
+        const hay = row.textContent.toLowerCase();
+        const show = q === '' || hay.includes(q);
+        row.classList.toggle('hidden', !show);
+        if (show) _pickerRows.push(row);
+      }
+      _pickerSelected = 0;
+      applyPickerSelection();
+    }
+
+    async function openPicker() {
+      // Tell Rust to grow the shell webview to cover the whole window so
+      // this overlay sits above (actually, instead of) the project
+      // webview — Rust also hides project siblings for the duration.
+      await invoke('cmd_expand_shell', { expanded: true });
+      // Signal picker-open so zoom + other layout-mutating shortcuts
+      // suppress themselves while the overlay is live.
+      invoke('cmd_set_picker_open', { open: true }).catch(() => {});
+      pickerOverlay.classList.add('visible');
+      pickerInput.value = '';
+      // Rust just resized this webview to cover the whole window — WKWebView
+      // often drops focus during remote-origin resize. Claim it across 3
+      // frames: current tick, next rAF (after layout), and +120 ms (after
+      // any trailing AppKit focus event). Cheap, robust, and idempotent.
+      const claimFocus = () => {
+        if (!pickerOverlay.classList.contains('visible')) return;
+        if (document.activeElement !== pickerInput) pickerInput.focus();
+      };
+      claimFocus();
+      requestAnimationFrame(claimFocus);
+      setTimeout(claimFocus, 120);
+      // Populate remotes dropdown + project list for current source.
+      await refreshRemoteOptions();
+      await loadProjectsForCurrentSource();
+    }
+
+    async function closePicker() {
+      pickerOverlay.classList.remove('visible');
+      invoke('cmd_set_picker_open', { open: false }).catch(() => {});
+      await invoke('cmd_expand_shell', { expanded: false });
+    }
+
+    async function pickProject(projectDir, projectName, remote) {
+      await closePicker();
+      // Tauri v2 auto-converts snake_case Rust params to camelCase JS
+      // keys — send projectDir/projectName, not project_dir/project_name.
+      // `remote` is empty string for local, remote name otherwise; the
+      // Rust cmd_open_tab handler propagates it as a query param into
+      // the gpu-terminal.html URL so the renderer knows which registry
+      // to hit + which tunnel endpoint to call.
+      await invoke('cmd_open_tab', {
+        projectDir,
+        projectName: projectName || null,
+        remote: remote || null,
+      });
+      renderStrip();
+    }
+
+    pickerRemote.addEventListener('change', () => {
+      _pickerCurrentRemote = pickerRemote.value;
+      loadProjectsForCurrentSource();
+    });
+
+    // ── Remotes Manager modal ──
+    const remotesOverlay = document.getElementById('remotes-overlay');
+    const remotesList = document.getElementById('remotes-list');
+    const remotesAddForm = document.getElementById('remotes-add-form');
+
+    function el(tag, opts) {
+      const e = document.createElement(tag);
+      if (opts && opts.className) e.className = opts.className;
+      if (opts && opts.text !== undefined) e.textContent = opts.text;
+      return e;
+    }
+
+    async function probeAndPaint(row, name) {
+      const dot = row.querySelector('.rr-dot');
+      const meta = row.querySelector('.rr-meta');
+      dot.className = 'rr-dot';
+      meta.textContent = 'probing…';
+      try {
+        const r = await fetch('/api/v1/remotes/' + encodeURIComponent(name) + '/test', { method: 'POST' });
+        const d = await r.json();
+        if (d.ok) {
+          dot.classList.add('ok');
+          const ses = d.session_count || 0;
+          const proj = d.project_count || 0;
+          meta.textContent = ses + ' session' + (ses === 1 ? '' : 's')
+            + ' · ' + proj + ' project' + (proj === 1 ? '' : 's')
+            + ' · ' + (d.latency_ms || 0) + 'ms';
+        } else {
+          dot.classList.add('err');
+          meta.textContent = 'offline · ' + (d.error || 'unreachable');
+        }
+      } catch (e) {
+        dot.classList.add('err');
+        meta.textContent = 'probe failed: ' + e;
+      }
+    }
+
+    async function renderRemotesList() {
+      remotesList.replaceChildren();
+      const loading = el('div', { className: 'remotes-empty', text: 'Loading…' });
+      loading.id = 'remotes-empty';
+      remotesList.appendChild(loading);
+      let remotes = [];
+      try {
+        const r = await fetch('/api/v1/remotes');
+        const d = await r.json();
+        remotes = d.remotes || [];
+      } catch (e) {
+        loading.textContent = 'Failed to load: ' + e;
+        return;
+      }
+      remotesList.replaceChildren();
+      if (remotes.length === 0) {
+        const empty = el('div', { text: 'No remotes yet. Click + Add Remote above.' });
+        empty.id = 'remotes-empty';
+        remotesList.appendChild(empty);
+        return;
+      }
+      for (const rem of remotes) {
+        const row = el('div', { className: 'remote-row' });
+        row.dataset.name = rem.name;
+        const line1 = el('div', { className: 'rr-line1' });
+        const dot = el('span', { className: 'rr-dot' });
+        const name = el('span', { className: 'rr-name', text: rem.name });
+        const target = el('span', { className: 'rr-target', text: rem.ssh_target + ':' + rem.ssh_port });
+        const actions = el('span', { className: 'rr-actions' });
+        const testBtn = el('button', { className: 'rr-test', text: 'Test' });
+        const editBtn = el('button', { className: 'rr-edit', text: 'Edit' });
+        const removeBtn = el('button', { className: 'rr-remove', text: 'Remove' });
+        actions.appendChild(testBtn); actions.appendChild(editBtn); actions.appendChild(removeBtn);
+        line1.appendChild(dot); line1.appendChild(name); line1.appendChild(target); line1.appendChild(actions);
+        const meta = el('div', {
+          className: 'rr-meta',
+          text: 'home: ' + (rem.immorterm_home || '~/.immorterm')
+            + (rem.strict_known_hosts ? ' · strict known-hosts' : '')
+            + ' · probing…',
+        });
+
+        // Inline edit form (hidden until Edit clicked). Mirrors the
+        // PUT /api/v1/remotes/{name} body shape.
+        const editForm = el('div', { className: 'rr-edit-form' });
+        function buildEditRow(labelText, inputType, initialValue, id) {
+          const r = el('div', { className: 'ef-row' });
+          const l = el('label', { text: labelText });
+          l.setAttribute('for', id);
+          const i = document.createElement('input');
+          i.type = inputType; i.id = id; i.value = initialValue;
+          r.appendChild(l); r.appendChild(i);
+          editForm.appendChild(r);
+          return i;
+        }
+        const efTarget = buildEditRow('SSH target', 'text', rem.ssh_target, 'ef-target-' + rem.name);
+        const efPort = buildEditRow('Port', 'number', rem.ssh_port, 'ef-port-' + rem.name);
+        const efHome = buildEditRow('Remote home', 'text', rem.immorterm_home || '~/.immorterm', 'ef-home-' + rem.name);
+        // Strict-known-hosts toggle row
+        const efStrictRow = el('div', { className: 'ef-row' });
+        const efStrictLabel = el('label', { text: 'Strict known-hosts' });
+        efStrictLabel.setAttribute('for', 'ef-strict-' + rem.name);
+        const efStrict = document.createElement('input');
+        efStrict.type = 'checkbox'; efStrict.id = 'ef-strict-' + rem.name;
+        efStrict.checked = !!rem.strict_known_hosts;
+        const efStrictHelp = el('span', { text: 'Refuse unknown host keys (off = TOFU)' });
+        efStrictHelp.style.fontSize = '11px';
+        efStrictHelp.style.opacity = '0.55';
+        efStrictRow.appendChild(efStrictLabel); efStrictRow.appendChild(efStrict); efStrictRow.appendChild(efStrictHelp);
+        editForm.appendChild(efStrictRow);
+        const efButtons = el('div', { className: 'ef-buttons' });
+        const efCancel = el('button', { className: 'ra-btn-ghost', text: 'Cancel' });
+        const efSave = el('button', { className: 'ra-btn-primary', text: 'Save' });
+        efButtons.appendChild(efCancel); efButtons.appendChild(efSave);
+        editForm.appendChild(efButtons);
+
+        row.appendChild(line1); row.appendChild(meta); row.appendChild(editForm);
+        remotesList.appendChild(row);
+
+        // Probe in parallel.
+        probeAndPaint(row, rem.name);
+
+        testBtn.addEventListener('click', () => probeAndPaint(row, rem.name));
+        editBtn.addEventListener('click', () => {
+          editForm.classList.toggle('visible');
+          if (editForm.classList.contains('visible')) efTarget.focus();
+        });
+        efCancel.addEventListener('click', () => {
+          editForm.classList.remove('visible');
+          // Reset fields to current values
+          efTarget.value = rem.ssh_target;
+          efPort.value = rem.ssh_port;
+          efHome.value = rem.immorterm_home || '~/.immorterm';
+          efStrict.checked = !!rem.strict_known_hosts;
+        });
+        efSave.addEventListener('click', async () => {
+          const body = {
+            ssh_target: efTarget.value.trim(),
+            ssh_port: parseInt(efPort.value, 10) || 22,
+            immorterm_home: efHome.value.trim() || '~/.immorterm',
+            strict_known_hosts: !!efStrict.checked,
+          };
+          try {
+            const r = await fetch('/api/v1/remotes/' + encodeURIComponent(rem.name), {
+              method: 'PUT',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+            if (!r.ok) {
+              const err = await r.json().catch(() => ({}));
+              alert('Save failed: ' + (err.error || r.status));
+              return;
+            }
+            editForm.classList.remove('visible');
+            await renderRemotesList();
+          } catch (e) {
+            alert('Save failed: ' + e);
+          }
+        });
+        removeBtn.addEventListener('click', async () => {
+          if (!confirm('Remove remote "' + rem.name + '"?')) return;
+          try {
+            const r = await fetch('/api/v1/remotes/' + encodeURIComponent(rem.name), { method: 'DELETE' });
+            if (!r.ok) {
+              const err = await r.text();
+              alert('Remove failed: ' + err);
+              return;
+            }
+            await renderRemotesList();
+            while (pickerRemote.options.length > 1) pickerRemote.remove(1);
+            await refreshRemoteOptions();
+          } catch (e) {
+            alert('Remove failed: ' + e);
+          }
+        });
+      }
+    }
+
+    async function refreshSshConfigSuggestions() {
+      try {
+        const r = await fetch('/api/v1/ssh-config-hosts');
+        const d = await r.json();
+        const dl = document.getElementById('ra-target-suggestions');
+        if (!dl) return;
+        dl.replaceChildren();
+        for (const h of (d.hosts || [])) {
+          const o = document.createElement('option');
+          o.value = h;
+          dl.appendChild(o);
+        }
+      } catch (_) { /* no config / no read perms — ok, no suggestions */ }
+    }
+
+    async function openRemotesModal() {
+      await invoke('cmd_expand_shell', { expanded: true }).catch(() => {});
+      invoke('cmd_set_picker_open', { open: true }).catch(() => {});
+      remotesOverlay.classList.add('visible');
+      remotesAddForm.classList.remove('visible');
+      await refreshSshConfigSuggestions();
+      await renderRemotesList();
+    }
+    async function closeRemotesModal() {
+      remotesOverlay.classList.remove('visible');
+      if (!pickerOverlay.classList.contains('visible')) {
+        invoke('cmd_set_picker_open', { open: false }).catch(() => {});
+        await invoke('cmd_expand_shell', { expanded: false }).catch(() => {});
+      }
+    }
+
+    document.getElementById('picker-manage-btn').addEventListener('click', openRemotesModal);
+    document.getElementById('remotes-close').addEventListener('click', closeRemotesModal);
+    remotesOverlay.addEventListener('click', (ev) => {
+      if (ev.target === remotesOverlay) closeRemotesModal();
+    });
+
+    document.getElementById('remotes-add-toggle').addEventListener('click', () => {
+      remotesAddForm.classList.toggle('visible');
+      if (remotesAddForm.classList.contains('visible')) {
+        document.getElementById('ra-name').focus();
+      }
+    });
+    document.getElementById('ra-cancel').addEventListener('click', () => {
+      remotesAddForm.classList.remove('visible');
+      ['ra-name','ra-target'].forEach(id => document.getElementById(id).value = '');
+    });
+    document.getElementById('ra-add').addEventListener('click', async () => {
+      const name = document.getElementById('ra-name').value.trim();
+      const target = document.getElementById('ra-target').value.trim();
+      const port = parseInt(document.getElementById('ra-port').value, 10) || 22;
+      const home = document.getElementById('ra-home').value.trim() || '~/.immorterm';
+      if (!name || !target) {
+        alert('Name and SSH target are required.');
+        return;
+      }
+      try {
+        const r = await fetch('/api/v1/remotes', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name, ssh_target: target, ssh_port: port, immorterm_home: home }),
+        });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          alert('Add failed: ' + (err.error || r.status));
+          return;
+        }
+        remotesAddForm.classList.remove('visible');
+        ['ra-name','ra-target'].forEach(id => document.getElementById(id).value = '');
+        await renderRemotesList();
+        while (pickerRemote.options.length > 1) pickerRemote.remove(1);
+        await refreshRemoteOptions();
+      } catch (e) {
+        alert('Add failed: ' + e);
+      }
+    });
+
+    document.getElementById('add-tab').addEventListener('click', openPicker);
+    document.getElementById('picker-open-btn').addEventListener('click', () => {
+      const dir = pickerInput.value.trim();
+      if (dir) pickProject(dir, null, _pickerCurrentRemote);
+    });
+    // Browse button opens the native macOS folder picker via
+    // tauri-plugin-dialog. On pick, populate the text field + open.
+    document.getElementById('picker-browse-btn').addEventListener('click', async () => {
+      const dialog = window.__TAURI__ && window.__TAURI__.dialog;
+      if (!dialog || !dialog.open) {
+        console.error('[picker] dialog plugin not available');
+        return;
+      }
+      try {
+        const picked = await dialog.open({
+          directory: true,
+          multiple: false,
+          title: 'Select Project Folder',
+        });
+        if (!picked) return; // user cancelled
+        const path = Array.isArray(picked) ? picked[0] : picked;
+        if (path) {
+          pickerInput.value = path;
+          pickProject(path);
+        }
+      } catch (e) {
+        console.error('[picker] dialog.open failed:', e);
+      }
+    });
+    pickerInput.addEventListener('input', () => filterPicker(pickerInput.value));
+    pickerInput.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        // If we have a selected row, activate it; otherwise treat the
+        // input value as a literal path.
+        const row = _pickerRows[_pickerSelected];
+        if (row) {
+          pickProject(row.dataset.projectDir, row.dataset.projectName);
+        } else {
+          const dir = pickerInput.value.trim();
+          if (dir) pickProject(dir);
+        }
+      } else if (ev.key === 'Escape') {
+        ev.preventDefault();
+        closePicker();
+      } else if (ev.key === 'ArrowDown') {
+        ev.preventDefault();
+        if (_pickerRows.length === 0) return;
+        _pickerSelected = (_pickerSelected + 1) % _pickerRows.length;
+        applyPickerSelection();
+      } else if (ev.key === 'ArrowUp') {
+        ev.preventDefault();
+        if (_pickerRows.length === 0) return;
+        _pickerSelected = (_pickerSelected - 1 + _pickerRows.length) % _pickerRows.length;
+        applyPickerSelection();
+      }
+    });
+    // Document-level Esc fallback — if focus shifted away from the
+    // input (e.g. after a zoom change which can steal focus), Esc
+    // still closes the picker. Also force a zoom reset so runaway
+    // Cmd+= layouts can't trap the user inside a broken picker.
+    document.addEventListener('keydown', (ev) => {
+      if (!pickerOverlay.classList.contains('visible')) return;
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        closePicker();
+      }
+    }, true);
+
+    pickerOverlay.addEventListener('click', (ev) => {
+      if (ev.target === pickerOverlay) closePicker();
+    });
+
+    // Rust fires "tabs-changed" when external mutations land (open/close/
+    // reorder from another surface). Keep the strip in sync.
+    if (tauriEvent) {
+      tauriEvent.listen('tabs-changed', () => renderStrip());
+      // Project webview fires this after persisting a theme change.
+      // Plain-mode tabs share a global theme, so a change in one must
+      // propagate to all of them — and we don't know from the payload
+      // alone which other tabs share storage. Wholesale cache flush is
+      // cheap (a handful of localhost /api/v1/config GETs on re-render)
+      // and avoids mode-aware bookkeeping in the strip.
+      tauriEvent.listen('project-theme-changed', (ev) => {
+        console.log('[shell] project-theme-changed heard', ev && ev.payload);
+        _themeCache.clear();
+        renderStrip();
+      });
+    }
+    // Direct-call backdoor for Rust: Webview::eval injects JS into the
+    // window scope, not our module scope. Exposing a global lets Rust
+    // reliably refresh the strip without depending on the event bus.
+    window.immortermRefreshTabs = () => {
+      console.log('[shell] immortermRefreshTabs called');
+      _themeCache.clear();
+      renderStrip();
+    };
+    if (tauriEvent) {
+      // File → New Tab (Cmd+T) lands here via the menu accelerator so
+      // the project picker can live in the shell webview only.
+      tauriEvent.listen('shell-open-picker', () => openPicker());
+      // File → New Plain Terminal Tab (Cmd+Shift+T). Bypasses the
+      // picker — opens a bare shell in $HOME via the Rust command.
+      tauriEvent.listen('shell-open-plain-tab', () => {
+        if (!window.__TAURI__ || !window.__TAURI__.core) return;
+        window.__TAURI__.core.invoke('cmd_open_plain_tab', {}).catch((e) => {
+          console.error('[shell] cmd_open_plain_tab failed:', e);
+        });
+      });
+      // Zoom (Cmd+=/-/0) emits this so the picker closes before the
+      // shell webview shrinks back to strip height — otherwise the
+      // picker overlay gets clipped and the user is stranded.
+      tauriEvent.listen('shell-close-picker', () => {
+        if (pickerOverlay.classList.contains('visible')) closePicker();
+      });
+    }
+
+    // All keyboard shortcuts route through /immorterm-shortcuts.js →
+    // cmd_handle_shortcut in Rust. Cmd+T here reaches us as the Tauri
+    // event `shell-open-picker` above.
+
+    // ── Auto-updater ──
+    // Tauri v2's `updater` plugin is accessed via the dynamic import
+    // `@tauri-apps/plugin-updater`, which Tauri exposes as an ES module
+    // on the app-side. Since this HTML is served by the hub (remote
+    // origin) and not bundled through a framework, we reach the plugin
+    // through the global `window.__TAURI__.updater`, which
+    // `withGlobalTauri: true` pre-populates alongside core/event/etc.
+    //
+    // Flow: on boot, quietly check. If there's a new version, show the
+    // banner. User clicks Update → downloadAndInstall() (shows progress)
+    // → relaunch. Dismiss just hides banner for this session; next
+    // launch re-checks.
+    async function startUpdaterWatcher() {
+      const updaterApi = window.__TAURI__ && window.__TAURI__.updater;
+      const processApi = window.__TAURI__ && window.__TAURI__.process;
+      if (!updaterApi || !updaterApi.check || !processApi || !processApi.relaunch) {
+        // Not running under Tauri (e.g. bare browser during dev) — no-op.
+        return;
+      }
+      let update;
+      try {
+        update = await updaterApi.check();
+      } catch (err) {
+        console.warn('[updater] check failed', err);
+        return;
+      }
+      if (!update || !update.available) return;
+
+      const banner = document.getElementById('update-banner');
+      const verEl = document.getElementById('update-version');
+      const bodyEl = document.getElementById('update-body');
+      const progEl = document.getElementById('update-progress');
+      const goBtn = document.getElementById('update-go');
+      const skipBtn = document.getElementById('update-skip');
+      if (!banner || !goBtn || !skipBtn) return;
+
+      verEl.textContent = update.version || '(new)';
+      bodyEl.textContent = (update.body || 'Click Update to download and restart.').slice(0, 140);
+      banner.classList.add('visible');
+
+      skipBtn.addEventListener('click', () => banner.classList.remove('visible'));
+
+      goBtn.addEventListener('click', async () => {
+        goBtn.disabled = true;
+        skipBtn.disabled = true;
+        goBtn.textContent = 'Downloading…';
+        progEl.hidden = false;
+        progEl.textContent = '';
+        let total = 0;
+        let downloaded = 0;
+        try {
+          await update.downloadAndInstall((event) => {
+            if (event.event === 'Started') {
+              total = event.data && event.data.contentLength ? event.data.contentLength : 0;
+              downloaded = 0;
+            } else if (event.event === 'Progress') {
+              downloaded += (event.data && event.data.chunkLength) || 0;
+              if (total > 0) {
+                const pct = Math.min(100, Math.round((downloaded / total) * 100));
+                progEl.textContent = pct + '%';
+              }
+            } else if (event.event === 'Finished') {
+              progEl.textContent = 'Installing…';
+            }
+          });
+          progEl.textContent = 'Restarting…';
+          await processApi.relaunch();
+        } catch (err) {
+          console.error('[updater] install failed', err);
+          goBtn.disabled = false;
+          skipBtn.disabled = false;
+          goBtn.textContent = 'Retry';
+          progEl.textContent = 'Failed — see console';
+        }
+      });
+    }
+
+    // Boot
+    (async () => {
+      await loadThemes();
+      await renderStrip();
+      // Fire updater check in the background — don't block first paint.
+      setTimeout(startUpdaterWatcher, 2000);
+    })();
+  </script>
+</body>
+</html>

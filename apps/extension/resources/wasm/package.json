@@ -1,0 +1,17 @@
+{
+  "name": "immorterm-wasm",
+  "type": "module",
+  "description": "Browser target — WASM bridge for ImmorTerm",
+  "version": "0.1.2",
+  "license": "MIT",
+  "files": [
+    "immorterm_wasm_bg.wasm",
+    "immorterm_wasm.js",
+    "immorterm_wasm.d.ts"
+  ],
+  "main": "immorterm_wasm.js",
+  "types": "immorterm_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

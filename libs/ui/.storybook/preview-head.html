@@ -1,0 +1,17 @@
+<!--
+  Storybook only: apps/web loads Inter/Bricolage Grotesque via next/font, which isn't
+  running here — load the same faces from Google Fonts so --font-sans,
+  --font-mono and --font-display (Bricolage Grotesque) resolve correctly.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+	href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&family=Bricolage+Grotesque:wght@600;700;800&display=swap"
+	rel="stylesheet"
+/>
+<style>
+	/* Terminal-noir ground everywhere, including fullscreen-layout gutters. */
+	body {
+		background: var(--color-bg);
+	}
+</style>

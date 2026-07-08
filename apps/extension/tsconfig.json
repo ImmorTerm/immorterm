@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "module": "commonjs",
+    "target": "ES2020",
+    "outDir": "out",
+    "lib": ["ES2020"],
+    "sourceMap": true,
+    // NOTE: no "rootDir" — src imports the shared hook-installer core from
+    // libs/services/src (outside src/), which rootDir would reject (TS6059).
+    // The shipped build is the esbuild bundle (`compile`), so tsc emit layout
+    // doesn't matter; `compile:tsc` output nests under out/apps/extension/src.
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    // Type-only resolution for the shared hook-installer core
+    // (libs/services/src/hook-installer.ts) which does
+    // `import type { VendorsConfig } from '@immorterm/config'`.
+    // Erased at build time — esbuild never bundles it.
+    "paths": {
+      "@immorterm/config": ["../../libs/config/src"]
+    }
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "out", "src/__tests__", "vitest.config.ts", "scripts", "tools"]
+}

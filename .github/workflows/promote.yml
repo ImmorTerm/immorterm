@@ -1,0 +1,125 @@
+# Promote to production — publish the CLI, the VS Code extension, and the docs site.
+#
+# Manually dispatched; tick the lanes you want. See WORKFLOW-NOTES.md for the
+# secrets / Trusted Publishing setup each lane needs.
+
+name: Promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      promote_cli:
+        description: "Publish immorterm CLI to npm"
+        type: boolean
+        default: false
+      promote_extension:
+        description: "Publish VS Code extension to the Marketplace"
+        type: boolean
+        default: false
+      promote_docs:
+        description: "Deploy docs site to Cloudflare Pages"
+        type: boolean
+        default: false
+
+concurrency:
+  group: promote
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  promote-cli:
+    name: Promote CLI
+    if: inputs.promote_cli == true
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/immorterm
+    permissions:
+      contents: read
+      id-token: write # npm Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install dependencies
+        run: bun install
+        working-directory: .
+
+      - name: Build CLI
+        run: bun run build
+
+      - name: Publish to npm (Trusted Publishing)
+        run: |
+          # Trusted Publishing needs npm >= 11.5.1 — run latest via npx.
+          npx -y npm@latest publish --access public
+
+  promote-extension:
+    name: Promote Extension
+    if: inputs.promote_extension == true
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/extension
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install dependencies
+        run: bun install
+        working-directory: .
+
+      - name: Setup Node.js (for vsce)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install vsce
+        run: npm install -g @vscode/vsce
+
+      - name: Build and package extension
+        run: |
+          bun run compile
+          vsce package --no-dependencies
+
+      - name: Publish to VS Code Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: vsce publish --packagePath *.vsix
+
+  promote-docs:
+    name: Promote Docs
+    if: inputs.promote_docs == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build docs
+        run: |
+          (cd libs/design-tokens && bun run build) 2>/dev/null || true
+          (cd libs/menu-data && bun run build)
+          bun run --cwd apps/docs build
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy apps/docs/out --project-name=immorterm-docs --branch=main

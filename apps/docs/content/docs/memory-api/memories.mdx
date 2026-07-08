@@ -1,0 +1,261 @@
+---
+title: Memories
+description: Create, read, update, archive, supersede — and the decisions endpoints.
+---
+
+Memory rows are the core unit: content plus `type`, `category`, `metadata`,
+session identifiers, and a supersession chain. Repos change their minds;
+supersession keeps both versions, no scars.
+
+## POST /api/v1/memories
+
+Save one memory or a batch.
+
+Body (`AddMemoryRequest`):
+
+| Field | Type | Notes |
+|---|---|---|
+| `text` | string | Single-memory mode. One of `text`/`texts` is required. |
+| `texts` | array | Batch mode. Items are strings, or objects `{ text, metadata }`. |
+| `user_id` | string | Required. |
+| `metadata` | object | Optional; default metadata for batch items too. |
+| `session_id`, `immorterm_id` | string | Optional session identifiers. |
+| `entities`, `relations` | array | Optional graph extraction (single-text mode). |
+| `project_id`, `host_id`, `project_name` | string | Optional identity fields; validated in warn-mode, logged if non-conformant. |
+| `infer` | bool | Accepted for API compat; not used. |
+
+```bash
+curl -X POST http://localhost:8765/api/v1/memories \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"you@example.com","text":"Chose rotating refresh tokens","metadata":{"category":"decisions"}}'
+```
+
+Response: `{ "status": "saved", "id": "…" }` — or for batch,
+`{ "status": "saved", "count": N, "ids": […] }`.
+
+## GET /api/v1/memories
+
+List memories, paginated. Alias: `GET /api/v1/memories/list`.
+
+Query params: `user_id`, `page` (default 1), `page_size` (default 20),
+`query` (optional — when present the call dispatches to search instead,
+scope `session`, and returns the search response shape).
+
+```bash
+curl 'http://localhost:8765/api/v1/memories?user_id=you@example.com&page=1&page_size=20'
+```
+
+Response: `{ "memories": […], "total": N, "page": 1, "page_size": 20, "tier": "free" }`.
+
+## GET /api/v1/memories/\{memory_id\}
+
+Fetch a single memory record. Returns the full record, or
+`{ "error": "Memory not found" }`.
+
+```bash
+curl http://localhost:8765/api/v1/memories/MEMORY_ID
+```
+
+## PUT /api/v1/memories/\{memory_id\}
+
+Update content and/or metadata. Body: `{ text?, content?, metadata? }`
+(`text` and `content` are aliases; `text` wins when both are present).
+
+```bash
+curl -X PUT http://localhost:8765/api/v1/memories/MEMORY_ID \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Corrected fact","metadata":{"category":"decisions"}}'
+```
+
+Response: `{ "status": "updated" | "no_change", "memory_id": "…" }`.
+
+## GET /api/v1/memories/context/\{memory_id\}
+
+The conversation context that surrounded a memory when it was captured.
+Query param: `max_chars` (default 3000).
+
+```bash
+curl 'http://localhost:8765/api/v1/memories/context/MEMORY_ID?max_chars=3000'
+```
+
+Response: `{ "memory_id", "context", "has_context": true }` — or
+`{ "memory_id", "has_context": false }` when none exists.
+
+## GET /api/v1/memories/lookup-by-meta
+
+Exact-filter lookup without semantic search. Query params: `user_id`,
+`session_id`, `immorterm_id`, `memory_type`, `category`, `limit`
+(default 20), `include_archived` (default false).
+
+```bash
+curl 'http://localhost:8765/api/v1/memories/lookup-by-meta?user_id=you@example.com&memory_type=session_summary&limit=5'
+```
+
+Response: `{ "memories": […], "count": N }`.
+
+## GET /api/v1/memories/categories
+
+The known category list (advisory, not restrictive): `architecture`,
+`backend`, `conventions`, `decisions`, `devops`, `frontend`,
+`lessons_learned`, `performance`, `plan`, `preferences`, `security`.
+
+```bash
+curl http://localhost:8765/api/v1/memories/categories
+```
+
+## POST /api/v1/memories/batch
+
+Structured batch save. Body: `{ user_id, items: [{ text, metadata?, entities? }], session_id?, immorterm_id? }`.
+
+```bash
+curl -X POST http://localhost:8765/api/v1/memories/batch \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"you@example.com","items":[{"text":"fact one"},{"text":"fact two"}]}'
+```
+
+Response: `{ "status": "saved", "count": N, "ids": […] }`.
+
+## POST /api/v1/memories/archive
+
+Archive one memory (sets `state = 'archived'`). Body:
+`{ user_id, memory_id }`.
+
+```bash
+curl -X POST http://localhost:8765/api/v1/memories/archive \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"you@example.com","memory_id":"MEMORY_ID"}'
+```
+
+Response: `{ "status": "archived", "updated": N }`.
+
+## Deletion
+
+Three routes, same effect — all active memories for a user are deleted:
+
+- `DELETE /api/v1/memories?user_id=…`
+- `DELETE /api/v1/memories/delete-all?user_id=…`
+- `DELETE /api/v1/memories/user/{user_id}`
+
+```bash
+curl -X DELETE 'http://localhost:8765/api/v1/memories/delete-all?user_id=you@example.com'
+```
+
+Response: `{ "status": "deleted", "count": N }`.
+
+## Supersession
+
+### POST /api/v1/memories/\{memory_id\}/supersede
+
+Archive a memory as outdated and optionally chain it to its replacement.
+Body:
+
+| Field | Type | Notes |
+|---|---|---|
+| `user_id` | string | Required. |
+| `reason` | string | Required: `content_stale` or `content_replaced`. Anything else is rejected. |
+| `superseded_by_id` | string | Optional id of the replacing memory; sets its `supersedes_id` if not already linked. |
+
+```bash
+curl -X POST http://localhost:8765/api/v1/memories/MEMORY_ID/supersede \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"you@example.com","reason":"content_replaced","superseded_by_id":"NEW_ID"}'
+```
+
+Response: `{ "status": "superseded", "memory_id", "reason", "chained_to", "chain_linked" }`
+— or `{ "status": "not_found_or_already_archived", "memory_id" }`.
+
+### GET /api/v1/memories/\{memory_id\}/chain
+
+The supersession chain around any memory. Query param: `max_depth`
+(default 20 per the route docs; the handler default is 10).
+
+```bash
+curl 'http://localhost:8765/api/v1/memories/MEMORY_ID/chain?max_depth=10'
+```
+
+Response: `{ "target", "predecessors": […], "successors": […], "predecessor_count", "successor_count" }`.
+
+### POST /api/v1/memories/supersede-summary
+
+Versioned session summaries: archives the existing `session_summary` for a
+session and inserts a new version linked via `supersedes_id`. Body:
+`{ user_id, session_id, text, metadata?, immorterm_id? }`.
+
+```bash
+curl -X POST http://localhost:8765/api/v1/memories/supersede-summary \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"you@example.com","session_id":"SESSION_ID","text":"Updated summary"}'
+```
+
+Response: `{ "status": "created" | "unchanged", "memory_id" }`.
+
+### GET /api/v1/memories/summary-chain
+
+The full summary version chain for a session, newest first. Query params:
+`user_id` (required), `session_id` (required), `max_depth` (default 10).
+
+```bash
+curl 'http://localhost:8765/api/v1/memories/summary-chain?user_id=you@example.com&session_id=SESSION_ID'
+```
+
+Response: `{ "chain": […], "count": N }`.
+
+## POST /api/v1/memories/mark-merged
+
+Flips `merged_to_main = 1` on memories belonging to the listed terminal
+sessions. Called by the git-commit hook when a merge to the prod branch is
+detected; feeds branch-aware search scoring. Body:
+
+| Field | Type | Notes |
+|---|---|---|
+| `user_id` | string | Required. |
+| `contributing_immorterm_ids` | string[] | Required; empty array is a no-op. |
+| `branches` | string[] | Optional filter — only promote memories on these branches. |
+| `commit_hash` | string | Optional, echoed back for audit. |
+| `merged_at` | string | Optional ISO-8601; defaults to now. |
+
+```bash
+curl -X POST http://localhost:8765/api/v1/memories/mark-merged \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"you@example.com","contributing_immorterm_ids":["immorterm-ai-123"],"commit_hash":"abc123"}'
+```
+
+Response: `{ "status": "merged" | "noop", "updated": N, "merged_at", "commit_hash" }`.
+
+## Decisions
+
+Decisions are memories with `category = 'decisions'` plus a status in
+metadata.
+
+### GET /api/v1/decisions/pending
+
+Unresolved decisions across sessions. Query param: `user_id`. Returns the
+same JSON as the `get_pending_decisions` MCP tool.
+
+```bash
+curl 'http://localhost:8765/api/v1/decisions/pending?user_id=you@example.com'
+```
+
+### POST /api/v1/decisions/resolve
+
+Body: `{ user_id, decision_ids: […], resolution?: "completed", notes?: "" }`.
+Returns the same JSON as the `resolve_decisions` MCP tool.
+
+```bash
+curl -X POST http://localhost:8765/api/v1/decisions/resolve \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"you@example.com","decision_ids":["ID1"],"resolution":"completed"}'
+```
+
+### POST /api/v1/decisions/archive-completed
+
+Archives all active decisions whose metadata carries
+`"status":"completed"`. Body: `{ user_id }`.
+
+```bash
+curl -X POST http://localhost:8765/api/v1/decisions/archive-completed \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"you@example.com"}'
+```
+
+Response: `{ "status": "archived", "count": N }`.

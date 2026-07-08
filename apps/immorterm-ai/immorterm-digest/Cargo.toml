@@ -1,0 +1,30 @@
+[package]
+name = "immorterm-digest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Singleton per-session digest daemon — see internal design notes"
+
+[[bin]]
+name = "immorterm-digest"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+notify = { workspace = true }
+nix = { workspace = true }
+clap = { workspace = true }
+reqwest = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

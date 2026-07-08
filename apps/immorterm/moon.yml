@@ -1,0 +1,46 @@
+language: "typescript"
+layer: "application"
+stack: "backend"
+tags: ["cli"]
+
+project:
+  title: "ImmorTerm CLI"
+  description: "Control plane for ImmorTerm — npx immorterm"
+  owner: "@immorterm/core"
+
+dependsOn:
+  - "config"
+  - "types"
+  - "license"
+  - "analytics"
+  - "services"
+  - "design-tokens"
+
+tasks:
+  build:
+    command: "bun build src/main.ts --outfile=dist/cli.mjs --target=node --minify --external ink --external react --external react-devtools-core"
+    inputs:
+      - "src/**/*"
+      - "tsconfig.json"
+    outputs:
+      - "dist"
+    deps:
+      - "config:typecheck"
+      - "services:typecheck"
+      - "analytics:typecheck"
+
+  dev:
+    command: "bun run src/main.ts"
+    options:
+      runInCI: false
+
+  typecheck:
+    command: "bun run tsc --noEmit"
+    inputs:
+      - "src/**/*"
+      - "tsconfig.json"
+    deps:
+      - "config:typecheck"
+      - "services:typecheck"
+      - "analytics:typecheck"
+      - "license:typecheck"

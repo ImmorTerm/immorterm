@@ -1,0 +1,48 @@
+---
+title: Entity graph
+description: Entities, relations, shortest paths, and neighborhood traversal.
+---
+
+Memory writes extract entities and relations into a graph alongside the
+rows. Four read-only endpoints query it. All take `user_id` as an optional
+query param (defaults to the resolved identity).
+
+## GET /api/v1/graph/entities
+
+Search entities by name and/or type. Query params: `user_id`, `name`,
+`entity_type`, `limit` (default 20).
+
+```bash
+curl 'http://localhost:8765/api/v1/graph/entities?name=daemon&limit=20'
+```
+
+Response: `{ "entities": […], "count": N }`.
+
+## GET /api/v1/graph/relations
+
+All relations touching one entity. Query params: `entity` (required),
+`user_id`, `include_memory_text` (default false — set true to include the
+text of the memories behind each relation).
+
+```bash
+curl 'http://localhost:8765/api/v1/graph/relations?entity=embed_queue&include_memory_text=true'
+```
+
+## GET /api/v1/graph/path
+
+Shortest path between two entities. Query params: `from` and `to`
+(required), `user_id`, `max_depth` (default 5, hard-capped at 10).
+
+```bash
+curl 'http://localhost:8765/api/v1/graph/path?from=daemon&to=registry.json&max_depth=5'
+```
+
+## GET /api/v1/graph/traverse
+
+Breadth-first neighborhood around an entity. Query params: `entity`
+(required), `user_id`, `depth` (default 2, hard-capped at 5), `limit`
+(default 50).
+
+```bash
+curl 'http://localhost:8765/api/v1/graph/traverse?entity=daemon&depth=2&limit=50'
+```

@@ -1,0 +1,83 @@
+---
+title: Memory Without the Terminal
+description: Run ImmorTerm Memory on its own — local-first AI memory for any MCP client.
+---
+
+You don't need the terminal, the extension, or the desktop app to use
+ImmorTerm Memory. The memory service is a single native binary that runs on
+its own and speaks MCP over HTTP — any AI coding tool that can register an
+MCP server can read and write it.
+
+What it replaces: the hand-maintained "second brain" — the vault of session
+notes you name, organize, backlink, and prune weekly so your AI can grep it.
+Here the capture is automatic, retrieval is ranked, and outdated decisions
+supersede themselves. Zero maintenance is the feature.
+
+## Setup
+
+```bash
+npm install -g immorterm
+immorterm memory install
+immorterm memory up
+```
+
+Platform support is the same as the rest of ImmorTerm: macOS arm64, Linux
+with glibc 2.38+, no Windows yet — see
+[Getting Started](/docs#supported-platforms).
+
+Then point your AI tool at the MCP endpoint:
+
+```text
+POST http://127.0.0.1:8765/mcp/{client_name}/{user_id}
+```
+
+`client_name` is the tool connecting (`claude-code`, `cursor`, …); `user_id`
+is the memory partition. Registration shapes and reconnect behavior are on
+[Connecting over MCP](/docs/mcp-connection). Claude Code gets the deepest
+integration — hooks that capture automatically — covered in the
+[Claude Code guide](/docs/claude-code).
+
+## What you get
+
+- **Semantic search in ~8ms** — hybrid retrieval (dense + sparse) with a
+  cross-encoder reranker, running locally. [Search](/docs/memory-api/search)
+- **Auto-supersession** — when a decision changes, the old memory is
+  archived and chained to the new one. Repos change their minds; the memory
+  keeps both versions, no scars. [Memories](/docs/memory-api/memories)
+- **Branch-aware scoring** — memories from other branches are penalized
+  until merged, so the AI stops suggesting patterns from abandoned branches.
+- **Code-bound history** — edits, git commits, file checkpoints, and
+  terminal logs linked to the sessions that produced them.
+  [Code history](/docs/memory-api/code-history)
+- **Knowledge packs** — digest books and docs into searchable packs.
+  [Packs](/docs/memory-api/packs)
+- **41 MCP tools** over all of it. [MCP Tools](/docs/mcp-tools)
+
+Everything is local: SQLite on your disk, models on your disk, the service
+bound to `127.0.0.1`. No API key, no cloud round-trip, no code leaving the
+machine. The REST surface is fully documented in the
+[Memory API reference](/docs/memory-api) if you'd rather script it directly.
+
+## Free vs Memory Pro
+
+Every memory is captured and stored forever, on every tier. The caps are on
+the read path only:
+
+| | Free | Memory Pro — $9/mo |
+|---|---|---|
+| Capture & storage | everything, forever | everything, forever |
+| Search results per query | 5 | unlimited |
+| Recall window | last 72 hours | unlimited |
+| Features (all tools, hooks, supersession, packs) | all of them | all of them |
+
+When a query hits a cap, the response says how many results were gated
+rather than pretending they don't exist — the exact shape is on the
+[Memory API overview](/docs/memory-api#free-tier-vs-pro).
+
+> free keeps everything forever — it just reads you the last three days,
+> five results at a time. pro reads the whole tank. — mort
+
+Upgrade with `immorterm pro` (checkout in the browser, license key by
+email — no account). Memory Pro covers the memory service alone; the full
+ImmorTerm Pro tier ($29/mo) adds the terminal-side limits on top. License
+mechanics live on the [Billing API](/docs/billing-api) page.

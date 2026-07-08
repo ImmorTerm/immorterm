@@ -1,0 +1,36 @@
+{
+	"name": "@immorterm/ai",
+	"version": "0.1.0",
+	"description": "ImmorTerm AI \u2014 GPU-rendered terminal with AI overlays, WebGPU, and MCP tools",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/ImmorTerm/immorterm.git",
+		"directory": "packages/immorterm-ai"
+	},
+	"homepage": "https://immorterm.com",
+	"keywords": [
+		"terminal",
+		"gpu",
+		"wgpu",
+		"ai",
+		"mcp",
+		"webgpu"
+	],
+	"bin": {
+		"immorterm-ai": "bin/immorterm-ai"
+	},
+	"files": [
+		"bin",
+		"postinstall.js"
+	],
+	"scripts": {
+		"postinstall": "node postinstall.js"
+	},
+	"optionalDependencies": {
+		"@immorterm/ai-darwin-arm64": "0.1.0",
+		"@immorterm/ai-darwin-x64": "0.1.0",
+		"@immorterm/ai-linux-x64": "0.1.0",
+		"@immorterm/ai-linux-arm64": "0.1.0"
+	}
+}

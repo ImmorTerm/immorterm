@@ -1,0 +1,26 @@
+[package]
+name = "immorterm-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "GPU-accelerated terminal renderer via wgpu"
+
+[dependencies]
+immorterm-core = { workspace = true }
+wgpu = { workspace = true }
+cosmic-text = { workspace = true }
+bytemuck = { workspace = true }
+image = { workspace = true }
+svgbob = { workspace = true }
+resvg = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+web-time = { workspace = true }
+fontdb = { workspace = true }
+unicode-bidi = { workspace = true }
+unicode-script = { workspace = true }
+smallvec = { workspace = true }
+
+[dev-dependencies]
+naga = { workspace = true }
+unicode-width = { workspace = true }

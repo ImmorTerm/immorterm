@@ -1,0 +1,38 @@
+# Source files — compiled output is in out/
+src/**
+tsconfig.json
+
+# Test config
+vitest.config.*
+**/*.test.ts
+**/*.test.js
+**/*.spec.ts
+**/*.spec.js
+
+# Dev artifacts
+.immorterm/**
+RESOURCES.md
+node_modules/**
+
+# Source maps (debug only, not needed by users)
+out/**/*.map
+
+# WASM build artifacts (keep .wasm, .js, .d.ts)
+resources/wasm/.gitignore
+resources/wasm/package.json
+
+# Git/CI
+.github/**
+.gitignore
+
+# Tauri-only resources (hub-served HTML + assets shipped to the Tauri app,
+# never loaded by the VS Code extension). Keeps the vsix lean.
+resources/tab-shell.html
+resources/wizard.html
+resources/shortcuts.html
+resources/menu-data.json
+resources/immorterm-logo.png
+
+# Build tooling not shipped
+scripts/**
+tools/**

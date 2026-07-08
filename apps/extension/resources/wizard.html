@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Welcome to ImmorTerm</title>
+  <style>
+    /*
+     * First-run onboarding wizard. Three steps: Welcome → Features →
+     * Finish. Served by the hub at /wizard.html; launched by
+     * spawn_wizard_window() in lib.rs when prefs.wizard_completed is
+     * false. Each step is a <section class="step"> hidden/shown via
+     * the .active class — no router, no framework, just vanilla JS.
+     *
+     * Theme matches gpu-terminal.css (deep purple accents) so the
+     * jump into the main app feels continuous.
+     */
+    :root {
+      --bg: #170225;
+      --bg-card: rgba(45, 0, 77, 0.72);
+      --border: rgba(224, 176, 255, 0.24);
+      --border-strong: rgba(224, 176, 255, 0.5);
+      --text: #f5ebff;
+      --text-muted: rgba(245, 235, 255, 0.65);
+      --accent: #e0b0ff;
+      --accent-hover: #f4d2ff;
+      --accent-contrast: #2d004d;
+      --success: #7be8a6;
+      --danger: #ff8a9c;
+      --shadow: 0 20px 60px rgba(0, 0, 0, 0.55);
+      --radius: 14px;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      height: 100%; margin: 0; padding: 0;
+      font-family: -apple-system, "SF Pro Display", "Segoe UI Variable", "Inter", system-ui, sans-serif;
+      font-size: 15px;
+      color: var(--text);
+      background:
+        radial-gradient(900px 600px at 20% -10%, rgba(224,176,255,0.22), transparent 60%),
+        radial-gradient(700px 500px at 120% 110%, rgba(85,40,117,0.45), transparent 60%),
+        var(--bg);
+      overflow: hidden;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    body { display: flex; flex-direction: column; }
+    /* WKWebView remote URLs ignore -webkit-app-region: drag — we use
+       Tauri's startDragging() IPC on mousedown instead (see script at
+       bottom). Keep header height for macOS traffic-light clearance. */
+    header { flex: 0 0 36px; cursor: grab; }
+    header:active { cursor: grabbing; }
+    main {
+      flex: 1; display: flex; flex-direction: column; align-items: center;
+      padding: 8px 56px 20px;
+      overflow: hidden;
+    }
+    .stepper { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+    .stepper .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--border); transition: all 160ms ease;
+    }
+    .stepper .dot.active { background: var(--accent); width: 24px; border-radius: 4px; }
+    .stepper .dot.done { background: var(--accent); opacity: 0.6; }
+    .card {
+      flex: 1; width: 100%; max-width: 560px;
+      background: var(--bg-card);
+      border: 1px solid var(--border); border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 18px 36px 20px;
+      display: flex; flex-direction: column;
+      backdrop-filter: blur(14px);
+      overflow: hidden;
+    }
+    .step { display: none; flex: 1; flex-direction: column; min-height: 0; }
+    .step.active { display: flex; }
+    .step h1 { font-size: 22px; font-weight: 600; margin: 0 0 8px; letter-spacing: -0.01em; }
+    .step p.lead { color: var(--text-muted); margin: 0 0 20px; line-height: 1.55; }
+    /* No inner scrollbar — the card grows with content. If future
+       components push the list past the wizard height, we'll switch
+       back to overflow-y:auto + taller wizard window instead of a
+       nested scroll area. */
+    .scroll { flex: 1; margin: 0 -8px 8px; padding: 2px 8px 2px; }
+    .feature {
+      display: flex; align-items: flex-start; gap: 14px;
+      padding: 14px 16px; margin-bottom: 10px;
+      border: 1px solid var(--border); border-radius: 10px;
+      background: rgba(0, 0, 0, 0.18);
+      transition: border-color 160ms ease;
+    }
+    .feature:hover { border-color: var(--border-strong); }
+    .feature .meta { flex: 1; min-width: 0; }
+    .feature .meta .name { display: flex; align-items: center; gap: 8px; font-weight: 600; margin-bottom: 4px; }
+    .feature .meta .size {
+      font-size: 11px; color: var(--text-muted);
+      padding: 2px 6px; border: 1px solid var(--border); border-radius: 4px;
+    }
+    .feature .meta .desc { font-size: 13px; color: var(--text-muted); line-height: 1.5; }
+    .feature .status { font-size: 11px; color: var(--text-muted); margin-top: 6px; min-height: 16px; }
+    .feature .status.error { color: var(--danger); }
+    .feature .status.ok { color: var(--success); }
+    .switch { position: relative; width: 40px; height: 22px; flex-shrink: 0; margin-top: 2px; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; inset: 0; cursor: pointer;
+      background: rgba(0, 0, 0, 0.4); border: 1px solid var(--border);
+      border-radius: 22px; transition: 160ms;
+    }
+    .slider::before {
+      content: ""; position: absolute; height: 16px; width: 16px; left: 2px; top: 2px;
+      background: var(--text-muted); border-radius: 50%; transition: 160ms;
+    }
+    .switch input:checked + .slider { background: var(--accent); border-color: var(--accent); }
+    .switch input:checked + .slider::before { transform: translateX(18px); background: var(--accent-contrast); }
+    /* While a toggle is waiting on IPC we still set input.disabled to
+       block double-clicks, but the cursor signals "working" (progress)
+       — not "error" (not-allowed) — and colors stay true (no dimming). */
+    .switch input:disabled + .slider { cursor: progress; }
+    .nav { display: flex; justify-content: space-between; gap: 12px; margin-top: auto; padding-top: 28px; }
+    /* Welcome has no Back button — center the single primary action
+       instead of pinning it to the right edge. Other steps keep the
+       space-between layout so Back/Next sit on opposite sides. */
+    .welcome .nav { justify-content: center; }
+    button {
+      font: inherit; font-size: 14px; font-weight: 500;
+      padding: 9px 18px; border-radius: 8px; border: 1px solid var(--border);
+      background: transparent; color: var(--text); cursor: pointer; transition: 120ms;
+    }
+    button:hover { border-color: var(--border-strong); }
+    button.primary { background: var(--accent); color: var(--accent-contrast); border-color: var(--accent); }
+    button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .logo {
+      width: 180px; height: 180px; margin: 0 auto 2px;
+      display: flex; align-items: center; justify-content: center;
+      filter: drop-shadow(0 16px 40px rgba(224, 176, 255, 0.42));
+    }
+    .logo img { width: 100%; height: 100%; object-fit: contain; }
+    .welcome { text-align: center; }
+    .welcome h1 { font-size: 26px; margin-bottom: 6px; }
+    .welcome p.lead { max-width: 420px; margin-left: auto; margin-right: auto; }
+    .welcome ul { text-align: left; max-width: 360px; margin: 18px auto 0; padding: 0; list-style: none; }
+    .welcome li { padding: 6px 0; font-size: 13px; color: var(--text-muted); }
+    .welcome li::before { content: "✓"; color: var(--accent); margin-right: 8px; font-weight: 600; }
+    .finish { text-align: center; padding-top: 20px; }
+    .finish .big { font-size: 44px; margin-bottom: 8px; }
+    .state-msg { color: var(--text-muted); padding: 20px; text-align: center; }
+    .state-msg.error { color: var(--danger); }
+  </style>
+</head>
+<body>
+  <header></header>
+  <main>
+    <div class="stepper">
+      <span class="dot active" data-step="0"></span>
+      <span class="dot" data-step="1"></span>
+      <span class="dot" data-step="2"></span>
+    </div>
+    <div class="card">
+      <!-- Step 0: Welcome -->
+      <section class="step welcome active" data-step="0">
+        <div class="logo"><img src="/immorterm-logo.png" alt="ImmorTerm" /></div>
+        <h1>Welcome to ImmorTerm</h1>
+        <p class="lead">Persistent terminal sessions that survive crashes, restarts, and context switches.</p>
+        <ul>
+          <li>Sessions live across reboots</li>
+          <li>GPU-accelerated rendering</li>
+          <li>Optional AI memory + MCP gateway</li>
+        </ul>
+        <div class="nav">
+          <button class="primary" data-action="next">Get started</button>
+        </div>
+      </section>
+
+      <!-- Step 1: Features opt-in -->
+      <section class="step" data-step="1">
+        <h1>Optional features</h1>
+        <p class="lead">ImmorTerm works great on its own. These components are downloaded on demand — turn on what you want.</p>
+        <div class="scroll" id="features-list">
+          <div class="state-msg">Loading…</div>
+        </div>
+        <div class="nav">
+          <button data-action="back">Back</button>
+          <button class="primary" data-action="next">Continue</button>
+        </div>
+      </section>
+
+      <!-- Step 2: Finish -->
+      <section class="step finish" data-step="2">
+        <div class="big">🎉</div>
+        <h1>You're all set</h1>
+        <p class="lead">ImmorTerm is ready. Your first terminal window will open when you click Finish.</p>
+        <p style="color: var(--text-muted); font-size: 12px; margin-top: 20px;">
+          You can change these choices later in Preferences.
+        </p>
+        <div class="nav">
+          <button data-action="back">Back</button>
+          <button class="primary" data-action="finish">Finish</button>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    /*
+     * Wizard state machine. Tauri IPC lives on window.__TAURI__.core.invoke.
+     * Steps:
+     *   0 Welcome     — no IPC
+     *   1 Features    — cmd_list_optional_sidecars, cmd_toggle_sidecar, cmd_install_sidecar
+     *   2 Finish      — cmd_complete_wizard (triggers main-window spawn in Rust)
+     *
+     * Everything is built via createElement + textContent so there's no
+     * chance of injecting HTML from the manifest or IPC responses — all
+     * strings are attribute or text values only.
+     */
+    const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
+
+    // Window drag — WKWebView remote URLs ignore -webkit-app-region,
+    // so we call Tauri's Window.startDragging() on mousedown over the
+    // header strip. Same pattern the tab-bar in tab-shell.html uses.
+    (function() {
+      const header = document.querySelector('header');
+      if (!header || !window.__TAURI__ || !window.__TAURI__.window) return;
+      header.addEventListener('mousedown', (ev) => {
+        if (ev.button !== 0) return;
+        const win = window.__TAURI__.window.getCurrentWindow
+          ? window.__TAURI__.window.getCurrentWindow()
+          : window.__TAURI__.window.appWindow;
+        if (win && win.startDragging) win.startDragging().catch(() => {});
+      });
+    })();
+
+    const steps = document.querySelectorAll('.step');
+    const dots = document.querySelectorAll('.stepper .dot');
+    let current = 0;
+    let featuresLoaded = false;
+
+    function go(step) {
+      current = Math.max(0, Math.min(steps.length - 1, step));
+      steps.forEach((s, i) => s.classList.toggle('active', i === current));
+      dots.forEach((d, i) => {
+        d.classList.toggle('active', i === current);
+        d.classList.toggle('done', i < current);
+      });
+      if (current === 1 && !featuresLoaded) loadFeatures();
+    }
+
+    document.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('[data-action]');
+      if (!btn) return;
+      const action = btn.dataset.action;
+      if (action === 'next') go(current + 1);
+      else if (action === 'back') go(current - 1);
+      else if (action === 'finish') finish(btn);
+    });
+
+    function el(tag, className, textOrChildren) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (typeof textOrChildren === 'string') {
+        node.textContent = textOrChildren;
+      } else if (Array.isArray(textOrChildren)) {
+        for (const c of textOrChildren) if (c) node.appendChild(c);
+      }
+      return node;
+    }
+
+    function buildFeatureRow(f) {
+      const item = el('div', 'feature');
+      item.dataset.id = f.id;
+
+      // Switch + hidden input.
+      const sw = el('label', 'switch');
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.checked = !!f.enabled;
+      if (!f.available_for_host) input.disabled = true;
+      const slider = el('span', 'slider');
+      sw.appendChild(input);
+      sw.appendChild(slider);
+
+      // Meta column.
+      const size = el('span', 'size', `~${f.size_mb_approx} MB`);
+      const nameRow = el('div', 'name', [document.createTextNode(f.display_name + ' '), size]);
+      const desc = el('div', 'desc', f.description);
+      const status = el('div', 'status');
+      if (!f.available_for_host) {
+        status.textContent = 'Not available for this platform yet.';
+      } else if (f.installed_on_disk) {
+        status.classList.add('ok');
+        status.textContent = `Installed (${f.installed_version})`;
+      }
+      const meta = el('div', 'meta', [nameRow, desc, status]);
+
+      input.addEventListener('change', () => handleToggle(f.id, input, status));
+      item.appendChild(sw);
+      item.appendChild(meta);
+      return item;
+    }
+
+    async function loadFeatures() {
+      const host = document.getElementById('features-list');
+      try {
+        const list = await invoke('cmd_list_optional_sidecars');
+        host.replaceChildren();
+        if (!list || !list.length) {
+          host.appendChild(el('div', 'state-msg', 'No optional components available for your platform.'));
+          featuresLoaded = true;
+          return;
+        }
+        for (const f of list) host.appendChild(buildFeatureRow(f));
+        featuresLoaded = true;
+      } catch (e) {
+        host.replaceChildren();
+        host.appendChild(el('div', 'state-msg error', `Failed to load: ${String(e)}`));
+      }
+    }
+
+    async function handleToggle(id, input, status) {
+      const enabled = input.checked;
+      input.disabled = true;
+      try {
+        await invoke('cmd_toggle_sidecar', { id, enabled });
+        if (!enabled) {
+          status.className = 'status';
+          status.textContent = 'Disabled.';
+          input.disabled = false;
+          return;
+        }
+        status.className = 'status';
+        status.textContent = 'Downloading…';
+        try {
+          const version = await invoke('cmd_install_sidecar', { id });
+          status.className = 'status ok';
+          status.textContent = `Installed ${version}`;
+        } catch (installErr) {
+          const msg = String(installErr);
+          status.className = 'status';
+          if (msg.includes('no released artifact')) {
+            status.textContent = 'Coming soon — will auto-install after the next release.';
+          } else {
+            status.classList.add('error');
+            status.textContent = msg;
+          }
+        }
+      } catch (e) {
+        status.className = 'status error';
+        status.textContent = String(e);
+        input.checked = !enabled;
+      } finally {
+        input.disabled = false;
+      }
+    }
+
+    async function finish(btn) {
+      btn.disabled = true;
+      btn.textContent = 'Starting…';
+      try {
+        await invoke('cmd_complete_wizard');
+        // Rust side closes this window + spawns main, nothing else to do.
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = 'Finish';
+        alert('Failed to finish onboarding: ' + e);
+      }
+    }
+  </script>
+</body>
+</html>

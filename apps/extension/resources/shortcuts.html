@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>ImmorTerm · Keyboard Shortcuts</title>
+  <style>
+    /*
+     * Keyboard-shortcuts reference. Opened from Help → Keyboard
+     * Shortcuts (Cmd+/). Shares the wizard's dark-purple theme so the
+     * chrome feels continuous. Single flat page, no framework — all
+     * entries are DOM-built from the SHORTCUTS array so a future
+     * refactor can swap in the live KEYMAP from immorterm-shortcuts.js
+     * without rewriting the markup.
+     */
+    :root {
+      --bg: #170225;
+      --bg-card: rgba(45, 0, 77, 0.72);
+      --border: rgba(224, 176, 255, 0.24);
+      --border-strong: rgba(224, 176, 255, 0.5);
+      --text: #f5ebff;
+      --text-muted: rgba(245, 235, 255, 0.65);
+      --accent: #e0b0ff;
+      --accent-contrast: #2d004d;
+      --kbd-bg: rgba(0, 0, 0, 0.45);
+      --radius: 12px;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      height: 100%; margin: 0;
+      font-family: -apple-system, "SF Pro Display", "Segoe UI Variable", "Inter", system-ui, sans-serif;
+      font-size: 14px; color: var(--text);
+      background:
+        radial-gradient(800px 520px at 10% -10%, rgba(224,176,255,0.18), transparent 60%),
+        radial-gradient(600px 420px at 110% 110%, rgba(85,40,117,0.40), transparent 60%),
+        var(--bg);
+      overflow: hidden;
+      -webkit-user-select: none; user-select: none;
+    }
+    body { display: flex; flex-direction: column; }
+    header {
+      flex: 0 0 34px; cursor: grab;
+      display: flex; align-items: center; justify-content: center;
+      color: var(--text-muted); font-size: 12px; letter-spacing: 0.02em;
+    }
+    header:active { cursor: grabbing; }
+    main {
+      flex: 1; overflow-y: auto; padding: 8px 36px 24px;
+    }
+    main::-webkit-scrollbar { width: 6px; }
+    main::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    h1 {
+      font-size: 20px; margin: 0 0 4px; letter-spacing: -0.01em;
+    }
+    .subtitle { color: var(--text-muted); margin: 0 0 22px; font-size: 13px; }
+    .group {
+      margin-bottom: 20px;
+    }
+    .group-title {
+      font-size: 11px; font-weight: 600; color: var(--accent);
+      text-transform: uppercase; letter-spacing: 0.08em;
+      margin-bottom: 8px; padding-bottom: 4px;
+      border-bottom: 1px solid var(--border);
+    }
+    .row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 7px 4px; border-radius: 6px;
+    }
+    .row:hover { background: rgba(224, 176, 255, 0.06); }
+    .row .label { color: var(--text); }
+    .row .keys { display: flex; gap: 4px; }
+    kbd {
+      display: inline-block; min-width: 20px;
+      padding: 3px 7px;
+      font-family: -apple-system, system-ui, sans-serif;
+      font-size: 11px; font-weight: 600; line-height: 1;
+      color: var(--text);
+      background: var(--kbd-bg);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      text-align: center;
+    }
+    .plus {
+      color: var(--text-muted); font-size: 11px;
+      align-self: center; margin: 0 1px;
+    }
+  </style>
+</head>
+<body>
+  <header>ImmorTerm · Keyboard Shortcuts</header>
+  <main>
+    <h1>Keyboard Shortcuts</h1>
+    <p class="subtitle">Press <kbd>Cmd</kbd><span class="plus">+</span><kbd>/</kbd> any time to reopen this page.</p>
+    <div id="groups"></div>
+  </main>
+  <script>
+    // Tauri drag on header — WKWebView ignores -webkit-app-region
+    // for remote URLs, same workaround as the wizard.
+    (function() {
+      const hdr = document.querySelector('header');
+      if (!hdr || !window.__TAURI__ || !window.__TAURI__.window) return;
+      hdr.addEventListener('mousedown', (ev) => {
+        if (ev.button !== 0) return;
+        const win = window.__TAURI__.window.getCurrentWindow
+          ? window.__TAURI__.window.getCurrentWindow()
+          : window.__TAURI__.window.appWindow;
+        if (win && win.startDragging) win.startDragging().catch(() => {});
+      });
+    })();
+
+    // Single source of shortcuts. Keeps the spec human-readable so
+    // adding a new binding is one array entry + the Rust handler.
+    // `keys` accepts macOS-flavoured names; Cmd renders as ⌘, etc.
+    const SHORTCUTS = [
+      { group: 'Tabs & Windows', items: [
+        { keys: ['Cmd', 'T'],       label: 'New project tab (picker)' },
+        { keys: ['Cmd', 'Shift', 'T'], label: 'New plain terminal tab', soon: true },
+        { keys: ['Cmd', 'W'],       label: 'Close current tab (or window if last)' },
+        { keys: ['Cmd', 'N'],       label: 'New window' },
+        { keys: ['Ctrl', 'Shift', '←'], label: 'Previous tab' },
+        { keys: ['Ctrl', 'Shift', '→'], label: 'Next tab' },
+      ]},
+      { group: 'View & Zoom', items: [
+        { keys: ['Cmd', 'R'],  label: 'Reload current tab' },
+        { keys: ['Cmd', '+'], label: 'Zoom in' },
+        { keys: ['Cmd', '-'],  label: 'Zoom out' },
+        { keys: ['Cmd', '0'],  label: 'Actual size (reset zoom)' },
+      ]},
+      { group: 'Inside a Project Tab', items: [
+        { keys: ['Ctrl', 'Shift', 'A'], label: 'New session in current project' },
+        { keys: ['Shift', '↑'], label: 'Previous session' },
+        { keys: ['Shift', '↓'], label: 'Next session' },
+      ]},
+      { group: 'Terminal Recovery', items: [
+        { keys: ['Ctrl', 'Shift', 'R'], label: 'Hard rerender — wipes local scrollback, then rebuilds visible grid from daemon and kicks the running TUI to redraw. Use when the terminal looks corrupted (duplicate banners, garbled scrollback). Cmd+Shift+R is reserved by Chromium for Force Reload and would never reach us.' },
+        { keys: ['Cmd', 'Shift', 'Option', 'R'], label: 'Soft rerender — rebuilds visible grid + kicks TUI to redraw, but preserves local scrollback. Use when only the visible area looks wrong and you want to keep local history.' },
+      ]},
+      { group: 'Selection & Clipboard', items: [
+        { keys: ['Cmd', 'A'], label: 'Select all input (Claude Code prompt)' },
+        { keys: ['Cmd', 'C'], label: 'Copy selection (selection stays — copy again to confirm)' },
+        { keys: ['Cmd', 'V'], label: 'Paste — text inline; image as [Image #N] (small/medium screenshots)' },
+        { keys: ['Cmd', 'Option', 'V'], label: 'Paste image as file path — Claude reads it lazily; use for large screenshots that hit the 2000px many-image cap' },
+        { keys: ['Cmd', 'Z'], label: 'Undo last paste (text, image, or path) — only while the pasted content is still untouched in the prompt. Press again to undo earlier pastes (history of 10) when nothing was typed between them. Ctrl+Z on Windows/Linux; falls through to the shell (SIGTSTP) when there is nothing to undo.' },
+      ]},
+      { group: 'Comments on Output', items: [
+        { keys: ['Cmd', 'E'], label: 'With selection — open comment editor on the selected text' },
+        { keys: ['Cmd', 'E'], label: 'No selection (Claude active) — auto-detect bullets and walk through commenting on each' },
+        { keys: ['Cmd', 'Option', 'E'], label: 'With selection — auto-detect bullets only inside the selected rows, then walk through them. Without selection — alias for Cmd+E auto-detect.' },
+        { keys: ['Cmd', 'Enter'], label: 'Save current comment & advance to next bullet (or send all staged comments to Claude)' },
+        { keys: ['Cmd', 'E'], label: 'Inside the comment wizard — skip this bullet and advance to the next without staging a comment' },
+        { keys: ['Esc'], label: 'Cancel comment editor / wizard (rolls back wizard-staged comments)' },
+      ]},
+      { group: 'Tasks from Output', items: [
+        { keys: ['Cmd', 'D'], label: 'With selection — parse the selected lines for bullets and open the task wizard with the matches (or one task from the whole selection if none found)' },
+        { keys: ['Cmd', 'D'], label: 'No selection (Claude active) — auto-detect bullets in the most recent assistant turn and open the task picker' },
+        { keys: ['Cmd', 'Option', 'D'], label: 'With selection — auto-detect bullets only inside the selected rows, then open the task picker. Without selection — alias for Cmd+D auto-detect.' },
+      ]},
+      { group: 'Explore Selection', items: [
+        { keys: ['Ctrl', 'Shift', 'F'], label: 'With selection — open the Explore popup (Search Google inline / Explain)' },
+        { keys: ['Ctrl', 'Shift', 'F'], label: 'Press again — stream definitions from Free Dictionary, Wikipedia, DuckDuckGo, and Urban Dictionary as drawers (each appears as it resolves)' },
+        { keys: ['Ctrl', 'Shift', 'F'], label: 'Press a third time — bypass the free sources and ask Claude Haiku directly' },
+      ]},
+      { group: 'Help', items: [
+        { keys: ['Cmd', '/'], label: 'Keyboard shortcuts (this page)' },
+      ]},
+    ];
+
+    const KEY_SYMBOL = {
+      Cmd: '⌘', Shift: '⇧', Ctrl: '⌃', Alt: '⌥', Option: '⌥',
+      '↑': '↑', '↓': '↓', '←': '←', '→': '→',
+      Enter: '↵', Esc: 'Esc', Tab: '⇥', Space: 'Space',
+    };
+
+    function kbdEl(key) {
+      const el = document.createElement('kbd');
+      el.textContent = KEY_SYMBOL[key] || key;
+      return el;
+    }
+
+    function renderItem(item) {
+      const row = document.createElement('div');
+      row.className = 'row';
+      const label = document.createElement('span');
+      label.className = 'label';
+      label.textContent = item.label + (item.soon ? '  ·  coming soon' : '');
+      if (item.soon) label.style.color = 'var(--text-muted)';
+      const keys = document.createElement('span');
+      keys.className = 'keys';
+      item.keys.forEach((k, i) => {
+        if (i > 0) {
+          const plus = document.createElement('span');
+          plus.className = 'plus';
+          plus.textContent = '+';
+          keys.appendChild(plus);
+        }
+        keys.appendChild(kbdEl(k));
+      });
+      row.appendChild(label);
+      row.appendChild(keys);
+      return row;
+    }
+
+    function renderGroup(g) {
+      const el = document.createElement('section');
+      el.className = 'group';
+      const title = document.createElement('div');
+      title.className = 'group-title';
+      title.textContent = g.group;
+      el.appendChild(title);
+      g.items.forEach(it => el.appendChild(renderItem(it)));
+      return el;
+    }
+
+    const host = document.getElementById('groups');
+    SHORTCUTS.forEach(g => host.appendChild(renderGroup(g)));
+
+    // Esc closes the window — matches Command+W for the muscle memory,
+    // and keyboard-first users expect cheat sheets to be throwaway.
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && window.__TAURI__ && window.__TAURI__.window) {
+        const win = window.__TAURI__.window.getCurrentWindow
+          ? window.__TAURI__.window.getCurrentWindow()
+          : window.__TAURI__.window.appWindow;
+        if (win && win.close) win.close().catch(() => {});
+      }
+    });
+  </script>
+</body>
+</html>

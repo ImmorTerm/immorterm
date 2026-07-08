@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# claude-session-map - Interactive session mapper
+# Correlates each terminal to its Claude session using modification time analysis
+set -euo pipefail
+
+PROJECT_DIR="${SCREEN_PROJECT_DIR:-$(pwd)}"
+JSON="$PROJECT_DIR/.immorterm/restore-terminals.json"
+LOGS_DIR="$PROJECT_DIR/.immorterm/terminals/logs"
+HISTORY="$HOME/.claude/history.jsonl"
+
+project_lower=$(basename "$PROJECT_DIR" | tr '[:upper:]' '[:lower:]')
+CLAUDE_PROJECT_DIR="$HOME/.claude/projects/${PROJECT_DIR//\//-}"
+
+echo "=== Claude Session Mapper ==="
+echo "Project: $PROJECT_DIR"
+echo ""
+
+# Get all window IDs
+window_ids=$(jq -r '.terminals[]?.splitTerminals[]?.windowId // empty' "$JSON" 2>/dev/null)
+
+if [[ -z "$window_ids" ]]; then
+  echo "No terminals found in $JSON"
+  exit 1
+fi
+
+# Get recent unique sessions from history.jsonl
+echo "=== Active Sessions ==="
+recent_sessions=$(tail -200 "$HISTORY" 2>/dev/null | \
+  jq -r --arg proj "$PROJECT_DIR" 'select(.project == $proj) | .sessionId' 2>/dev/null | \
+  sort -u)
+
+session_count=$(echo "$recent_sessions" | grep -c . || echo 0)
+echo "Found $session_count unique sessions in recent history"
+
+# Show last activity for each session
+for sid in $recent_sessions; do
+  last_entry=$(tail -200 "$HISTORY" | jq -c --arg proj "$PROJECT_DIR" --arg sid "$sid" \
+    'select(.project == $proj and .sessionId == $sid)' 2>/dev/null | tail -1)
+
+  ts=$(echo "$last_entry" | jq -r '.timestamp // empty' 2>/dev/null)
+  display=$(echo "$last_entry" | jq -r '.display // empty' 2>/dev/null | head -c 50 | tr '\n' ' ')
+
+  if [[ -n "$ts" ]]; then
+    ts_sec=$((ts / 1000))
+    ts_date=$(date -r "$ts_sec" "+%H:%M:%S" 2>/dev/null || echo "?")
+    echo "  ${sid:0:8}... @ $ts_date: \"${display}...\""
+  fi
+done
+echo ""
+
+# Correlate based on modification times
+echo "=== Terminal to Session Correlation ==="
+
+results_file=$(mktemp)
+trap "rm -f $results_file" EXIT
+
+for wid in $window_ids; do
+  log_file="$LOGS_DIR/${project_lower}-${wid}.log"
+  name=$(jq -r --arg wid "$wid" '.terminals[]?.splitTerminals[]? | select(.windowId == $wid) | .name // empty' "$JSON" 2>/dev/null)
+
+  if [[ ! -f "$log_file" ]]; then
+    echo "$name ($wid): No log file"
+    continue
+  fi
+
+  log_mtime=$(stat -f %m "$log_file" 2>/dev/null || echo 0)
+  log_date=$(date -r "$log_mtime" "+%H:%M:%S" 2>/dev/null || echo "?")
+
+  best_sid=""
+  best_diff=999999999
+
+  for sid in $recent_sessions; do
+    sfile="$CLAUDE_PROJECT_DIR/${sid}.jsonl"
+    [[ ! -f "$sfile" ]] && continue
+
+    sfile_mtime=$(stat -f %m "$sfile" 2>/dev/null || echo 0)
+
+    diff=$((log_mtime - sfile_mtime))
+    [[ $diff -lt 0 ]] && diff=$((-diff))
+
+    if [[ $diff -lt $best_diff ]]; then
+      best_diff=$diff
+      best_sid="$sid"
+    fi
+  done
+
+  confidence="HIGH"
+  symbol="✅"
+  [[ $best_diff -gt 60 ]] && confidence="MEDIUM" && symbol="⚠️ "
+  [[ $best_diff -gt 300 ]] && confidence="LOW" && symbol="❌"
+
+  echo "$name ($wid): ${best_sid:0:8}... (diff: ${best_diff}s) [$confidence]"
+  echo "$wid:$best_sid:$best_diff" >> "$results_file"
+done
+echo ""
+
+# Update JSON for high-confidence matches
+echo "=== Updating restore-terminals.json ==="
+update_count=0
+skip_count=0
+
+while IFS=: read -r wid sid diff; do
+  [[ -z "$wid" || -z "$sid" ]] && continue
+
+  name=$(jq -r --arg wid "$wid" '.terminals[]?.splitTerminals[]? | select(.windowId == $wid) | .name // empty' "$JSON" 2>/dev/null)
+
+  # Only update high confidence (< 120s diff)
+  if [[ $diff -lt 120 ]]; then
+    current=$(jq -r --arg wid "$wid" \
+      '.terminals[]?.splitTerminals[]? | select(.windowId == $wid) | .claudeSessionId // empty' \
+      "$JSON" 2>/dev/null || true)
+
+    if [[ "$current" != "$sid" ]]; then
+      tmp=$(mktemp)
+      if jq --arg wid "$wid" --arg sid "$sid" '
+        .terminals = [.terminals[]? |
+          .splitTerminals = [.splitTerminals[]? |
+            if .windowId == $wid then .claudeSessionId = $sid else . end
+          ]
+        ]
+      ' "$JSON" > "$tmp"; then
+        mv "$tmp" "$JSON"
+        echo "  ✅ $name → ${sid:0:8}..."
+        ((update_count++)) || true
+      else
+        rm -f "$tmp"
+        echo "  ❌ Failed to update $name"
+      fi
+    else
+      echo "  ✓ $name already set to ${sid:0:8}..."
+    fi
+  else
+    echo "  ⚠️  $name - low confidence (${diff}s), skipped"
+    ((skip_count++)) || true
+  fi
+done < "$results_file"
+
+echo ""
+echo "=== Summary ==="
+echo "Updated: $update_count | Skipped: $skip_count"
+echo ""
+echo "To improve accuracy: Type in each terminal, wait a moment, then run this again."

@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# claude-session-capture - Capture Claude session IDs from all terminals
+# Sends /status to each Claude instance and extracts Session ID from logs
+set -euo pipefail
+
+PROJECT_DIR="${SCREEN_PROJECT_DIR:-$(pwd)}"
+JSON="$PROJECT_DIR/.immorterm/restore-terminals.json"
+LOGS_DIR="$PROJECT_DIR/.immorterm/terminals/logs"
+
+echo "=== Claude Session Capture ==="
+echo "Project: $PROJECT_DIR"
+echo ""
+
+# Get project prefix for session matching
+project_lower=$(basename "$PROJECT_DIR" | tr '[:upper:]' '[:lower:]')
+
+# Use configured screen binary (immorterm by default)
+SCREEN="${IMMORTERM_SCREEN_BINARY:-immorterm}"
+
+# Get all windowIds from JSON
+window_ids=$(jq -r '.terminals[]?.splitTerminals[]?.windowId // empty' "$JSON" 2>/dev/null || true)
+
+if [[ -z "$window_ids" ]]; then
+  echo "No terminals found in $JSON"
+  exit 1
+fi
+
+# For each terminal, send /status and capture session ID
+while IFS= read -r window_id; do
+  [[ -z "$window_id" ]] && continue
+
+  name=$(jq -r --arg wid "$window_id" '.terminals[]?.splitTerminals[]? | select(.windowId == $wid) | .name // empty' "$JSON" 2>/dev/null)
+  session_name="${project_lower}-${window_id}"
+  log_file="$LOGS_DIR/${session_name}.log"
+
+  echo -n "[$name] ($window_id): "
+
+  # Check if screen session exists and is attached
+  screen_info=$($SCREEN -ls 2>/dev/null | grep "$session_name" | grep "Attached" | head -1 || true)
+  if [[ -z "$screen_info" ]]; then
+    echo "screen not attached"
+    continue
+  fi
+
+  # Get the full session name with PID
+  full_session=$(echo "$screen_info" | awk '{print $1}')
+
+  # Check if Claude is running in this screen (use ps instead of pgrep for macOS compatibility)
+  screen_pid=$(echo "$full_session" | cut -d. -f1)
+
+  # Find claude process that's a descendant of this screen
+  # Process tree: screen -> zsh -> claude
+  claude_pid=$(ps -eo pid,ppid,comm 2>/dev/null | awk -v spid="$screen_pid" '
+    BEGIN { found="" }
+    { pids[$1]=$2; comms[$1]=$3 }
+    END {
+      # Find zsh child of screen
+      for (p in pids) {
+        if (pids[p] == spid) {
+          zsh_pid = p
+          # Find claude child of zsh
+          for (c in pids) {
+            if (pids[c] == zsh_pid && comms[c] == "claude") {
+              print c
+              exit
+            }
+          }
+        }
+      }
+    }
+  ')
+
+  if [[ -z "$claude_pid" ]]; then
+    echo "no Claude running"
+    continue
+  fi
+
+  # Get current log file size to know where to start looking
+  log_size_before=$(wc -c < "$log_file" 2>/dev/null || echo "0")
+
+  # Send /status command to the screen session
+  $SCREEN -S "$full_session" -X stuff "/status\n"
+
+  # Wait for output to be logged
+  sleep 3
+
+  # Extract Session ID from new log content
+  session_id=$(tail -c +$((log_size_before + 1)) "$log_file" 2>/dev/null | \
+    grep -oE "Session ID:[^a-f0-9]*([a-f0-9-]{36})" | \
+    grep -oE "[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}" | \
+    head -1 || true)
+
+  if [[ -z "$session_id" ]]; then
+    # Try looking at the whole log file as fallback
+    session_id=$(grep -oE "Session ID:[^a-f0-9]*([a-f0-9-]{36})" "$log_file" 2>/dev/null | \
+      grep -oE "[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}" | \
+      tail -1 || true)
+  fi
+
+  if [[ -n "$session_id" ]]; then
+    echo "$session_id"
+
+    # Update JSON with session ID
+    tmp=$(mktemp)
+    if jq --arg wid "$window_id" --arg sid "$session_id" '
+      .terminals = [.terminals[]? |
+        .splitTerminals = [.splitTerminals[]? |
+          if .windowId == $wid then .claudeSessionId = $sid else . end
+        ]
+      ]
+    ' "$JSON" > "$tmp"; then
+      mv "$tmp" "$JSON"
+      echo "  ✅ Saved to JSON"
+    else
+      rm -f "$tmp"
+      echo "  ❌ Failed to update JSON"
+    fi
+  else
+    echo "could not extract session ID"
+  fi
+
+done <<< "$window_ids"
+
+echo ""
+echo "=== Done ==="

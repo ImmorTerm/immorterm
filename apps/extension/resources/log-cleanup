@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# ImmorTerm - log-cleanup
+# Manages log file size to stay under MAX_SIZE_MB
+# Removes oldest logs (FIFO) when limit exceeded
+set -euo pipefail
+
+MAX_SIZE_MB=300
+MAX_SIZE_BYTES=$((MAX_SIZE_MB * 1024 * 1024))
+
+# Scripts are global ($HOME/.immorterm/scripts/), get project dir from environment
+PROJECT_DIR="${SCREEN_PROJECT_DIR:-$PWD}"
+cd "$PROJECT_DIR"
+LOGS_DIR="$PROJECT_DIR/.immorterm/terminals/logs"
+
+[[ -d "$LOGS_DIR" ]] || exit 0
+
+# Get total size of logs directory (macOS compatible)
+get_total_size() {
+  # Use find + stat for accurate byte count on macOS
+  find "$LOGS_DIR" -name "*.log" -type f -exec stat -f%z {} + 2>/dev/null | awk '{sum+=$1} END {print sum+0}'
+}
+
+# Get oldest log file (by modification time)
+get_oldest_log() {
+  ls -1t "$LOGS_DIR"/*.log 2>/dev/null | tail -1
+}
+
+# Remove oldest logs until under limit
+cleanup_logs() {
+  local total_size
+  total_size=$(get_total_size)
+
+  while [[ $total_size -gt $MAX_SIZE_BYTES ]]; do
+    local oldest
+    oldest=$(get_oldest_log)
+
+    if [[ -z "$oldest" ]] || [[ ! -f "$oldest" ]]; then
+      break
+    fi
+
+    local file_size
+    file_size=$(stat -f%z "$oldest" 2>/dev/null || echo 0)
+
+    rm -f "$oldest"
+    echo "Removed old log: $(basename "$oldest") (${file_size} bytes)"
+
+    total_size=$(get_total_size)
+  done
+}
+
+# Run cleanup
+cleanup_logs
+
+# Report current size
+current_mb=$(($(get_total_size) / 1024 / 1024))
+echo "Logs directory: ${current_mb}MB / ${MAX_SIZE_MB}MB"

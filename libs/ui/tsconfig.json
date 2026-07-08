@@ -1,0 +1,12 @@
+{
+	"extends": "../../tsconfig.base.json",
+	"compilerOptions": {
+		"jsx": "react-jsx",
+		"noEmit": true,
+		"paths": {
+			"@immorterm/menu-data": ["../menu-data/src"],
+			"@immorterm/tier-config": ["../tier-config/src"]
+		}
+	},
+	"include": ["src"]
+}

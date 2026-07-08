@@ -1,0 +1,267 @@
+---
+title: Code history
+description: Code changes, git commits, file checkpoints, and terminal logs.
+---
+
+Four capture streams feed code archaeology: per-edit code changes, git
+commits, pre-edit file snapshots, and terminal transcripts.
+
+## Code changes
+
+### POST /api/v1/code-changes
+
+Store one edit event (called by the post-edit hook). Body:
+
+| Field | Type | Notes |
+|---|---|---|
+| `file_path` | string | Required. |
+| `change_type` | string | Required. Alias accepted: `file_action`. |
+| `user_id` | string | Defaults to resolved identity. |
+| `session_id`, `immorterm_id` | string | Optional. |
+| `diff_content` | string | Optional diff text. |
+| `line_count` | number | Optional; computed as `lines_added + lines_removed` when omitted. |
+| `lines_added`, `lines_removed` | number | Optional, default 0. |
+| `tool_name` | string | Optional (e.g. `Edit`, `Write`). |
+| `branch` | string | Optional git branch, feeds branch-aware search. |
+| `id`, `before_hash`, `after_hash`, `timestamp` | — | Accepted from hooks, not stored separately. |
+
+```bash
+curl -X POST http://localhost:8765/api/v1/code-changes \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"you@example.com","file_path":"src/auth.ts","change_type":"edit","lines_added":12,"lines_removed":3}'
+```
+
+Response: `{ "status": "stored", "id": "…" }`.
+
+### GET /api/v1/code-changes
+
+List changes. Alias: `GET /api/v1/code-changes/list`. Query params:
+`user_id`, `session_id`, `immorterm_id`, `file_path`, `hours_ago`
+(default 24), `start_date` (takes priority over `hours_ago`), `end_date`,
+`limit` (default 50). On free, `hours_ago`/`start_date` are clamped to the
+retention window.
+
+```bash
+curl 'http://localhost:8765/api/v1/code-changes?file_path=src/auth.ts&hours_ago=24'
+```
+
+Response: `{ "changes": […], "count": N, "tier": "free", "retention_window": "72h" }`
+(the last field only on free).
+
+### GET /api/v1/code-changes/window
+
+Changes within an exact `[start, end]` time range — used by the digest
+hook. Query params: `start` and `end` (ISO-8601, both required), plus at
+least one of `session_id` / `immorterm_id`; `user_id` optional. Output uses
+`file_action` (not `change_type`) for Python-API compatibility.
+
+```bash
+curl 'http://localhost:8765/api/v1/code-changes/window?immorterm_id=IMMORTERM_ID&start=2026-07-07T00:00:00Z&end=2026-07-07T12:00:00Z'
+```
+
+Response: `{ "changes": [{ "id", "file_path", "tool_name", "file_action", "lines_added", "lines_removed", "timestamp" }], "count": N }`.
+
+### GET /api/v1/code-changes/diff
+
+Retrieve a stored diff. Query params: `user_id`, `change_id`, `session_id`,
+`file_path`. Returns the same JSON as the `get_code_diff` MCP tool.
+
+```bash
+curl 'http://localhost:8765/api/v1/code-changes/diff?change_id=CHANGE_ID'
+```
+
+### GET /api/v1/code-changes/explain
+
+Why a line looks the way it does. Query params: `user_id`, `file_path`
+(required), `line_number`, `hours_ago`. Returns the same JSON as the
+`explain_change` MCP tool.
+
+```bash
+curl 'http://localhost:8765/api/v1/code-changes/explain?file_path=src/auth.ts&line_number=42'
+```
+
+## Git commits
+
+### POST /api/v1/git-commits
+
+Store a commit (called by the post-commit hook). Inserts are
+`INSERT OR IGNORE` keyed on `commit_hash`. Body:
+
+| Field | Type | Notes |
+|---|---|---|
+| `commit_hash` | string | Required; used as the row id. |
+| `message` | string | Required. Alias: `commit_message`. |
+| `user_id` | string | Defaults to resolved identity. |
+| `session_id`, `immorterm_id`, `author`, `branch` | string | Optional. |
+| `files_changed` | any | Optional; stored as JSON string. |
+| `files_count` | number | Optional (metadata). |
+| `insertions` / `deletions` | number | Default 0. Aliases: `lines_added` / `lines_removed`. |
+| `is_merge` | number | Optional 0/1 (metadata). |
+| `parent_hashes`, `contributing_sessions`, `contributing_immorterm_ids` | — | Optional (metadata). |
+| `timestamp` | string | Optional; server time when omitted. |
+
+```bash
+curl -X POST http://localhost:8765/api/v1/git-commits \
+  -H 'Content-Type: application/json' \
+  -d '{"commit_hash":"abc123","message":"fix: reap ps child","branch":"main","insertions":10,"deletions":2}'
+```
+
+Response: `{ "status": "stored", "id": "abc123" }`.
+
+### GET /api/v1/git-commits/list
+
+Query params: `user_id`, `session_id`, `immorterm_id`, `branch`,
+`hours_ago` (default 24), `limit` (default 20), `start_date`, `end_date`.
+Returns the same JSON as the `list_git_commits` MCP tool.
+
+```bash
+curl 'http://localhost:8765/api/v1/git-commits/list?branch=main&hours_ago=168'
+```
+
+## File checkpoints
+
+Pre-edit snapshots of files, gzipped in SQLite — the raw material for
+reconstructing or reverting a session's edits.
+
+### POST /api/v1/file-checkpoints
+
+Body:
+
+| Field | Type | Notes |
+|---|---|---|
+| `file_path` | string | Required. |
+| `user_id` | string | Defaults to resolved identity. |
+| `checkpoint_type` | string | Default `pre_edit`. Alias: `change_type`. |
+| `session_id`, `immorterm_id` | string | Optional. |
+| `content` | string | Plain text; the server gzips it. |
+| `content_base64` | string | Base64 of already-gzipped bytes (hook path); takes priority over `content`. |
+| `git_ref` | string | Optional lightweight ref instead of a blob. |
+
+Dedup rule: only the first checkpoint per `(user, file, session)` is
+stored; repeats return `{ "status": "deduped", "action": "skipped", "file_path" }`.
+
+```bash
+curl -X POST http://localhost:8765/api/v1/file-checkpoints \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"you@example.com","file_path":"src/auth.ts","session_id":"SESSION_ID","content":"…file body…"}'
+```
+
+Response: `{ "status": "stored", "action": "stored", "file_path": "…" }`.
+
+### GET /api/v1/file-checkpoints/query
+
+List checkpoints for a file. Query params: `user_id`, `file_path`
+(required), `session_id`.
+
+```bash
+curl 'http://localhost:8765/api/v1/file-checkpoints/query?file_path=src/auth.ts'
+```
+
+Response: `{ "checkpoints": [{ "session_id", "checkpoint_type", "git_ref", "created_at" }], "count": N }`.
+
+### POST /api/v1/file-checkpoints/dedup
+
+Post-commit blob compaction. When `session_id` + `git_ref` are provided and
+a blob exists, the ~4KB gzip is swapped for the ~50-byte git ref
+(`checkpoint_type` becomes `git_ref`) and the response is
+`{ "exists": true, "should_store": false, "action": "deduped" }`. Otherwise
+it degrades to an existence check: `{ "exists", "should_store" }`. Body:
+`{ user_id?, file_path, session_id?, git_ref? }`.
+
+```bash
+curl -X POST http://localhost:8765/api/v1/file-checkpoints/dedup \
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"src/auth.ts","session_id":"SESSION_ID","git_ref":"abc123:src/auth.ts"}'
+```
+
+### GET /api/v1/file-checkpoints/reconstruct
+
+Rebuild a file's content from its checkpoint. Query params: `user_id`,
+`file_path` (required), `session_id`. Returns the same JSON as the
+`reconstruct_file` MCP tool.
+
+```bash
+curl 'http://localhost:8765/api/v1/file-checkpoints/reconstruct?file_path=src/auth.ts&session_id=SESSION_ID'
+```
+
+### POST /api/v1/file-checkpoints/revert
+
+Revert a session's file changes. Body:
+`{ user_id?, session_id?, immorterm_id?, dry_run? }` — `dry_run` defaults
+to **true**, so nothing is written until you explicitly pass `false`.
+Returns the same JSON as the `revert_session_changes` MCP tool.
+
+```bash
+curl -X POST http://localhost:8765/api/v1/file-checkpoints/revert \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"SESSION_ID","dry_run":true}'
+```
+
+### GET /api/v1/file-checkpoints/versions
+
+Version history for a file. Query params: `user_id`, `file_path`
+(required), `hours_ago` (default 168), `immorterm_id`. Returns the same
+JSON as the `list_file_versions` MCP tool.
+
+```bash
+curl 'http://localhost:8765/api/v1/file-checkpoints/versions?file_path=src/auth.ts'
+```
+
+## Terminal logs
+
+### POST /api/v1/terminal-logs
+
+Store one log event. Body:
+`{ user_id?, session_id?, event_type, content?, metadata? }` —
+`event_type` required.
+
+```bash
+curl -X POST http://localhost:8765/api/v1/terminal-logs \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"SESSION_ID","event_type":"user_prompt","content":"fix the build"}'
+```
+
+Response: `{ "status": "stored" }`.
+
+### POST /api/v1/terminal-logs/batch
+
+Body: `{ user_id?, logs: [{ session_id?, event_type, content?, metadata? }] }`.
+Response: `{ "status": "stored", "count": N }` (rows that fail to insert are
+skipped, not fatal).
+
+```bash
+curl -X POST http://localhost:8765/api/v1/terminal-logs/batch \
+  -H 'Content-Type: application/json' \
+  -d '{"logs":[{"event_type":"assistant_output","content":"…"}]}'
+```
+
+### GET /api/v1/terminal-logs/list
+
+Query params: `user_id`, `session_name`, `immorterm_id`, `event_type`,
+`ai_tool`, `hours_ago` (default 24), `limit` (default 50), `start_date`,
+`end_date`. Returns the same JSON as the `list_terminal_logs` MCP tool.
+
+```bash
+curl 'http://localhost:8765/api/v1/terminal-logs/list?immorterm_id=IMMORTERM_ID&hours_ago=4'
+```
+
+### GET /api/v1/terminal-logs/search
+
+Full-text search over logs. Query params: `query` (required) plus the same
+filters as `list`. Returns the same JSON as the `search_terminal_logs` MCP
+tool.
+
+```bash
+curl 'http://localhost:8765/api/v1/terminal-logs/search?query=EADDRINUSE&hours_ago=48'
+```
+
+### GET /api/v1/terminal-logs/digest-window
+
+The transcript window since a timestamp, capped by `max_chars`
+(default 30000) — what the digest pipeline reads. Query params: `user_id`,
+`session_name`, `immorterm_id`, `since_timestamp`, `ai_tool`, `max_chars`.
+Returns the same JSON as the `get_digest_window` MCP tool.
+
+```bash
+curl 'http://localhost:8765/api/v1/terminal-logs/digest-window?immorterm_id=IMMORTERM_ID&since_timestamp=2026-07-07T00:00:00Z'
+```

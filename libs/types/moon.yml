@@ -1,0 +1,15 @@
+language: "typescript"
+layer: "library"
+stack: "backend"
+
+project:
+  title: "Shared Types"
+  description: "Shared TypeScript types and interfaces"
+  owner: "@immorterm/core"
+
+tasks:
+  typecheck:
+    command: "bun run tsc --noEmit"
+    inputs:
+      - "src/**/*"
+      - "tsconfig.json"

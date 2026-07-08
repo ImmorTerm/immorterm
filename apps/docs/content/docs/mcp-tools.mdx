@@ -1,0 +1,760 @@
+---
+title: MCP Tools
+description: All 41 tools the memory service exposes over the Model Context Protocol.
+---
+
+ImmorTerm ships two MCP servers: **memory** (this page — search, recall, code
+archaeology, knowledge packs, terminal logs, entity graph) and **terminal**
+(screen reading, overlays, tasks; served by the `immorterm-ai` binary over
+stdio). This page documents the memory server's 41 tools. Your AI already has
+them; this page is for the humans.
+
+For how a client connects and how Claude Code registers the server, see
+[Connecting over MCP](/docs/mcp-connection).
+
+## Conventions
+
+Every tool response is a JSON string. A few behaviors apply across the board:
+
+- **`user_id` resolution.** Tools resolve identity in order: explicit
+  `user_id` argument → the `{user_id}` segment of the HTTP URL → the local
+  identity chain (`~/.immorterm/identity.json` → `IMMORTERM_USER_ID` → global
+  git email → `$USER@$HOSTNAME`). You rarely pass it yourself.
+- **Attribution.** Read/search tools append an `_attribution` key to results.
+  Write tools (`add_memories`, `delete_all_memories`, `resolve_decisions`,
+  `delete_pack`, `revert_session_changes`) skip it.
+- **Size cap.** Responses over 80,000 characters (~20K tokens) are truncated:
+  the largest array field is halved until the response fits, and
+  `_truncated`, `_original_size`, and `_hint` fields are added. Use `limit`,
+  `hours_ago`, or `session_id` to narrow before that happens.
+- **Free-tier gating.** The free tier reads 5 results from the last 72 hours
+  (Pro is uncapped). When a query hits either cap, the response carries
+  `tier`, `gated_count`, `retention_window`, and an `upgrade` object. The
+  data past the window is stored, not shown.
+
+---
+
+## Memory CRUD
+
+### add_memories
+
+Save one or many memories to persistent storage. Content-hash dedup: identical
+text won't create duplicates.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `text` | string | — | Single memory text |
+| `texts` | array | — | Batch mode: strings or `{text, metadata}` objects (up to 500) |
+| `metadata` | object | — | Metadata dict (`type`, `category`, `source_app`, …); per-item metadata in batch mode overrides it |
+| `infer` | boolean | `false` | Reserved for future use |
+| `entities` | array | — | Pre-extracted entities `[{name, type}]` |
+| `relations` | array | — | Pre-extracted relations `[{source, destination, relationship}]` |
+| `session_id` | string | — | Claude session UUID |
+| `immorterm_id` | string | — | ImmorTerm terminal session ID |
+
+Either `text` or `texts` is required. Returns `{status: "saved", id}` (single)
+or `{status: "saved", count, ids}` (batch). If the connecting client is known,
+its name is injected into metadata as `source_app` unless you set one.
+
+Usage note: for large batches (50+), the tool description itself recommends
+the REST endpoint `POST /api/v1/memories/batch` instead.
+
+### list_memories
+
+List all memories with pagination and compact output.
+
+| Param | Type | Default |
+|---|---|---|
+| `page` | integer | `1` |
+| `page_size` | integer | `20` |
+
+Returns `{memories, total, page, page_size}`; each entry has `id`, `content`
+(truncated to 200 chars), `type`, `category`, `created_at`.
+
+Usage note: this is a raw pager — for anything targeted, `search_memory` is
+the better door.
+
+### delete_all_memories
+
+Soft-delete all memories for the current user. Memories are marked deleted,
+not permanently removed.
+
+No parameters. Returns `{status: "deleted", count}`.
+
+Usage note: scoped to the resolved `user_id` — with the default per-project
+URL setup, that means one project's partition, not the whole database.
+
+### get_memory_context
+
+Retrieve the conversation context that surrounded a memory, using stored
+conversation pointers (`history_ref` or `digest_extraction`) with a
+`byte_offset` for O(1) retrieval from the Claude JSONL transcript.
+
+| Param | Type | Default |
+|---|---|---|
+| `memory_id` | string | required |
+| `max_chars` | integer | `3000` |
+
+Returns `{memory_id, context, has_context: true}` or, when no pointer exists,
+`{memory_id, has_context: false, message}`.
+
+Usage note: search results that carry `has_conversation_context: true` are the
+ones worth following up here.
+
+### list_categories
+
+Return the set of known memory categories for discovery.
+
+No parameters. Returns `{categories, note}`. Custom categories are also
+accepted — these are just the known ones.
+
+### resolve_decisions
+
+Mark decisions as completed, dismissed, or superseded.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `decision_ids` | array of strings | required | Memory IDs of decisions to resolve |
+| `resolution` | string | `"completed"` | `completed`, `dismissed`, or `superseded` |
+| `notes` | string | — | Optional resolution notes |
+
+Sets `status`, `resolved_at`, and (if given) `resolution_notes` in each
+decision's metadata. Returns `{resolved, total_requested, resolution}`.
+
+Usage note: pair with `get_pending_decisions` — find them, finish them,
+resolve them.
+
+### supersede_memory
+
+Mark an existing memory as superseded — archives it and optionally links to a
+replacement. Use when a retrieved memory contradicts current code or the
+current conversation.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `memory_id` | string | required | Memory to mark superseded |
+| `reason` | string | required | Enum: `content_replaced`, `content_stale` |
+| `superseded_by_id` | string | — | ID of the replacement memory (omit for `content_stale`) |
+
+Workflow: (1) save the corrected fact via `add_memories`, (2) call this with
+`superseded_by_id` set to the new memory's id. Returns `{status: "superseded",
+memory_id, reason, chained_to, chain_linked}`, or
+`{status: "not_found_or_already_archived"}` if the target isn't active.
+
+Usage note: be conservative — false supersession silently removes valid
+memories. Reserve it for clear-cut contradictions, not differences in
+emphasis.
+
+### get_supersession_chain
+
+Walk the supersession graph for a memory in both directions: predecessors
+(older versions) and successors (newer versions).
+
+| Param | Type | Default |
+|---|---|---|
+| `memory_id` | string | required |
+| `max_depth` | integer | `20` (links per direction) |
+
+Returns `{target, predecessors, successors, predecessor_count,
+successor_count}`.
+
+Usage note: answers "how did this decision evolve?" — works for any memory
+type, not just summaries.
+
+### deduplicate
+
+Scan for near-duplicate memories using vector similarity. Returns groups of
+2+ memories with cosine similarity above the threshold.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `threshold` | number | `0.92` | Minimum cosine similarity (0.0–1.0) |
+| `limit` | integer | `500` | Max memories to scan, most recent first |
+
+Returns `{duplicate_groups, total_duplicate_memories, threshold, scanned,
+groups, runtime_stats}`.
+
+Usage note: this finds duplicates; it doesn't delete them. Follow up with
+`supersede_memory` on the losers.
+
+---
+
+## Search
+
+### search_memory
+
+Search by semantic similarity; results ranked by relevance.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `query` | string | required | |
+| `limit` | integer | `10` | |
+| `scope` | string | `"session"` | `session` (excludes knowledge packs), `knowledge` (packs only), `all` |
+| `session_id` | string | — | Filter to a Claude session |
+| `immorterm_id` | string | — | Filter to an ImmorTerm terminal (OR logic with `session_id`) |
+| `categories` | string | — | Comma-separated category filter |
+| `include_archived` | boolean | `false` | |
+| `include_graph` | boolean | `true` | Include entity graph relations (~12ms extra) |
+| `output_mode` | string | `"gated"` | `full`, `gated`, `index` |
+| `start_date` / `end_date` | string | — | ISO date bounds |
+| `search_mode` | string | `"hybrid"` | `hybrid` (vector + FTS5), `dense` (vector only), `sparse` (FTS5/BM25 only) |
+
+Output modes: `gated` returns full content for high-confidence results
+(score ≥ 0.85), first sentence for medium (0.70–0.85), metadata-only below
+that — cutting context tokens 60–80%. `full` returns complete content for
+everything. `index` returns a clustered table of contents by type and
+category with counts and top snippets.
+
+Returns `{source, memories, count, tier}` plus `entities`/`relations` when
+graph data exists, `detail_levels` in gated mode, or `{index, hint}` in index
+mode. Tier-capped responses add `total_matched`, `gated_count`,
+`retention_window`, `upgrade`.
+
+Usage note: use `search_mode: "sparse"` for exact-term lookups like `wgpu` or
+`IMMORTERM_SESSION` where semantic matching just gets in the way.
+
+### search_recent_memories
+
+List memories sorted by recency, optionally filtered by time range and text.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `hours_ago` | integer | `24` | How far back |
+| `query` | string | — | Optional FTS5 full-text filter |
+| `limit` | integer | `20` | |
+| `scope` | string | `"session"` | Same semantics as `search_memory` |
+| `session_id` / `immorterm_id` | string | — | |
+| `categories` | string | — | |
+| `page` | integer | `1` | |
+| `page_size` | integer | `20` | |
+| `include_archived` | boolean | `false` | |
+| `start_date` / `end_date` | string | — | Take priority over `hours_ago` |
+
+Returns `{source, memories, count, hours_ago, tier}` plus retention fields
+when clamped.
+
+Usage note: "what did we work on recently?" → `hours_ago: 4`. "This week" →
+`168`.
+
+### get_pending_decisions
+
+Find pending (unimplemented) decisions — memories in category `decisions`
+with metadata status `planned` or `in_progress`.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `limit` | integer | `30` | |
+| `hours_ago` | integer | — | Only decisions from the last N hours |
+| `session_id` / `immorterm_id` | string | — | Narrow scope |
+
+Returns `{source, decisions, count, total_count}` (plus `has_more` and a
+`hint` when more exist). Each decision carries `id`, `content` (first
+sentence only past the first 10), `status`, a decay-based `confidence`
+score (results are sorted by it, descending), `created_at`, `session_id`.
+Decisions with confidence below 0.30 get a `_hint` suggesting resolution or
+archival.
+
+Usage note: run this at session start — it's the cross-session "what did I
+leave unfinished" query.
+
+---
+
+## Sessions
+
+### list_sessions
+
+List AI coding sessions with timing, status, terminal names, AI tool,
+summaries, and edit stats. Covers all AI tools, not just Claude Code.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `hours_ago` | integer | `72` | |
+| `status` | string | — | `alive`, `idle`, `ended` |
+| `ai_tool` | string | — | `claude-code`, `cursor`, `windsurf`, `codex`, `aider` |
+| `immorterm_id` | string | — | |
+| `limit` | integer | `20` | |
+
+Returns `{source, sessions, count, tier}`. Sessions are numbered `#1`, `#2`, …
+for easy reference and include `session_id`, `status`, `started_at`,
+`edit_count`, `accessible`, plus `terminal_name`, `immorterm_id`, `ai_tool`,
+`last_heartbeat`, `ended_at`, `summary`, `files_edited`, `last_active`, and
+`title` when present. Terminal names fall back to
+`~/.immorterm/registry.json` display names when the DB value is empty.
+Sessions older than the retention window are listed (summary included as a
+teaser) but marked `accessible: false` / `requires_pro: true`.
+
+Usage note: always pass `limit` and a sensible `hours_ago` — the default
+window is three days of every terminal you own.
+
+### get_session_context
+
+Load a session's context: summary + digest facts + pending decisions + tasks.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `session_id` | string | — | One of the two is required |
+| `immorterm_id` | string | — | Resolved to the most recent session if `session_id` omitted |
+| `fact_limit` | integer | `30` | |
+| `decision_limit` | integer | `15` | |
+
+Returns `{source, summary, title, at_a_glance, facts, fact_count,
+total_facts, pending_decisions, decision_count, total_decisions,
+recent_prompts, tier}` plus `title_history`, `summary_versions` /
+`summary_version_count`, `tasks` / `task_count`, and `has_more_facts` /
+`has_more_decisions` when applicable. The summary comes from the versioned
+summary chain (each version with `id`, `version`, `state`, `content`,
+`created_at`, and transcript pointers), falling back to the legacy sessions
+table. Facts past the tenth are trimmed to their first sentence when
+`fact_limit > 20`.
+
+Usage note: the natural follow-up after `list_sessions` or
+`search_recent_memories` turns up a session worth resuming.
+
+### list_tasks
+
+List persisted tasks from a session. Each task is an individual memory with
+`type = 'task'`; tasks marked deleted are excluded.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `session_id` | string | — | One of the two is required |
+| `immorterm_id` | string | — | Preferred — survives compaction |
+
+Returns `{source, tasks, count}` with up to 100 tasks: `memory_id`,
+`task_id`, `subject`, `status`, `event_date`, `created_at`, `updated_at`.
+
+### get_plan
+
+Retrieve approved implementation plans — memories prefixed `PLAN:` and/or
+tagged `category = plan` / `type = plan`.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `session_id` / `immorterm_id` | string | — | |
+| `query` | string | `"implementation plan"` | Search query to filter plans |
+| `limit` | integer | `3` | |
+
+Returns `{source, plans, count}`; each plan has `id`, `content`,
+`created_at`, `session_id`, `score`.
+
+---
+
+## Code archaeology
+
+### list_code_changes
+
+List file edits per session with stats: what files were modified, change
+types (edit, write, create), and diff sizes.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `session_id` / `immorterm_id` | string | — | |
+| `hours_ago` | number | `24` | |
+| `file_path` | string | — | Filter to one file |
+| `limit` | integer | `50` | |
+| `start_date` / `end_date` | string | — | ISO-8601; take priority over `hours_ago` |
+
+Returns `{source, changes, count, tier}`; each change has `id`, `file_path`,
+`change_type`, `line_count`, `timestamp`, plus `session_id` and `tool_name`
+when known.
+
+### get_code_diff
+
+Get unified diff content for a specific change, or the most recent change to
+a file.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `change_id` | string | — | One of `change_id` or `file_path` is required |
+| `file_path` | string | — | Absolute paths match exactly; relative paths match by suffix |
+| `session_id` / `immorterm_id` | string | — | Narrow the file-path lookup |
+
+Returns `{diff, metadata: {file_path, change_type, timestamp, session_id},
+tier}`, or `diff: null` with a message when no diff content was stored.
+
+Usage note: get the `change_id` from `list_code_changes` or
+`list_file_versions` first; `file_path` alone gives you only the latest edit.
+
+### list_file_versions
+
+Show edit history and checkpoint availability for a file, across sessions.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `file_path` | string | required | |
+| `hours_ago` | integer | `168` | One week |
+| `immorterm_id` | string | — | |
+
+Returns `{source, file_path, versions, checkpoint_count, tier}`; each version
+has `change_id`, `session_id`, `change_type`, `line_count`, `tool_name`,
+`timestamp`, and `has_checkpoint` (whether a pre-edit snapshot exists for
+that session).
+
+### reconstruct_file
+
+Retrieve file content from a checkpoint — the file as it was before the
+session's first edit.
+
+| Param | Type | Default |
+|---|---|---|
+| `file_path` | string | required |
+| `session_id` / `immorterm_id` | string | — |
+
+Returns `{file_path, content, checkpoint_type, checkpoint_at, session_id,
+tier}`. Content is decompressed from the stored gzip blob; checkpoints stored
+as a git ref instead return a pointer (`git show <ref>` retrieves it). No
+checkpoint → `{error: "No checkpoint found", …}`.
+
+### revert_session_changes
+
+Preview or prepare reverting all files to pre-session state. Defaults to
+`dry_run: true` (preview only).
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `session_id` / `immorterm_id` | string | — | One is required |
+| `dry_run` | boolean | `true` | |
+
+Returns `{dry_run, files, count, message, tier}`. The tool never writes to
+disk itself: with `dry_run: true` each file entry includes its checkpoint
+`content` for preview; with `dry_run: false` the message tells the AI to
+restore each file with its own Write tool.
+
+### list_git_commits
+
+List git commits with file stats and contributing sessions.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `session_id` / `immorterm_id` | string | — | OR logic when both given |
+| `branch` | string | — | Filter by branch name (exact match) |
+| `hours_ago` | number | `24` | |
+| `limit` | integer | `20` | |
+| `start_date` / `end_date` | string | — | Take priority over `hours_ago` |
+
+Returns `{source, commits, count, tier}`; each commit has `id`, `session_id`,
+`immorterm_id`, `message`, `author`, `timestamp`, `files_changed`,
+`insertions`, `deletions`, `contributing_sessions`.
+
+### explain_change
+
+Code archaeology for one file (optionally one line): correlates recorded
+edits, git commits, memory decisions, and live git blame to explain why code
+changed.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `file_path` | string | required | |
+| `line_number` | integer | `0` | When > 0, blame focuses on a ±10-line window |
+| `hours_ago` | number | `0` | 0 = all time (free tier still clamps to its retention window) |
+
+Returns `{source, file_path, code_changes_by_terminal, git_commits,
+related_decisions, live_git, tier}`. `code_changes_by_terminal` groups edits
+by terminal and enriches each group with the session's `title`,
+`at_a_glance`, and a compact summary (just the Goals and Design Decisions
+sections). `live_git` carries blame hunks and the file's recent commits via
+libgit2.
+
+Usage note: this is the "why does this line look like this" tool — point it
+at a file and a line before assuming the last commit message tells the story.
+
+### enrich_pr
+
+Batch PR enrichment with temporal session context. Three input modes, in
+priority order:
+
+1. `file_paths` — enrich an explicit file list
+2. `commit_shas` — enrich specific commits (files derived from them)
+3. `base_ref` + `head_ref` — diff between git refs (standard PR flow)
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `base_ref` | string | — | e.g. `main`, `origin/main` |
+| `head_ref` | string | `"HEAD"` | |
+| `commit_shas` | array of strings | — | |
+| `file_paths` | array of strings | — | Skips git diff detection |
+
+At least one of `base_ref`, `commit_shas`, or `file_paths` is required.
+Returns `{source, input_mode, base_ref, head_ref, file_count, files,
+sessions, decisions, branch_commits, tier}`. For each file, the tool matches
+the summary version that was **active when the file was last changed** — not
+just the latest — so early files get early goals. Each file entry lists its
+contributing sessions with `title`, `goals_and_decisions`,
+`summary_version_used`, and `topic_keywords`; queries are scoped to sessions
+that actually contributed to the branch's commits.
+
+Usage note: built for PR-description composition — feed the output straight
+into whatever writes the PR body.
+
+---
+
+## Knowledge packs
+
+### list_packs
+
+Discover installed knowledge packs with manifests, source books, and
+framework counts.
+
+No parameters. Returns `{packs, count}`; each pack has `id`, `pack_name`,
+`name`, `manifest`, `framework_count`, `memory_count`, `metadata`. Packs are
+global knowledge — not scoped to a user.
+
+### get_pack_ram
+
+Get the pack's compiled ~20K-char markdown "RAM" (Rapid Access Memory) — a
+pre-compiled summary of the pack's key knowledge.
+
+| Param | Type | Default |
+|---|---|---|
+| `pack_name` | string | required |
+
+Returns `{pack_name, ram}`. If no compiled RAM exists, it falls back to any
+memory flagged `is_ram`, then to the pack manifest (with a `note` saying so),
+then to an error if the pack doesn't exist.
+
+### search_pack
+
+Semantic search within a specific knowledge pack.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `pack_name` | string | required | |
+| `query` | string | required | |
+| `type_filter` | string | — | e.g. `framework-deep-dive`, `component-detail`, `technique-guide` |
+| `limit` | integer | `10` | |
+
+Returns `{results, count, pack_name}`; each result has `id`, `content`,
+`type`, `score`, `created_at`, and `description` when available. Without a
+`type_filter`, noise types (`pack-ram`, `source-record`, `pack-manifest`) are
+excluded. Results whose embeddings are more than 0.92 similar to a
+higher-ranked result are deduplicated.
+
+### get_framework
+
+Get framework detail with its children (components, techniques, examples).
+
+| Param | Type | Default |
+|---|---|---|
+| `pack_name` | string | required |
+| `framework_name` | string | required |
+
+Returns `{id, framework_name, pack_name, content, metadata, children,
+children_count}`, or an error if the framework isn't in the pack.
+
+### list_frameworks
+
+List framework names and summaries within a pack, grouped by source book.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `pack_name` | string | required | |
+| `source_book` | string | — | Filter to one source book |
+| `limit` | integer | `20` | |
+| `offset` | integer | `0` | Pagination |
+
+Returns `{groups, group_count, total_frameworks, returned, offset, limit,
+pack_name}` and `next_offset` when more pages exist. Each group has
+`source_book`, per-page and total counts, and `frameworks` with `id`,
+`framework_name`, `summary`.
+
+### delete_pack
+
+Soft-delete all memories belonging to a knowledge pack.
+
+| Param | Type | Default |
+|---|---|---|
+| `pack_name` | string | required |
+
+Returns `{status: "deleted", pack_name, count, hard}`. The implementation
+also accepts an undeclared `hard: true` flag that removes rows entirely and
+rebuilds the FTS index — used internally for ephemeral workspace packs where
+the `.impack` file is the source of truth.
+
+### export_pack
+
+Export a pack to a standalone `.db` file or `.impack` bundle (zip containing
+`impack.db` + `agent.md`) for sharing or backup.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `pack_name` | string | required | |
+| `output_path` | string | required | `.db` or `.impack` |
+| `format` | string | `"db"` | Enum: `db` (bare SQLite), `impack` (zip bundle with agent.md) |
+| `agent_md` | string | — | Agent template (system prompt) for `.impack`; defaults to `~/.immorterm/agents/{pack_name}.md` if present |
+
+Returns `{status: "exported", pack_name, count, output_path, format}`.
+
+### import_pack
+
+Import a pack from a `.db` file or `.impack` bundle. Format is detected from
+the file extension.
+
+| Param | Type | Default |
+|---|---|---|
+| `input_path` | string | required |
+
+Returns `{status: "imported", pack_name, count, input_path}`.
+
+---
+
+## Terminal logs
+
+### list_terminal_logs
+
+Browse terminal events: `ai_detected`, `ai_exited`, `turn`, `snapshot`.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `session_name` | string | — | Terminal session name |
+| `immorterm_id` | string | — | |
+| `event_type` | string | — | One of the event types above |
+| `ai_tool` | string | — | Matched against metadata |
+| `hours_ago` | integer | `24` | |
+| `limit` | integer | `50` | |
+| `start_date` / `end_date` | string | — | Take priority over `hours_ago` |
+
+Returns `{logs, count, tier}`; each log has `id`, `session_id`, `event_type`,
+`content`, `metadata`, `timestamp`.
+
+### search_terminal_logs
+
+Full-text search over terminal log content, backed by FTS5.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `query` | string | required | FTS5 match syntax |
+| `session_name` / `immorterm_id` / `ai_tool` | string | — | |
+| `hours_ago` | integer | `24` | |
+| `limit` | integer | `50` | |
+| `start_date` / `end_date` | string | — | Take priority over `hours_ago` |
+
+Returns `{logs, count, query, tier}` in the same log shape as
+`list_terminal_logs`.
+
+### get_digest_window
+
+Get terminal log content formatted for memory digestion: conversation turns
+concatenated with `User:` / `AI:` role labels. This is the tool-agnostic
+digest path — it works for any AI tool whose turns land in the terminal logs
+(Cursor, Codex, Windsurf, Aider, …), not just Claude.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `session_name` | string | — | |
+| `immorterm_id` | string | — | |
+| `since_timestamp` | string | — | ISO-8601; only content after this point (incremental digestion) |
+| `ai_tool` | string | — | Filter by tool name |
+| `max_chars` | integer | `30000` | Total cap; individual turns cap at 2,000 chars |
+
+Returns `{transcript, turn_count, total_chars, ai_tool, first_timestamp,
+last_timestamp, source: "terminal_logs", tier}`. The `ai_tool` is detected
+from turn metadata, falling back to the session's latest `ai_detected` event.
+
+### get_session_grid_tail
+
+Read the most recent visible terminal state and scrollback from a session's
+`grid.jsonl` — plain text reconstructed from the last grid snapshot and last
+scrollback dump on disk. Ground truth for what was actually on screen,
+including shell output and non-AI content. Works for live and archived
+(shelved) sessions — the resolver checks both `logs/` and `logs/archive/`.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `immorterm_id` | string | — | Preferred — spans compactions; one of the two is required |
+| `session_id` | string | — | Fallback |
+| `max_scrollback_rows` | integer | `200` | Oldest rows dropped first |
+| `max_chars` | integer | `24000` | Hard cap; snapshot is prioritized over scrollback |
+
+Returns `{snapshot_text, scrollback_text, cols, rows, snapshot_ts,
+scrollback_ts, scrollback_total_rows, scrollback_returned_rows,
+session_title, log_dir, source: "grid.jsonl", tier}`.
+
+Usage note: pairs well with `get_conversation_turns` — one gives you the
+screen, the other gives you the conversation.
+
+### get_conversation_turns
+
+Fetch actual conversation turns (user prompts + AI responses) from a
+session — not summaries, the real back-and-forth. Reads directly from the
+session's `ai.jsonl` on disk, so it's always current.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `immorterm_id` | string | — | Preferred; one of the two is required |
+| `session_id` | string | — | Fallback (single compaction window) |
+| `last_n` | integer | `2` | N most recent turns (default = last user+assistant pair) |
+| `offset` | integer | `0` | Skip N turns from the end (pagination) |
+| `search` | string | — | Filter turns by content (case-insensitive substring match) |
+| `role` | string | — | Enum: `user`, `assistant` |
+| `max_chars_per_turn` | integer | `3000` | Per-turn truncation |
+
+Returns `{turns, count, total_turns, offset, has_more, session_title,
+source: "ai.jsonl", log_dir, tier}`; each turn has `role`, `content`,
+`timestamp`, and `ai_tool` when known. Historical entries that lumped several
+user prompts into one turn are split back apart, and partial prompts (the
+user editing mid-thought) are deduplicated to the final version.
+
+Usage note: browse earlier history with `last_n: 10, offset: 10`; find a
+topic with `search: "scroll bug", last_n: 20`.
+
+---
+
+## Entity graph
+
+### search_entities
+
+Search the entity graph by name pattern and/or type. Results are ranked by
+relation count — most connected first.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `name` | string | — | Case-insensitive substring match |
+| `entity_type` | string | — | e.g. `tool`, `concept`, `library`, `person` |
+| `limit` | integer | `20` | |
+
+Returns `{entities, count}`; each entity has `id`, `name`, `type`,
+`relation_count`.
+
+### get_entity_relations
+
+Get all relationships for one entity — incoming and outgoing.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `entity` | string | required | Entity name |
+| `include_memory_text` | boolean | `false` | Include the memory snippet that created each relation |
+
+Returns `{entity, type, outgoing, incoming, total_relations}`; each relation
+has `entity`, `type`, `relationship`, `direction`, plus `memory_snippet`
+(truncated to 200 chars) and `memory_id` when requested. Unknown entity →
+`{error: "Entity not found", entity}`.
+
+### find_entity_path
+
+Find the shortest path between two entities using BFS through intermediate
+entities and relationships.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `from` | string | required | |
+| `to` | string | required | |
+| `max_depth` | integer | `5` | Clamped to 10 |
+
+Returns `{found: true, from, to, depth, path, entities}` where `path` is a
+list of `{from, relationship, to}` steps — or `{found: false, from, to,
+message}` when no path exists within the hop limit.
+
+### traverse_graph
+
+Explore an entity's neighborhood — multi-hop traversal returning a subgraph.
+`depth: 1` is direct connections; `depth: 2` is friends-of-friends.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `entity` | string | required | Starting entity |
+| `depth` | integer | `2` | Clamped to 5 |
+| `limit` | integer | `50` | Max entities collected |
+
+Returns `{start, max_depth, entities, relations, entity_count,
+relation_count}`; entities carry `name`, `type`, `depth`, and relations carry
+`from`, `relationship`, `to` (deduplicated edges).

@@ -1,0 +1,104 @@
+---
+title: Claude Code Integration
+description: Hooks capture, MCP recalls — what gets recorded and how identity is resolved.
+---
+
+Claude Code is the deepest integration ImmorTerm ships. It works over two
+channels that meet in the memory service:
+
+- **Hooks** (the write path) — shell scripts fired by Claude Code lifecycle
+  events. They capture memories, code changes, tasks, and plans as you work.
+- **MCP** (the read path) — the memory service's Streamable HTTP endpoint,
+  registered in `.mcp.json`, giving Claude the
+  [full tool suite](/docs/mcp-tools) for search and recall.
+
+Nothing here requires you to write notes, tag anything, or prune a vault.
+The capture is ambient; the recall is ranked.
+
+## MCP registration
+
+The extension writes the memory server into `.mcp.json` at the project root:
+
+```json
+{
+  "mcpServers": {
+    "immorterm-memory": {
+      "type": "http",
+      "url": "http://127.0.0.1:8765/mcp/claude-code/<project-id>"
+    }
+  }
+}
+```
+
+One local server, one partition per project — the project ID in the URL path
+does the scoping. The terminal MCP server (screen reading, overlays, tasks)
+is registered in the same file over stdio. Endpoint behavior, reconnect
+mechanics, and migration notes are on
+[Connecting over MCP](/docs/mcp-connection).
+
+## Hooks
+
+Hooks are installed per project into `.immorterm/hooks/` (vendor-neutral
+shell scripts) and registered in the project's Claude Code settings.
+Installation currently rides the VS Code extension — `immorterm init`
+installs it — but the scripts themselves have no VS Code dependency: Claude
+Code fires them from any terminal.
+
+| Event | Hook | What it does |
+|---|---|---|
+| `SessionStart` | Memory guide | Injects session identity and recalled context into Claude; auto-heals the memory service, gateway, and digest daemon if any went down |
+| `PreToolUse` (ExitPlanMode) | Plan presave | Saves the plan before it executes |
+| `PostToolUse` | Code-change capture | Records every file edit — diff, path, session |
+| `PostToolUse` | Task persist | Mirrors Claude's task list into memory in real time |
+| `PostToolUse` | Git commit capture | Records each commit with the session that made it |
+| `Stop` | Digester + plan sweep | Extracts memories from the transcript after each turn (async); catches plans the presave missed |
+| `SessionEnd` | Session end | Synchronous flush and final digest on `/exit`, `/clear`, or session swap |
+| `PreCompact` | Handoff notes | Writes continuity notes so context survives compaction |
+| `SubagentStart` | Category inject | Injects relevant memories into spawned expert agents |
+
+The heavy lifting is the **digester**: a background daemon (spawned by the
+`SessionStart` hook, no editor required) that processes Claude Code's JSONL
+transcripts and extracts durable facts and decisions — typically 6–9
+memories per working session, categorized and entity-tagged automatically.
+
+## What gets captured
+
+Everything lands in the local memory service, inspectable over the
+[REST API](/docs/memory-api) and [MCP tools](/docs/mcp-tools):
+
+- **Memories** — decisions, facts, bug root causes, extracted by the
+  digester; superseded automatically when the repo changes its mind.
+  [Memories](/docs/memory-api/memories)
+- **Code history** — per-edit diffs, git commits, file checkpoints you can
+  reconstruct or revert from. [Code history](/docs/memory-api/code-history)
+- **Sessions, tasks, and plans** — session lifecycle with heartbeats, the
+  live task list, saved plans. [Sessions](/docs/memory-api/sessions)
+- **Entity graph** — entities and relations extracted from memories, used
+  for spreading-activation boosts at search time. [Graph](/docs/memory-api/graph)
+
+What does *not* get captured: your repo files are never written to. Memory
+writes go to the local database only.
+
+## Identity — who, what, which
+
+Every memory row carries three orthogonal identifiers:
+
+| Field | Answers | Resolved from |
+|---|---|---|
+| `user_id` | **who** (the human) | `~/.immorterm/identity.json` → `IMMORTERM_USER_ID` → global git email → `$USER@$HOSTNAME` |
+| `project_id` | **what** (the workspace) | UUID in `<project>/.immorterm/project.json` — committed to git, so teammates share one memory partition |
+| `host_id` | **which** (the machine) | stable machine ID (`/etc/machine-id`, macOS platform UUID) |
+
+You set none of these by hand. `user_id` follows you across machines,
+`project_id` scopes recall to the repo, `host_id` disambiguates when the
+same person works the same repo from two machines. The service logs writes
+that arrive without a conformant triple (warn-mode today) — details on the
+[Memory API overview](/docs/memory-api#conventions).
+
+## Other clients
+
+Cursor, Codex, Windsurf, Cline, and anything else that speaks MCP can
+register the same HTTP endpoint with its own `client_name` — same memory,
+different reader. See [Connecting over MCP](/docs/mcp-connection) and, if
+you're running several stdio MCP servers across many windows, the
+[MCP Gateway](/docs/gateway).

@@ -1,0 +1,406 @@
+#!/usr/bin/env bash
+# claude-session-sync - Background scanner for Claude Code session tracking
+# Maps Claude sessions to terminals using process tree + history.jsonl correlation
+set -euo pipefail
+
+# Configuration
+SCAN_INTERVAL=30  # 30 seconds (reduced for testing, restore to 300 for production)
+PROJECT_DIR="${SCREEN_PROJECT_DIR:-}"
+JSON="${PROJECT_DIR}/.immorterm/restore-terminals.json"
+LOGS_DIR="${PROJECT_DIR}/.immorterm/terminals/logs"
+PIDFILE="${PROJECT_DIR}/.immorterm/terminals/.claude-sync.pid"
+HISTORY="$HOME/.claude/history.jsonl"
+STATE_FILE="${PROJECT_DIR}/.immorterm/terminals/.session-sync.state"
+
+# Ensure we have project directory
+if [[ -z "$PROJECT_DIR" ]] || [[ ! -d "$PROJECT_DIR" ]]; then
+  exit 1
+fi
+
+# Singleton: only one scanner per project
+if [[ -f "$PIDFILE" ]]; then
+  OLD_PID=$(cat "$PIDFILE" 2>/dev/null || true)
+  if [[ -n "$OLD_PID" ]] && kill -0 "$OLD_PID" 2>/dev/null; then
+    exit 0  # Already running
+  fi
+fi
+
+echo $$ > "$PIDFILE"
+trap 'rm -f "$PIDFILE"' EXIT
+
+# Get project prefix
+project_lower=$(basename "$PROJECT_DIR" | tr '[:upper:]' '[:lower:]')
+
+# Use configured screen binary (immorterm by default)
+SCREEN="${IMMORTERM_SCREEN_BINARY:-immorterm}"
+
+# Claude project directory
+CLAUDE_PROJECT_DIR="$HOME/.claude/projects/${PROJECT_DIR//\//-}"
+
+log() {
+  echo "$(date '+%H:%M:%S') [claude-sync] $*"
+}
+
+# Update JSON with session ID for a window
+update_json_session() {
+  local window_id="$1"
+  local session_id="$2"
+
+  [[ -z "$window_id" || -z "$session_id" || ! -f "$JSON" ]] && return 1
+
+  # Check if already set
+  local current
+  current=$(jq -r --arg wid "$window_id" \
+    '.terminals[]?.splitTerminals[]? | select(.windowId == $wid) | .claudeSessionId // empty' \
+    "$JSON" 2>/dev/null || true)
+
+  [[ "$current" == "$session_id" ]] && return 0
+
+  local tmp=$(mktemp)
+  if jq --arg wid "$window_id" --arg sid "$session_id" '
+    .terminals = [.terminals[]? |
+      .splitTerminals = [.splitTerminals[]? |
+        if .windowId == $wid then .claudeSessionId = $sid else . end
+      ]
+    ]
+  ' "$JSON" > "$tmp"; then
+    mv "$tmp" "$JSON"
+    log "Mapped: $window_id → $session_id"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# Remove claudeSessionId from JSON for a window (user exited Claude)
+remove_json_session() {
+  local window_id="$1"
+
+  [[ -z "$window_id" || ! -f "$JSON" ]] && return 1
+
+  local tmp=$(mktemp)
+  if jq --arg wid "$window_id" '
+    .terminals = [.terminals[]? |
+      .splitTerminals = [.splitTerminals[]? |
+        if .windowId == $wid then del(.claudeSessionId) else . end
+      ]
+    ]
+  ' "$JSON" > "$tmp"; then
+    mv "$tmp" "$JSON"
+    log "Removed session for: $window_id (Claude exited)"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# Build mapping: windowId → Claude PID via process tree
+# Returns: "windowId:claudePid" lines
+build_process_map() {
+  # Get attached screen sessions for this project
+  local sessions
+  sessions=$($SCREEN -ls 2>/dev/null | grep -E "[0-9]+\.${project_lower}-" | grep -v "Remote or dead" | awk '{print $1}')
+
+  # Build process tree data once
+  local ps_data
+  ps_data=$(ps -eo pid,ppid,comm 2>/dev/null)
+
+  while IFS= read -r session; do
+    [[ -z "$session" ]] && continue
+
+    local screen_pid window_id
+    screen_pid=$(echo "$session" | cut -d. -f1)
+    window_id=$(echo "$session" | sed "s/[0-9]*\.${project_lower}-//")
+
+    [[ -z "$screen_pid" || -z "$window_id" ]] && continue
+
+    # Find zsh child of screen, then claude child of zsh
+    local claude_pid
+    claude_pid=$(echo "$ps_data" | awk -v sp="$screen_pid" '
+      BEGIN { zsh_pid = "" }
+      { pids[$1] = $2; comms[$1] = $3 }
+      END {
+        # Find zsh/bash child of screen
+        for (p in pids) {
+          if (pids[p] == sp && (comms[p] == "zsh" || comms[p] == "bash" || comms[p] == "-/bin/zsh" || comms[p] == "-bash")) {
+            zsh_pid = p
+            break
+          }
+        }
+        if (zsh_pid == "") exit
+
+        # Find claude child of zsh
+        for (c in pids) {
+          if (pids[c] == zsh_pid && comms[c] == "claude") {
+            print c
+            exit
+          }
+        }
+      }
+    ')
+
+    if [[ -n "$claude_pid" ]]; then
+      echo "${window_id}:${claude_pid}"
+    fi
+  done <<< "$sessions"
+}
+
+# Get session ID for a terminal using CONTENT-BASED matching
+# Searches log file content for user messages from history.jsonl
+# Uses RATIO-BASED scoring with RECENT messages (not oldest)
+get_session_for_window() {
+  local window_id="$1"
+  local log_file="$LOGS_DIR/${project_lower}-${window_id}.log"
+
+  [[ ! -f "$log_file" ]] && return 1
+
+  # Strip ANSI escape codes from log for accurate matching
+  local log_content
+  log_content=$(sed 's/\x1b\[[0-9;]*m//g' "$log_file" 2>/dev/null)
+
+  # Get unique sessions from recent history for this project
+  local sessions_with_messages
+  sessions_with_messages=$(grep "$PROJECT_DIR\"" "$HISTORY" 2>/dev/null | \
+    tail -1000 | \
+    jq -r 'select(.display != null and .display != "" and (.display | length) > 15) |
+           "\(.sessionId)\t\(.display)"' 2>/dev/null | \
+    grep -v '/resume\|/status\|go on' || true)
+
+  [[ -z "$sessions_with_messages" ]] && return 1
+
+  # Score matches for each session using RATIO-BASED algorithm
+  local best_session=""
+  local best_score=0
+  local unique_sessions
+  unique_sessions=$(echo "$sessions_with_messages" | cut -f1 | sort -u)
+
+  while IFS= read -r sid; do
+    [[ -z "$sid" ]] && continue
+
+    local match_count=0
+    local total_checked=0
+
+    # Get RECENT messages for this session (tail -10 = most recent, not head -10)
+    local search_terms
+    search_terms=$(echo "$sessions_with_messages" | grep "^${sid}	" | cut -f2 | \
+      awk 'length > 20 {print substr($0, 1, 60)}' | tail -10)
+
+    while IFS= read -r term; do
+      [[ -z "$term" ]] && continue
+      ((total_checked++)) || true
+      # Search in ANSI-stripped log content
+      if echo "$log_content" | grep -qF "$term" 2>/dev/null; then
+        ((match_count++)) || true
+      fi
+    done <<< "$search_terms"
+
+    # Calculate ratio-based score (matches / checked, capped at 10)
+    if [[ $total_checked -gt 0 ]]; then
+      # Use bc for floating point, multiply by 1000 to avoid decimals
+      local score=$((match_count * 1000 / total_checked))
+      if [[ $score -gt $best_score ]]; then
+        best_score=$score
+        best_session="$sid"
+      fi
+    fi
+  done <<< "$unique_sessions"
+
+  # Accept if score >= 0.1 (100 in our 1000x scale) - at least 10% match ratio
+  if [[ $best_score -ge 100 && -n "$best_session" ]]; then
+    echo "$best_session"
+    return 0
+  fi
+
+  return 1
+}
+
+# Fallback: Get session using timestamp correlation
+get_session_by_timestamp() {
+  local window_id="$1"
+  local log_file="$LOGS_DIR/${project_lower}-${window_id}.log"
+
+  [[ ! -f "$log_file" ]] && return 1
+
+  local recent_sessions
+  recent_sessions=$(tail -100 "$HISTORY" 2>/dev/null | \
+    jq -r --arg proj "$PROJECT_DIR" \
+    'select(.project == $proj) | .sessionId' 2>/dev/null | \
+    sort -u)
+
+  local count
+  count=$(echo "$recent_sessions" | grep -c . || echo 0)
+
+  # If only one session, use it
+  if [[ "$count" -eq 1 ]]; then
+    echo "$recent_sessions"
+    return 0
+  fi
+
+  # Find session file modified closest to log file
+  if [[ -d "$CLAUDE_PROJECT_DIR" ]]; then
+    local log_mtime
+    log_mtime=$(stat -f %m "$log_file" 2>/dev/null || echo 0)
+
+    local best_session=""
+    local best_diff=999999999
+
+    while IFS= read -r sid; do
+      [[ -z "$sid" ]] && continue
+      local sfile="$CLAUDE_PROJECT_DIR/${sid}.jsonl"
+      [[ ! -f "$sfile" ]] && continue
+
+      local sfile_mtime
+      sfile_mtime=$(stat -f %m "$sfile" 2>/dev/null || echo 0)
+
+      local diff=$((log_mtime - sfile_mtime))
+      [[ $diff -lt 0 ]] && diff=$((-diff))
+
+      if [[ $diff -lt $best_diff && $diff -lt 120 ]]; then
+        best_diff=$diff
+        best_session="$sid"
+      fi
+    done <<< "$recent_sessions"
+
+    if [[ -n "$best_session" ]]; then
+      echo "$best_session"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+# Monitor history.jsonl for new entries and correlate with terminals
+process_history_updates() {
+  [[ ! -f "$HISTORY" ]] && return 0
+
+  # Get last processed position
+  local last_pos=0
+  if [[ -f "$STATE_FILE" ]]; then
+    last_pos=$(cat "$STATE_FILE" 2>/dev/null || echo 0)
+  fi
+
+  local current_lines
+  current_lines=$(wc -l < "$HISTORY" 2>/dev/null | tr -d ' ')
+
+  [[ $current_lines -le $last_pos ]] && return 0
+
+  # Process new entries
+  tail -n +$((last_pos + 1)) "$HISTORY" 2>/dev/null | while IFS= read -r line; do
+    local entry_project session_id timestamp
+    entry_project=$(echo "$line" | jq -r '.project // empty' 2>/dev/null)
+
+    [[ "$entry_project" != "$PROJECT_DIR" ]] && continue
+
+    session_id=$(echo "$line" | jq -r '.sessionId // empty' 2>/dev/null)
+    timestamp=$(echo "$line" | jq -r '.timestamp // empty' 2>/dev/null)
+
+    [[ -z "$session_id" || -z "$timestamp" ]] && continue
+
+    # Convert timestamp to seconds
+    local ts_sec=$((timestamp / 1000))
+
+    # Find which terminal had activity around this time
+    local window_ids
+    window_ids=$(jq -r '.terminals[]?.splitTerminals[]?.windowId // empty' "$JSON" 2>/dev/null)
+
+    local best_window=""
+    local best_diff=999999999
+
+    while IFS= read -r wid; do
+      [[ -z "$wid" ]] && continue
+      local log_file="$LOGS_DIR/${project_lower}-${wid}.log"
+      [[ ! -f "$log_file" ]] && continue
+
+      local log_mtime
+      log_mtime=$(stat -f %m "$log_file" 2>/dev/null || echo 0)
+
+      local diff=$((ts_sec - log_mtime))
+      [[ $diff -lt 0 ]] && diff=$((-diff))
+
+      # Activity within 30 seconds
+      if [[ $diff -lt $best_diff && $diff -lt 30 ]]; then
+        best_diff=$diff
+        best_window="$wid"
+      fi
+    done <<< "$window_ids"
+
+    if [[ -n "$best_window" ]]; then
+      update_json_session "$best_window" "$session_id"
+    fi
+  done
+
+  # Save current position
+  echo "$current_lines" > "$STATE_FILE"
+}
+
+# Main sync function - uses content-based matching with timestamp fallback
+sync_claude_sessions() {
+  # First, process any new history.jsonl entries for real-time updates
+  process_history_updates
+
+  # Get all window IDs from JSON
+  local window_ids
+  window_ids=$(jq -r '.terminals[]?.splitTerminals[]?.windowId // empty' "$JSON" 2>/dev/null)
+
+  [[ -z "$window_ids" ]] && return 0
+
+  # Build process map to check which terminals have active Claude
+  local process_map
+  process_map=$(build_process_map)
+
+  while IFS= read -r wid; do
+    [[ -z "$wid" ]] && continue
+
+    # Check if this terminal has an active Claude process
+    local has_claude=false
+    if echo "$process_map" | grep -q "^${wid}:"; then
+      has_claude=true
+    fi
+
+    # Get current session mapping
+    local current_session
+    current_session=$(jq -r --arg wid "$wid" \
+      '.terminals[]?.splitTerminals[]? | select(.windowId == $wid) | .claudeSessionId // empty' \
+      "$JSON" 2>/dev/null || true)
+
+    # Scenario 3: Claude exited - remove claudeSessionId to prevent auto-resume
+    if [[ "$has_claude" == "false" && -n "$current_session" ]]; then
+      remove_json_session "$wid"
+      continue
+    fi
+
+    # Skip if no Claude running and no session mapped (nothing to do)
+    if [[ "$has_claude" == "false" ]]; then
+      continue
+    fi
+
+    # Method 1: Content-based matching (primary - most accurate)
+    local session_id
+    session_id=$(get_session_for_window "$wid")
+
+    # Method 2: Timestamp fallback if content matching fails
+    if [[ -z "$session_id" ]]; then
+      session_id=$(get_session_by_timestamp "$wid")
+    fi
+
+    # Update if we found a session
+    if [[ -n "$session_id" ]]; then
+      update_json_session "$wid" "$session_id"
+    fi
+  done <<< "$window_ids"
+}
+
+# Main
+log "Started (PID $$)"
+log "Project: $PROJECT_DIR"
+log "Monitoring: $HISTORY"
+
+# Run initial sync
+sync_claude_sessions
+
+# Main loop
+while true; do
+  sleep "$SCAN_INTERVAL"
+  sync_claude_sessions
+done
