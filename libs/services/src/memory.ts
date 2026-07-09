@@ -137,7 +137,7 @@ export function getInstalledMemoryTag(): string | null {
  * releases/download/{tag}/{asset} endpoint is a plain CDN redirect with
  * no rate limit.
  */
-export const PINNED_MEMORY_TAG = "memory-prod-2026-07-07.1";
+export const PINNED_MEMORY_TAG = "memory-0.1.2";
 
 /**
  * Newest GitHub release carrying this platform's memory asset
