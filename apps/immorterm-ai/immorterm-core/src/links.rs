@@ -276,7 +276,7 @@ pub fn scan_row(text: &str, row: u32, out: &mut Vec<LinkSpan>) {
             && (bytes[i..].len() >= 4)
         {
             let lower3 = [bytes[i] | 0x20, bytes[i + 1] | 0x20, bytes[i + 2] | 0x20];
-            let is_rgb = lower3 == [b'r', b'g', b'b'];
+            let is_rgb = lower3 == *b"rgb";
             if is_rgb {
                 // Determine prefix: "rgb(" or "rgba(".
                 let prefix_len = if bytes[i..].len() >= 5
