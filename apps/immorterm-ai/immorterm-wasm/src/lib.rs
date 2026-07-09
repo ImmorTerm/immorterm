@@ -2067,8 +2067,7 @@ impl WasmTerminalInner {
         let mut combined = String::new();
         let mut row_char_offsets: Vec<usize> = Vec::new();
         let mut row_col_to_char: Vec<Vec<usize>> = Vec::new();
-        let mut cur = start;
-        for _ in 0..16 {
+        for cur in (start..).take(16) {
             let r = match get_row(cur) { Some(r) => r, None => break };
             row_char_offsets.push(combined.chars().count());
             let nb = last_nonblank_len(r);
@@ -2089,7 +2088,6 @@ impl WasmTerminalInner {
             }
             row_col_to_char.push(col_map);
             if !cont { break; }
-            cur += 1;
         }
         if combined.is_empty() { return String::new(); }
 
