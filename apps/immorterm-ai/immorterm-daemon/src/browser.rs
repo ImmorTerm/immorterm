@@ -836,6 +836,34 @@ impl BrowserSession {
         }
     }
 
+    /// Set the files on a `<input type=file>` addressed by a `ref_N` handle,
+    /// via CDP `DOM.setFileInputFiles`. We resolve the element to a CDP objectId
+    /// (Runtime.evaluate on its `data-immorterm-ref` tag, no returnByValue) so
+    /// setFileInputFiles targets the exact node. `path` is an absolute file path
+    /// on the machine running the browser.
+    pub fn set_file_input(&mut self, handle: &str, path: &str) -> Result<(), String> {
+        let node = self.resolve_ref(handle)?;
+        // Resolve the live element to a remote objectId.
+        let expr = format!(
+            "document.querySelector('[data-immorterm-ref=\"{}\"]')",
+            node.dom_idx
+        );
+        let res = self.cdp(
+            "Runtime.evaluate",
+            json!({ "expression": expr, "returnByValue": false }),
+        )?;
+        let object_id = res
+            .get("result")
+            .and_then(|r| r.get("objectId"))
+            .and_then(|o| o.as_str())
+            .ok_or_else(|| format!("{handle} is not a live element — re-run read_page."))?;
+        self.cdp(
+            "DOM.setFileInputFiles",
+            json!({ "files": [path], "objectId": object_id }),
+        )?;
+        Ok(())
+    }
+
     // ── Eval (gated at the tool layer) ───────────────────────────────
 
     pub fn eval(&mut self, js: &str) -> Result<String, String> {

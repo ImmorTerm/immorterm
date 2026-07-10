@@ -1049,6 +1049,19 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "immorterm_browser_upload",
+            "description": "Attach a local file to a file-upload input (<input type=file>) BY HANDLE. Use the ref_N handle of the file input from read_page/find and give an absolute path on this machine. This is how you upload files a plain click can't set.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "ref": { "type": "string", "description": "A file-input handle (ref_N) from read_page/find." },
+                    "path": { "type": "string", "description": "Absolute path to the file to upload." },
+                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror." }
+                },
+                "required": ["ref", "path"]
+            }
+        }),
+        json!({
             "name": "immorterm_browser_wait_for",
             "description": "Wait until a CSS selector appears and/or visible text shows up on the page, up to a timeout. Use this after a click/navigation that loads content asynchronously, INSTEAD of guessing with a sleep. Provide 'selector', 'text', or both (both must match).",
             "inputSchema": {
@@ -2165,6 +2178,7 @@ fn handle_tool_call(
         "immorterm_browser_request_human" => handle_browser_request_human(&arguments, rt),
         "immorterm_browser_wait_for_human" => handle_browser_wait_for_human(&arguments),
         "immorterm_browser_wait_for" => handle_browser_wait_for(&arguments, rt),
+        "immorterm_browser_upload" => handle_browser_upload(&arguments, rt),
         // AI Canvas Layer tools
         "immorterm_draw_rect" => handle_draw_rect(&arguments, rt),
         "immorterm_draw_text" => handle_draw_text(&arguments, rt),
@@ -3404,6 +3418,23 @@ fn handle_browser_wait_for(args: &Value, rt: &tokio::runtime::Runtime) -> Result
     } else {
         format!("⏳ Timed out after {timeout_secs}s waiting for {what}.")
     })
+}
+
+/// Set a file input's files by ref via CDP DOM.setFileInputFiles. `path` is an
+/// absolute path on the machine running the browser.
+fn handle_browser_upload(args: &Value, rt: &tokio::runtime::Runtime) -> Result<String, String> {
+    let handle = args
+        .get("ref")
+        .and_then(|s| s.as_str())
+        .ok_or("'ref' is required (a file-input handle from read_page/find)")?
+        .to_string();
+    let path = args
+        .get("path")
+        .and_then(|s| s.as_str())
+        .ok_or("'path' is required (an absolute file path)")?
+        .to_string();
+    with_browser(rt, None, |b| b.set_file_input(&handle, &path))?;
+    Ok(format!("📎 Set {handle}'s file to {path}."))
 }
 
 fn handle_get_capabilities(_args: &Value, rt: &tokio::runtime::Runtime) -> Result<String, String> {
