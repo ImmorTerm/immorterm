@@ -50,3 +50,26 @@ cd apps/immorterm-app/src-tauri && cargo check
   the extension's `apps/extension/src/services/memory/hook-installer.ts` is thin glue.
 - The companion memory engine and MCP gateway are separate binaries/repos; the CLI
   downloads their release binaries during `immorterm setup`.
+
+## Critical Rules
+
+1. **Read before Write** — never modify code you haven't read.
+
+2. **Sync rule** — hook templates live in `libs/services/src/hook-installer.ts` (source of truth). The extension's `apps/extension/src/services/memory/hook-installer.ts` is thin glue over that core. When you change a hook template, update `libs/services/` — the extension glue picks it up automatically.
+
+3. **Never `lsof -ti:PORT | xargs kill`** — this kills every process with a connection on that port, including daemon clients. To restart a daemon: `lsof -i :PORT | grep LISTEN` → `kill <that-pid>` only.
+
+4. **Never `pkill -9 -f "immorterm-ai-"` or any broad prefix** — this nukes every live session across all projects on the machine. If you need to stop a daemon you spawned, kill it by exact PID or a project-specific prefix narrow enough to match only your test session (e.g. `immorterm-app-ai-`). A broad pattern is never safe.
+
+5. **Test before commit** — run the relevant test suite (`bun run test:cli`, `bun run test:immorterm-ai`, etc.) and verify no regressions before committing.
+
+6. **DRY** — look for shared utilities in `libs/` before writing new ones. If something exists a few files away, reuse it.
+
+7. **Memory identity is three orthogonal dimensions.** Every memory row carries:
+   - **`user_id` = WHO** (the human) — resolved from `~/.immorterm/identity.json` → `IMMORTERM_USER_ID` → global git email → `$USER@$HOSTNAME`. Per-repo git email is ignored. Never `$USER` bare, never `"default"`.
+   - **`project_id` = WHAT** (the workspace) — a UUID in `<project_dir>/.immorterm/project.json` (`{id,name}`), committed to git so teammates share one partition. This is the primary read-partition key.
+   - **`host_id` = WHICH** (the machine) — stable machine id (`/etc/machine-id` on Linux, `IOPlatformUUID` on macOS). Not hostname+nonce.
+
+   Any new memory-write site must source these from the canonical files — never derive from `.mcp.json` slug, directory basename, or git remote.
+
+   **Migration-ordering rule (non-negotiable):** `user_id` currently doubles as the read-scoping key. Do NOT flip existing rows' `user_id` slug→email until readers are cut over to scope by `project_id` — flipping early returns empty results for every live reader. Populate `project_id` first (keep slug), cut readers over, then flip `user_id`.
