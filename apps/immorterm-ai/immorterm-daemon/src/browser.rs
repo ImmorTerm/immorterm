@@ -113,6 +113,47 @@ pub fn check_scheme(url: &str) -> Result<(), String> {
     ))
 }
 
+/// A page state where the AI must hand the browser to a human instead of
+/// looping (bot-check, captcha, OAuth consent, or password entry). Each carries
+/// a short human-readable reason and instructions shown in the workshop panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandoffReason {
+    Cloudflare,
+    Captcha,
+    OAuth,
+    Password,
+}
+
+impl HandoffReason {
+    /// Short label for the AI's text result and the panel banner.
+    pub fn reason(self) -> &'static str {
+        match self {
+            HandoffReason::Cloudflare => "Cloudflare \"verify you are human\" check",
+            HandoffReason::Captcha => "CAPTCHA challenge",
+            HandoffReason::OAuth => "sign-in / OAuth consent screen",
+            HandoffReason::Password => "password field",
+        }
+    }
+
+    /// What the human should do in the panel before clicking Continue.
+    pub fn instructions(self) -> &'static str {
+        match self {
+            HandoffReason::Cloudflare => {
+                "Complete the \"verify you are human\" check in the panel, then click ▶ Continue."
+            }
+            HandoffReason::Captcha => {
+                "Solve the CAPTCHA in the panel, then click ▶ Continue."
+            }
+            HandoffReason::OAuth => {
+                "Sign in and approve access in the panel, then click ▶ Continue."
+            }
+            HandoffReason::Password => {
+                "Type your password in the panel (the AI can't see it), then click ▶ Continue."
+            }
+        }
+    }
+}
+
 /// A single element in an accessibility snapshot, addressed by a `ref_N` handle
 /// that stays valid until the page navigates or a new snapshot is taken.
 #[derive(Clone)]
@@ -820,6 +861,26 @@ impl BrowserSession {
             .unwrap_or(Value::Null))
     }
 
+    /// Probe the current page for a state where the AI must NOT proceed and a
+    /// human has to step in (bot-check, captcha, OAuth consent, password entry).
+    /// One `eval_raw` JS pass returns `{host, path, kind}`; we map `kind` to a
+    /// `HandoffReason`. Returns `None` when nothing needs a human.
+    /// ponytail: one probe covers all four cases — a per-case CDP domain
+    /// (Fetch/Network heuristics) would be far more code for no more accuracy on
+    /// the pages that actually loop the AI (Cloudflare/captcha/login).
+    pub fn detect_human_needed(&mut self) -> Option<HandoffReason> {
+        let raw = self.eval_raw(HUMAN_NEEDED_JS).ok()?;
+        let s = raw.as_str()?;
+        let p: Value = serde_json::from_str(s).ok()?;
+        match p.get("kind").and_then(|k| k.as_str()) {
+            Some("cloudflare") => Some(HandoffReason::Cloudflare),
+            Some("captcha") => Some(HandoffReason::Captcha),
+            Some("oauth") => Some(HandoffReason::OAuth),
+            Some("password") => Some(HandoffReason::Password),
+            _ => None,
+        }
+    }
+
     /// Title + URL only (for captions), without minting a ref snapshot.
     pub fn current_title_url(&mut self) -> (String, String) {
         let js = "JSON.stringify({t:document.title,u:location.href})";
@@ -1188,6 +1249,52 @@ const AX_SNAPSHOT_JS: &str = r#"(() => {
   return JSON.stringify({ title: document.title, url: location.href, items });
 })()"#;
 
+/// In-page probe for a "human must take over" state. Returns JSON `{kind}` where
+/// `kind` is one of `password | captcha | cloudflare | oauth`, or `{}` when
+/// nothing needs a human. Priority: password and captcha/cloudflare bot-checks
+/// outrank a generic OAuth/login URL. Defensive: any error yields `{}`.
+const HUMAN_NEEDED_JS: &str = r#"(() => {
+  try {
+    const host = location.hostname.toLowerCase();
+    const path = location.pathname.toLowerCase();
+    const q = (sel) => { try { return !!document.querySelector(sel); } catch (e) { return false; } };
+    const bodyText = (document.body && document.body.innerText || '').slice(0, 4000);
+
+    // Password entry — highest priority; passwords must never reach the AI.
+    const pw = document.querySelector('input[type=password]');
+    if (pw) {
+      const r = pw.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) return JSON.stringify({ kind: 'password' });
+    }
+
+    // CAPTCHA widgets.
+    if (q('iframe[src*="recaptcha"]') || q('iframe[src*="hcaptcha"]')) {
+      return JSON.stringify({ kind: 'captcha' });
+    }
+
+    // Cloudflare / Turnstile bot-check.
+    if (host === 'challenges.cloudflare.com'
+        || q('iframe[src*="challenges.cloudflare.com"]')
+        || q('.cf-turnstile')
+        || q('#challenge-running')
+        || /verify you are human|checking your browser/i.test(bodyText)) {
+      return JSON.stringify({ kind: 'cloudflare' });
+    }
+
+    // OAuth / sign-in consent — generic, lowest priority.
+    const oauthHosts = ['accounts.google.com', 'login.microsoftonline.com', 'appleid.apple.com'];
+    const isOauthHost = oauthHosts.includes(host)
+      || (host === 'github.com' && /\/login|\/session/.test(path));
+    if (isOauthHost && /oauth|authorize|login|signin/i.test(path)) {
+      return JSON.stringify({ kind: 'oauth' });
+    }
+
+    return '{}';
+  } catch (e) {
+    return '{}';
+  }
+})()"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1386,6 +1493,45 @@ mod tests {
         assert!(html.contains("data:image/png;base64,QUJD"));
         assert!(html.contains("Example"));
         assert!(html.contains("example.com"));
+    }
+
+    #[test]
+    fn handoff_reason_labels_and_instructions_are_nonempty() {
+        for r in [
+            HandoffReason::Cloudflare,
+            HandoffReason::Captcha,
+            HandoffReason::OAuth,
+            HandoffReason::Password,
+        ] {
+            assert!(!r.reason().is_empty(), "{r:?} reason empty");
+            assert!(!r.instructions().is_empty(), "{r:?} instructions empty");
+            // Instructions steer the human to the panel's Continue control.
+            assert!(r.instructions().contains("Continue"), "{r:?} missing Continue cue");
+        }
+    }
+
+    #[test]
+    fn human_needed_js_is_self_contained_iife() {
+        // Guards against truncation of the injected probe.
+        assert!(HUMAN_NEEDED_JS.trim_start().starts_with("(() =>"));
+        assert!(HUMAN_NEEDED_JS.contains("challenges.cloudflare.com"));
+        assert!(HUMAN_NEEDED_JS.contains("input[type=password]"));
+        assert!(HUMAN_NEEDED_JS.contains("JSON.stringify"));
+        assert!(HUMAN_NEEDED_JS.trim_end().ends_with("})()"));
+    }
+
+    /// Live: navigate to a data: URL with a password field and assert the probe
+    /// flags Password. Ignored by default (needs a real browser). data: is
+    /// blocked by check_scheme, so we drive Runtime.evaluate to set the DOM.
+    #[test]
+    #[ignore = "needs a real browser; run explicitly"]
+    fn detect_human_needed_flags_password() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut b = BrowserSession::launch(&rt, "about:blank").expect("launch");
+        b.eval_raw("document.body.innerHTML = '<input type=password>'; true")
+            .expect("inject password field");
+        assert_eq!(b.detect_human_needed(), Some(HandoffReason::Password));
+        b.close();
     }
 
     #[test]

@@ -154,6 +154,43 @@ fn apply_browser_control(action: &str) {
     BROWSER_PAUSED.store(action == "pause", std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Redacted placeholder returned to the MODEL for any screenshot while a human
+/// is driving the paused browser — passwords must never reach the LLM. The
+/// human's own screencast (the pump's BrowserFrame push) is unaffected.
+const PAUSED_SCREEN_PLACEHOLDER: &str =
+    "🔒 Screen hidden — a human is driving the browser (paused). \
+     Call immorterm_browser_wait_for_human.";
+
+/// Hand the browser to the human: mark paused, banner the panel, and return the
+/// text-only message the AI sees (NO screenshot — privacy). Shared by the
+/// auto-detect path and the proactive `immorterm_browser_request_human` tool.
+/// `reason`/`instructions` come from a `HandoffReason` or the tool args.
+fn hand_off_to_human(
+    args: &Value,
+    reason: &str,
+    instructions: Option<&str>,
+    rt: &tokio::runtime::Runtime,
+) -> String {
+    BROWSER_PAUSED.store(true, std::sync::atomic::Ordering::Relaxed);
+    // Banner the panel (fire-and-forget — the human sees the live screencast
+    // regardless; a missing session just means no panel to banner).
+    if let Ok(session) = resolve_session(args) {
+        let _ = raw_ipc_query(
+            &session,
+            Request::BrowserHumanRequest {
+                reason: reason.to_string(),
+                instructions: instructions.map(String::from),
+            },
+            rt,
+        );
+    }
+    format!(
+        "🙋 Human needed: {reason}. The browser is paused and handed to you in the \
+         ImmorTerm workshop panel — solve it there, then click ▶ Continue. \
+         I'll wait: call immorterm_browser_wait_for_human."
+    )
+}
+
 /// Lazily initialized audio engine for the MCP server process.
 /// The MCP server runs as a normal foreground process (spawned by Claude Code)
 /// so it has full audio output access, unlike the double-forked daemon.
@@ -963,6 +1000,31 @@ fn tool_definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {},
+                "required": []
+            }
+        }),
+        json!({
+            "name": "immorterm_browser_request_human",
+            "description": "Hand the browser to the human when you hit something you can't or shouldn't do yourself — a Cloudflare/CAPTCHA bot-check, an OAuth/sign-in consent screen, a password or one-time-code field. Pauses the browser, banners the ImmorTerm workshop panel for the human to solve it, and returns a wait cue. Do NOT sleep-loop on such pages: call this, then immorterm_browser_wait_for_human.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "reason": { "type": "string", "description": "Short human-readable reason, e.g. 'Cloudflare human check' or 'Google sign-in'." },
+                    "instructions": { "type": "string", "description": "Optional: what the human should do in the panel before clicking ▶ Continue." },
+                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror." }
+                },
+                "required": []
+            }
+        }),
+        json!({
+            "name": "immorterm_browser_wait_for_human",
+            "description": "Wait for the human to finish driving the paused browser and click ▶ Continue in the panel. Call this after a handoff (auto-detected or via immorterm_browser_request_human) INSTEAD of sleeping. Returns when the human resumes, or after the timeout — call again if it times out.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "timeout_secs": { "type": "number", "description": "Max seconds to wait before returning (default 300, max 600). Call again if it times out." },
+                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror." }
+                },
                 "required": []
             }
         }),
@@ -2054,6 +2116,8 @@ fn handle_tool_call(
         "immorterm_browser_tabs_switch" => handle_browser_tabs_switch(&arguments, rt),
         "immorterm_browser_eval" => handle_browser_eval(&arguments, rt),
         "immorterm_browser_close" => handle_browser_close(),
+        "immorterm_browser_request_human" => handle_browser_request_human(&arguments, rt),
+        "immorterm_browser_wait_for_human" => handle_browser_wait_for_human(&arguments),
         // AI Canvas Layer tools
         "immorterm_draw_rect" => handle_draw_rect(&arguments, rt),
         "immorterm_draw_text" => handle_draw_text(&arguments, rt),
@@ -2982,7 +3046,18 @@ fn handle_browser_shot(
         None
     };
 
-    let (png, title, url, prev_id) = with_browser(rt, launch_url, |b| {
+    // Actions that may navigate to a bot-check / login / password page. After
+    // one of these we probe for a human-handoff state (Cloudflare, captcha,
+    // OAuth, password). Screenshot (pure read) doesn't navigate → not probed.
+    let may_navigate = matches!(
+        tool,
+        "immorterm_browser_open"
+            | "immorterm_browser_click"
+            | "immorterm_browser_key"
+            | "immorterm_browser_scroll"
+    );
+
+    let (png, title, url, prev_id, handoff) = with_browser(rt, launch_url, |b| {
         match tool {
             "immorterm_browser_open" => {
                 let url = args.get("url").and_then(|s| s.as_str())
@@ -3029,10 +3104,47 @@ fn handle_browser_shot(
             }
             _ => return Err(format!("unhandled browser tool {tool}")),
         }
-        let png = b.screenshot()?;
+        // Probe for a human-handoff state BEFORE screenshotting — a password
+        // page must not be captured/mirrored to the model. Only when we're not
+        // already paused (a paused browser is the human's; don't re-banner).
+        let handoff = if may_navigate && !browser_is_paused() {
+            b.detect_human_needed()
+        } else {
+            None
+        };
         let (title, url) = b.current_title_url();
-        Ok((png, title, url, b.last_mirror_prim_id))
+        // Skip the screenshot entirely on handoff (privacy) and while paused.
+        let png = if handoff.is_some() || browser_is_paused() {
+            String::new()
+        } else {
+            b.screenshot()?
+        };
+        Ok((png, title, url, b.last_mirror_prim_id, handoff))
     })?;
+
+    // Human-handoff: pause, banner the panel, return text-only (no screenshot).
+    if let Some(reason) = handoff {
+        let msg = hand_off_to_human(args, reason.reason(), Some(reason.instructions()), rt);
+        // Keep the pump alive so the human sees the live page in the panel.
+        if let Ok(session) = resolve_session(args) {
+            ensure_browser_pump(session);
+        }
+        return Ok(vec![json!({ "type": "text", "text": msg })]);
+    }
+
+    // Start the live screencast pump (idempotent) so the panel keeps streaming
+    // between tool calls. Scoped to the session we're mirroring into.
+    if let Ok(session) = resolve_session(args) {
+        ensure_browser_pump(session);
+    }
+
+    // Paused (human driving): never mirror or return the screen to the model.
+    if browser_is_paused() {
+        return Ok(vec![json!({
+            "type": "text",
+            "text": format!("🌐 {} — {}\n{}", title, url, PAUSED_SCREEN_PLACEHOLDER),
+        })]);
+    }
 
     // Mirror onto the canvas (best-effort), and remember the new overlay id.
     let new_id = mirror_to_canvas(args, &png, &title, &url, prev_id, rt);
@@ -3040,11 +3152,6 @@ fn handle_browser_shot(
         && let Some(b) = guard.as_mut()
     {
         b.last_mirror_prim_id = new_id.or(prev_id);
-    }
-    // Start the live screencast pump (idempotent) so the panel keeps streaming
-    // between tool calls. Scoped to the session we're mirroring into.
-    if let Ok(session) = resolve_session(args) {
-        ensure_browser_pump(session);
     }
 
     Ok(vec![
@@ -3151,6 +3258,43 @@ fn handle_browser_close() -> Result<String, String> {
         }
         None => Ok("No browser session was open.".to_string()),
     }
+}
+
+/// AI proactively hands the browser to the human (it noticed a bot-check /
+/// login it can't do itself). Pauses, banners the panel, returns the wait cue.
+fn handle_browser_request_human(args: &Value, rt: &tokio::runtime::Runtime) -> Result<String, String> {
+    let reason = args
+        .get("reason")
+        .and_then(|s| s.as_str())
+        .unwrap_or("the AI needs a human to take over the browser");
+    let instructions = args.get("instructions").and_then(|s| s.as_str());
+    Ok(hand_off_to_human(args, reason, instructions, rt))
+}
+
+/// Block (polling ~every 500ms) until the human clicks ▶ Continue in the panel
+/// (which clears BROWSER_PAUSED via the existing browser_control path) or the
+/// timeout elapses. This REPLACES an AI sleep-loop on handoff pages.
+fn handle_browser_wait_for_human(args: &Value) -> Result<String, String> {
+    let timeout_secs = args
+        .get("timeout_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(300)
+        .min(600);
+    // Already resumed → return immediately (also the not-paused case).
+    if !browser_is_paused() {
+        return Ok("✅ Human finished — resuming.".to_string());
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if !browser_is_paused() {
+            return Ok("✅ Human finished — resuming.".to_string());
+        }
+    }
+    Ok(format!(
+        "⏳ Still waiting after {timeout_secs}s; the human hasn't signaled done yet \
+         — call immorterm_browser_wait_for_human again."
+    ))
 }
 
 fn handle_get_capabilities(_args: &Value, rt: &tokio::runtime::Runtime) -> Result<String, String> {
@@ -4616,6 +4760,14 @@ mod tests {
         assert!(browser_is_paused());
         apply_browser_control("continue");
         assert!(!browser_is_paused());
+    }
+
+    #[test]
+    fn wait_for_human_returns_promptly_when_not_paused() {
+        // Not paused → resume immediately, even with a large timeout arg.
+        apply_browser_control("continue");
+        let out = handle_browser_wait_for_human(&json!({ "timeout_secs": 600 })).unwrap();
+        assert!(out.contains("Human finished"), "got {out}");
     }
 
     #[test]
