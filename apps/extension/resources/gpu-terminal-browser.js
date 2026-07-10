@@ -17,6 +17,14 @@
 //   {type:"browser_human_request", reason, instructions}
 //     Handoff: Claude needs the human. Renders a prominent banner; the
 //     "✓ Done — continue" button resumes the AI.
+//   {type:"browser_cursor", x, y, action:"move"|"click"|"type"|"scroll"}
+//     The AI's virtual cursor at page CSS px. Glides a little Mort (coral
+//     axolotl) mascot to the mapped point; click → tap-ripple + squish,
+//     type/scroll → subtle pulse. Fields may be absent on older daemons →
+//     no-op. See cursorMove()/mapPageToPanel().
+//   {type:"browser_narration", text}
+//     Short intent string ("Clicking Sign in…"). Pushes a bottom-right
+//     speech-bubble chip that fades after a few seconds. See narrate().
 //
 // webview → daemon (SEND — best-effort; the daemon may not handle these on
 // older builds. Sends must never throw if unacknowledged):
@@ -171,7 +179,113 @@ const PANEL_CSS = `
   box-shadow: 0 0 0 1px #f9e2af, 0 0 12px 0 rgba(249,226,175,0.4);
   animation: none;
 }
+/* ── Mort cursor: the AI's virtual pointer, a little coral axolotl. ──
+   Hotspot is its nose (top-left area); we offset so the nose sits on the
+   click point. Glides via a transform transition; hidden until first event. */
+#browser-mort-cursor {
+  position: absolute;
+  top: 0; left: 0;
+  width: 34px; height: 34px;
+  pointer-events: none;
+  z-index: 6;
+  opacity: 0;
+  transform: translate(-100px, -100px);
+  transition: transform 380ms cubic-bezier(0.22, 1, 0.36, 1), opacity 200ms ease;
+  filter: drop-shadow(0 2px 3px rgba(0,0,0,0.45));
+  will-change: transform, opacity;
+}
+#browser-mort-cursor.on { opacity: 1; }
+#browser-mort-cursor.squish { animation: bp-mort-squish 320ms ease; }
+#browser-mort-cursor.pulse { animation: bp-mort-pulse 300ms ease; }
+@keyframes bp-mort-squish {
+  0%   { scale: 1 1; }
+  40%  { scale: 1.18 0.82; }
+  70%  { scale: 0.92 1.08; }
+  100% { scale: 1 1; }
+}
+@keyframes bp-mort-pulse {
+  0%, 100% { scale: 1; }
+  50%      { scale: 1.14; }
+}
+/* Tap-ripple: an expanding fading ring at the click point. */
+.bp-ripple {
+  position: absolute;
+  pointer-events: none;
+  z-index: 6;
+  width: 14px; height: 14px;
+  margin: -7px 0 0 -7px; /* center on point */
+  border-radius: 50%;
+  border: 2px solid var(--sidebar-accent, #b482ff);
+  opacity: 0.9;
+  animation: bp-ripple 480ms ease-out forwards;
+}
+@keyframes bp-ripple {
+  to { transform: scale(4.5); opacity: 0; }
+}
+/* ── Intent balloons: bottom-right narration chips. ── */
+#browser-balloons {
+  position: absolute;
+  right: 12px; bottom: 12px;
+  z-index: 7;
+  display: flex; flex-direction: column;
+  align-items: flex-end; gap: 6px;
+  pointer-events: none;
+  max-width: 78%;
+}
+#browser-balloons .bp-balloon {
+  background: color-mix(in srgb, var(--sidebar-accent, #b482ff) 22%, var(--sidebar-bg, #181825));
+  border: 1px solid var(--sidebar-accent, #b482ff);
+  color: var(--sidebar-text, #cdd6f4);
+  font-size: 11px; line-height: 1.3;
+  padding: 6px 11px;
+  border-radius: 12px 12px 3px 12px; /* speech-bubble: notched bottom-right */
+  box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 100%;
+  animation: bp-balloon-in 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+#browser-balloons .bp-balloon.out {
+  animation: bp-balloon-out 340ms ease forwards;
+}
+@keyframes bp-balloon-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes bp-balloon-out {
+  to { opacity: 0; transform: translateX(12px); }
+}
 `;
+
+// Mort — ImmorTerm's coral axolotl mascot, minimal on-model rendering:
+// rounded coral body, three external gill-stalks per side of the head (the
+// axolotl signature), two dot eyes, a gentle smile, little legs. The nose
+// (upper-left) is the cursor hotspot. NOT a robot/arrow/hand.
+const MORT_SVG = `<svg viewBox="0 0 64 64" width="34" height="34" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <!-- gills: three stalks each side, coral-pink frilly tips -->
+  <g stroke="#FF7E9D" stroke-width="3" stroke-linecap="round" fill="none">
+    <path d="M20 20 C10 16 6 18 4 14"/>
+    <path d="M20 26 C9 25 5 27 3 24"/>
+    <path d="M21 32 C10 34 6 37 5 34"/>
+    <path d="M44 20 C54 16 58 18 60 14"/>
+    <path d="M44 26 C55 25 59 27 61 24"/>
+    <path d="M43 32 C54 34 58 37 59 34"/>
+  </g>
+  <g fill="#FFB3AE"><circle cx="5" cy="13" r="3"/><circle cx="4" cy="24" r="3"/><circle cx="6" cy="35" r="3"/><circle cx="59" cy="13" r="3"/><circle cx="60" cy="24" r="3"/><circle cx="58" cy="35" r="3"/></g>
+  <!-- little legs -->
+  <g fill="#FF9E8A"><ellipse cx="22" cy="52" rx="5" ry="7"/><ellipse cx="42" cy="52" rx="5" ry="7"/></g>
+  <!-- body/head -->
+  <path d="M32 12 C18 12 14 26 14 36 C14 50 22 56 32 56 C42 56 50 50 50 36 C50 26 46 12 32 12 Z" fill="#FF9E8A"/>
+  <!-- cheek blush -->
+  <circle cx="22" cy="40" r="3.5" fill="#FF7E9D" opacity="0.55"/>
+  <circle cx="42" cy="40" r="3.5" fill="#FF7E9D" opacity="0.55"/>
+  <!-- eyes -->
+  <circle cx="25" cy="32" r="3" fill="#2b2b3a"/>
+  <circle cx="39" cy="32" r="3" fill="#2b2b3a"/>
+  <circle cx="26" cy="31" r="1" fill="#fff"/>
+  <circle cx="40" cy="31" r="1" fill="#fff"/>
+  <!-- gentle smile -->
+  <path d="M27 42 Q32 47 37 42" stroke="#2b2b3a" stroke-width="2" stroke-linecap="round" fill="none"/>
+</svg>`;
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -236,6 +350,15 @@ export function createBrowserPanel({ container, beforeEl, send }) {
   img.tabIndex = 0; // focusable so the pane can capture keystrokes when paused
   bodyEl.appendChild(img);
 
+  // Mort cursor + intent balloons — overlays layered over the frame, in the
+  // same stacking context as the (later) handoff banner.
+  const mort = el('div');
+  mort.id = 'browser-mort-cursor';
+  mort.innerHTML = MORT_SVG;
+  const balloons = el('div');
+  balloons.id = 'browser-balloons';
+  bodyEl.append(mort, balloons);
+
   panel.append(resize, header, banner, bodyEl);
   container.insertBefore(panel, beforeEl || null);
 
@@ -262,6 +385,9 @@ export function createBrowserPanel({ container, beforeEl, send }) {
       hideBanner();
       img.blur();
     }
+    // Paused = human drives; Mort idles out of the way (defined later, but
+    // `mort` is in scope via closure).
+    if (paused) mort.classList.remove('on');
   }
 
   function showPauseBanner() {
@@ -420,11 +546,86 @@ export function createBrowserPanel({ container, beforeEl, send }) {
     img.focus();
   }
 
+  // ── Mort cursor ───────────────────────────────────────────────
+  // Forward transform: page CSS px → panel-relative px within the letterboxed
+  // <img>. Inverse of mapToPageCss (which goes displayed→page). Coords are
+  // relative to bodyEl, the overlay's positioned ancestor.
+  function mapPageToPanel(x, y) {
+    const nw = img.naturalWidth, nh = img.naturalHeight;
+    if (!nw || !nh) return null;
+    const imgRect = img.getBoundingClientRect();
+    const bodyRect = bodyEl.getBoundingClientRect();
+    const scale = Math.min(imgRect.width / nw, imgRect.height / nh);
+    const drawnW = nw * scale, drawnH = nh * scale;
+    // Letterbox offset within the img, then img offset within bodyEl.
+    const offX = (imgRect.left - bodyRect.left) + (imgRect.width - drawnW) / 2;
+    const offY = (imgRect.top - bodyRect.top) + (imgRect.height - drawnH) / 2;
+    return { x: offX + x * scale, y: offY + y * scale };
+  }
+
+  // Mort's nose hotspot sits ~upper-left; nudge so it lands on the point.
+  const MORT_HOTSPOT_X = 8, MORT_HOTSPOT_Y = 6;
+  function moveMortTo(px, py) {
+    mort.classList.add('on');
+    mort.style.transform =
+      `translate(${px - MORT_HOTSPOT_X}px, ${py - MORT_HOTSPOT_Y}px)`;
+  }
+  function flashMort(cls) {
+    mort.classList.remove(cls);
+    void mort.offsetWidth; // restart the animation
+    mort.classList.add(cls);
+  }
+
+  function ripple(px, py) {
+    const r = el('div', 'bp-ripple');
+    r.style.left = px + 'px';
+    r.style.top = py + 'px';
+    bodyEl.appendChild(r);
+    r.addEventListener('animationend', () => r.remove());
+  }
+
+  // {type:"browser_cursor", x, y, action}. No-op if coords are missing or the
+  // frame isn't laid out yet. Idle/hidden while paused (human is driving).
+  function cursorMove(msg) {
+    if (!msg || typeof msg.x !== 'number' || typeof msg.y !== 'number') return;
+    if (paused) { mort.classList.remove('on'); return; }
+    const p = mapPageToPanel(msg.x, msg.y);
+    if (!p) return;
+    moveMortTo(p.x, p.y);
+    const action = msg.action || 'move';
+    if (action === 'click') {
+      // Squish + ripple land ~when Mort arrives (after the glide).
+      const delay = 360;
+      setTimeout(() => { flashMort('squish'); ripple(p.x, p.y); }, delay);
+    } else if (action === 'type' || action === 'scroll') {
+      setTimeout(() => flashMort('pulse'), 360);
+    }
+  }
+
+  // ── Intent balloons ───────────────────────────────────────────
+  const BALLOON_MS = 3500, BALLOON_MAX = 3;
+  function narrate(msg) {
+    const text = msg && typeof msg.text === 'string' ? msg.text.trim() : '';
+    if (!text) return;
+    const chip = el('div', 'bp-balloon', text);
+    chip.title = text;
+    balloons.appendChild(chip);
+    while (balloons.children.length > BALLOON_MAX) {
+      balloons.firstChild.remove();
+    }
+    setTimeout(() => {
+      chip.classList.add('out');
+      chip.addEventListener('animationend', () => chip.remove(), { once: true });
+    }, BALLOON_MS);
+  }
+
   return {
     el: panel,
     showFrame,
     setState,
     humanRequest,
+    cursorMove,
+    narrate,
     hide() { panel.style.display = 'none'; },
   };
 }
