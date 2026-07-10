@@ -2647,11 +2647,13 @@ fn handle_screenshot(args: &Value, rt: &tokio::runtime::Runtime) -> Result<Value
     )?;
 
     // Return MCP image content type — renders inline in Claude Code
-    Ok(json!({
-        "type": "image",
-        "data": png_base64,
-        "mimeType": "image/png"
-    }))
+    Ok(png_image_content(&png_base64))
+}
+
+/// The one MCP `image` content block shape, shared by every tool that returns
+/// a PNG (screenshot + all browser_* tools) so the wire shape stays in sync.
+fn png_image_content(png_base64: &str) -> Value {
+    json!({ "type": "image", "data": png_base64, "mimeType": "image/png" })
 }
 
 // ─── Self-driven browser handlers ────────────────────────────────────
@@ -2780,7 +2782,7 @@ fn handle_browser_shot(
 
     Ok(vec![
         json!({ "type": "text", "text": format!("🌐 {} — {}", title, url) }),
-        json!({ "type": "image", "data": png, "mimeType": "image/png" }),
+        png_image_content(&png),
     ])
 }
 
