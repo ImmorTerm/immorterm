@@ -498,6 +498,17 @@ pub enum Request {
         #[serde(default)]
         instructions: Option<String>,
     },
+    /// Glide the panel's "Mort" cursor to where the AI is about to act. Coords
+    /// are PAGE CSS pixels; `action` ∈ {move, click, type, scroll}.
+    BrowserCursor {
+        x: f64,
+        y: f64,
+        action: String,
+    },
+    /// Show a short intent balloon in the panel (what the AI is doing now).
+    BrowserNarration {
+        text: String,
+    },
     /// Drain queued human→browser input the webview forwarded to the daemon
     /// (clicks/keys/scroll/pause). The MCP pump dispatches these to the live
     /// browser. Returns `BrowserInput` and clears the queue.

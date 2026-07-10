@@ -154,6 +154,38 @@ fn apply_browser_control(action: &str) {
     BROWSER_PAUSED.store(action == "pause", std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Emit a "Mort" cursor move to the panel (fire-and-forget). Coords are PAGE
+/// CSS px; `action` ∈ {move, click, type, scroll}.
+fn emit_browser_cursor(args: &Value, x: f64, y: f64, action: &str, rt: &tokio::runtime::Runtime) {
+    if let Ok(session) = resolve_session(args) {
+        let _ = raw_ipc_query(
+            &session,
+            Request::BrowserCursor { x, y, action: action.to_string() },
+            rt,
+        );
+    }
+}
+
+/// Emit a short intent balloon to the panel (fire-and-forget). Kept < ~60 chars.
+fn emit_browser_narration(args: &Value, text: &str, rt: &tokio::runtime::Runtime) {
+    let text = truncate_narration(text);
+    if let Ok(session) = resolve_session(args) {
+        let _ = raw_ipc_query(&session, Request::BrowserNarration { text }, rt);
+    }
+}
+
+/// Clamp a narration string to a single short line for the panel balloon.
+fn truncate_narration(text: &str) -> String {
+    const MAX: usize = 60;
+    let one_line = text.replace('\n', " ");
+    if one_line.chars().count() <= MAX {
+        return one_line;
+    }
+    let mut s: String = one_line.chars().take(MAX - 1).collect();
+    s.push('…');
+    s
+}
+
 /// Redacted placeholder returned to the MODEL for any screenshot while a human
 /// is driving the paused browser — passwords must never reach the LLM. The
 /// human's own screencast (the pump's BrowserFrame push) is unaffected.
@@ -3057,11 +3089,17 @@ fn handle_browser_shot(
             | "immorterm_browser_scroll"
     );
 
-    let (png, title, url, prev_id, handoff) = with_browser(rt, launch_url, |b| {
+    // A "Mort" cursor event (page CSS-px + action) captured during the action,
+    // and a short narration — both emitted to the panel after the closure.
+    let mut cursor: Option<(f64, f64, String)> = None;
+    let mut narration: Option<String> = None;
+
+    let (png, title, url, prev_id, handoff, cursor, narration) = with_browser(rt, launch_url, |b| {
         match tool {
             "immorterm_browser_open" => {
                 let url = args.get("url").and_then(|s| s.as_str())
                     .ok_or("'url' is required")?;
+                narration = Some(format!("Opening {url}"));
                 b.navigate(url)?;
             }
             "immorterm_browser_screenshot" => {}
@@ -3070,12 +3108,20 @@ fn handle_browser_shot(
                 let before = b.page_target_ids();
                 // Prefer clicking by ref; fall back to CSS-pixel coordinates.
                 if let Some(handle) = args.get("ref").and_then(|s| s.as_str()) {
+                    // Resolve the ref for the cursor coords + a named narration.
+                    if let Ok(node) = b.resolve_ref(handle) {
+                        cursor = Some((node.cx, node.cy, "click".to_string()));
+                        let name = if node.name.is_empty() { handle.to_string() } else { node.name.clone() };
+                        narration = Some(format!("Clicking \"{name}\""));
+                    }
                     b.click_ref(handle)?;
                 } else {
                     let x = args.get("x").and_then(|v| v.as_f64())
                         .ok_or("provide 'ref' (from read_page/find) or both 'x' and 'y'")?;
                     let y = args.get("y").and_then(|v| v.as_f64())
                         .ok_or("provide 'ref' (from read_page/find) or both 'x' and 'y'")?;
+                    cursor = Some((x, y, "click".to_string()));
+                    narration = Some(format!("Clicking ({x:.0}, {y:.0})"));
                     b.click(x, y)?;
                 }
                 settle();
@@ -3086,6 +3132,11 @@ fn handle_browser_shot(
                     .ok_or("'ref' is required (a field/checkbox/dropdown handle from read_page/find)")?;
                 let value = args.get("value").and_then(|s| s.as_str())
                     .ok_or("'value' is required")?;
+                if let Ok(node) = b.resolve_ref(handle) {
+                    cursor = Some((node.cx, node.cy, "type".to_string()));
+                    let name = if node.name.is_empty() { handle.to_string() } else { node.name.clone() };
+                    narration = Some(format!("Typing into \"{name}\""));
+                }
                 b.form_input(handle, value)?;
                 settle();
             }
@@ -3093,12 +3144,17 @@ fn handle_browser_shot(
                 let before = b.page_target_ids();
                 let key = args.get("key").and_then(|s| s.as_str())
                     .ok_or("'key' is required")?;
+                narration = Some(format!("Pressing {key}"));
                 b.key(key)?;
                 settle();
                 b.follow_new_target(&before); // Enter may open a popup / new tab
             }
             "immorterm_browser_scroll" => {
                 let dy = args.get("dy").and_then(|v| v.as_f64()).ok_or("'dy' is required")?;
+                // Scroll dispatches at the viewport center (browser.rs uses the
+                // 1280x800 default window → center 640,400).
+                cursor = Some((640.0, 400.0, "scroll".to_string()));
+                narration = Some(format!("Scrolling {}", if dy >= 0.0 { "down" } else { "up" }));
                 b.scroll(dy)?;
                 settle();
             }
@@ -3119,8 +3175,16 @@ fn handle_browser_shot(
         } else {
             b.screenshot()?
         };
-        Ok((png, title, url, b.last_mirror_prim_id, handoff))
+        Ok((png, title, url, b.last_mirror_prim_id, handoff, cursor, narration))
     })?;
+
+    // Emit the intent balloon + Mort cursor to the panel (fire-and-forget).
+    if let Some(text) = &narration {
+        emit_browser_narration(args, text, rt);
+    }
+    if let Some((x, y, action)) = &cursor {
+        emit_browser_cursor(args, *x, *y, action, rt);
+    }
 
     // Human-handoff: pause, banner the panel, return text-only (no screenshot).
     if let Some(reason) = handoff {
@@ -4760,6 +4824,27 @@ mod tests {
         assert!(browser_is_paused());
         apply_browser_control("continue");
         assert!(!browser_is_paused());
+    }
+
+    #[test]
+    fn browser_cursor_and_narration_requests_serialize() {
+        let c = serde_json::to_value(Request::BrowserCursor {
+            x: 12.0, y: 34.0, action: "click".into(),
+        })
+        .unwrap();
+        assert_eq!(c["type"], "BrowserCursor");
+        let n = serde_json::to_value(Request::BrowserNarration { text: "Opening x".into() }).unwrap();
+        assert_eq!(n["type"], "BrowserNarration");
+    }
+
+    #[test]
+    fn narration_truncates_and_collapses_newlines() {
+        assert_eq!(truncate_narration("Clicking \"Sign in\""), "Clicking \"Sign in\"");
+        assert_eq!(truncate_narration("a\nb"), "a b");
+        let long = "x".repeat(100);
+        let out = truncate_narration(&long);
+        assert_eq!(out.chars().count(), 60);
+        assert!(out.ends_with('…'));
     }
 
     #[test]

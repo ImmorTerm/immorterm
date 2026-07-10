@@ -1305,6 +1305,8 @@ async fn handle_ws_connection(
                                 || json_arc.contains("\"type\":\"browser_frame\"")
                                 || json_arc.contains("\"type\":\"browser_state\"")
                                 || json_arc.contains("\"type\":\"browser_human_request\"")
+                                || json_arc.contains("\"type\":\"browser_cursor\"")
+                                || json_arc.contains("\"type\":\"browser_narration\"")
                         } else {
                             true
                         };
