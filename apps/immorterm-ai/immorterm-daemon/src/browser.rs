@@ -1301,9 +1301,10 @@ mod tests {
         // Process is alive right after launch.
         assert_eq!(unsafe { nix::libc::kill(pid as i32, 0) }, 0, "browser not alive");
 
-        // A real page paints; about:blank may never emit a screencast frame.
-        b.navigate("https://example.com").expect("navigate");
         b.ensure_screencast().expect("startScreencast");
+        // about:blank is static; force a repaint so Chromium emits a frame
+        // without needing the network (this env may be offline).
+        let _ = b.eval_raw("document.body.style.background='#123'; true");
         // Poll up to ~5s for the first frame.
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut got_frame = false;
@@ -1313,6 +1314,8 @@ mod tests {
                 got_frame = true;
                 break;
             }
+            // Nudge a repaint each poll so a static page still produces frames.
+            let _ = b.eval_raw("document.body.style.background = (Date.now()%2)?'#124':'#125'; true");
             std::thread::sleep(Duration::from_millis(100));
         }
         assert!(got_frame, "no screencast frame within 5s");
