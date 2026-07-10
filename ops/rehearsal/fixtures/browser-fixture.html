@@ -4,36 +4,50 @@
 <meta charset="utf-8">
 <title>ImmorTerm Browser Fixture</title>
 <style>
-  /* Big, well-spaced targets so coordinate clicks land reliably. */
+  /* Big, well-spaced, accessibly-labeled targets so the AX snapshot names
+     them clearly and ref resolution lands on the right box. */
   body { font-family: sans-serif; margin: 40px; }
   label, button { display: block; margin: 24px 0; font-size: 18px; }
   input[type=text], select { font-size: 18px; padding: 8px; width: 300px; }
   input[type=checkbox] { width: 24px; height: 24px; vertical-align: middle; }
   button { font-size: 18px; padding: 12px 32px; }
   #result { margin-top: 24px; font-size: 20px; font-weight: bold; }
+  #late { margin-top: 24px; font-size: 18px; color: #0a7d00; }
 </style>
 </head>
 <body>
 <h1>ImmorTerm Browser Fixture</h1>
 <form id="f">
-  <label>Name <input id="name" type="text" autocomplete="off"></label>
-  <label>Flavor
+  <label for="name">Name <input id="name" type="text" autocomplete="off"></label>
+  <label for="flavor">Flavor
     <select id="flavor">
       <option value="vanilla">vanilla</option>
       <option value="axolotl">axolotl</option>
+      <option value="mango">mango</option>
     </select>
   </label>
   <label><input id="check" type="checkbox"> I agree</label>
   <button id="go" type="submit">Submit</button>
 </form>
 <div id="result"></div>
+<!-- Injected after a delay so wait_for has a genuinely-absent-then-present
+     element to resolve on (proves it polls, not just reads once). -->
+<div id="late-slot"></div>
 <script>
 document.getElementById('f').addEventListener('submit', function (e) {
   e.preventDefault();
   document.getElementById('result').textContent =
     'SUBMITTED:' + document.getElementById('name').value +
+    ':' + document.getElementById('flavor').value +
     ':' + (document.getElementById('check').checked ? 'checked' : 'unchecked');
 });
+// The delayed element: absent on first read_page, appears ~1.2s later.
+setTimeout(function () {
+  var d = document.createElement('div');
+  d.id = 'late';
+  d.textContent = 'Delayed Ready Marker';
+  document.getElementById('late-slot').appendChild(d);
+}, 1200);
 </script>
 </body>
 </html>

@@ -5,6 +5,13 @@
 // spawned process. We never signal the server — closing its stdin makes the
 // serve loop exit on EOF.
 //
+// Ref-based surface (the current contract, docs/browser-tools.md):
+//   read_page → "[ref_N] role \"name\"" lines; find(query) → ranked ref list;
+//   click{ref}; form_input{ref,value} for textbox/checkbox/<select>;
+//   wait_for resolves on a delayed element. This harness NEVER touches
+//   browser_eval — it's gated off by default (IMMORTERM_BROWSER_EVAL=1), so a
+//   rehearsal that depends on it would be testing a non-default surface.
+//
 // Usage: node browser-e2e-scenario.js <immorterm-ai-bin> <fixture-url>
 // Emits "OK <check>" / "BAD <check>" lines (parsed by browser-e2e.sh);
 // exit code = number of failed checks.
@@ -51,6 +58,21 @@ const text = (content) => content.filter((c) => c.type === 'text').map((c) => c.
 const image = (content) => content.find((c) => c.type === 'image');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// "[ref_7] textbox \"Name\"  value:\"\"" → { ref:"ref_7", role:"textbox",
+// name:"Name" }. Returns every ref-bearing line, in listed order.
+function parseRefs(listing) {
+  const out = [];
+  for (const line of listing.split('\n')) {
+    const m = line.match(/\[(ref_\d+)\]\s+(\S+)\s+"([^"]*)"/);
+    if (m) out.push({ ref: m[1], role: m[2], name: m[3], line });
+  }
+  return out;
+}
+// First ref whose role/name matches — used to pin form fields by their label.
+function pickRef(refs, roleRe, nameRe) {
+  return refs.find((r) => roleRe.test(r.role) && nameRe.test(r.name));
+}
+
 let fails = 0;
 async function step(name, fn) {
   try {
@@ -63,17 +85,22 @@ async function step(name, fn) {
     return false;
   }
 }
-
-// Center coordinates of the fixture's interactive elements, in CSS pixels
-// (the same space browser_click takes — DPR is pinned to 1).
-const COORDS_JS = `(() => {
-  const c = {};
-  for (const id of ['name', 'check', 'go']) {
-    const r = document.getElementById(id).getBoundingClientRect();
-    c[id] = { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+// Optional step: skips (no OK/BAD, informational) when a tool isn't in this
+// deploy. Used for wait_for, which post-dates the read_page/find/form_input core.
+async function optionalStep(name, fn) {
+  try {
+    await fn();
+    console.log(`OK ${name}`);
+  } catch (e) {
+    const msg = String(e.message || e);
+    if (/Method not found|Unknown tool|not found|no such tool|-32601/i.test(msg)) {
+      console.log(`SKIP ${name} — tool absent in this deploy`);
+    } else {
+      fails++;
+      console.log(`BAD ${name} — ${msg.slice(0, 200)}`);
+    }
   }
-  return JSON.stringify(c);
-})()`;
+}
 
 // A process counts as gone when ps no longer lists it, or lists it as a
 // zombie (the MCP server never reaps the browser child it forgot).
@@ -87,7 +114,8 @@ function pidGone(pid) {
 }
 
 (async () => {
-  let coords = null;
+  let refs = [];
+  let nameRef = null, flavorRef = null, checkRef = null, submitRef = null;
   let browserPid = null;
 
   const opened = await step('open returns caption + image', async () => {
@@ -101,39 +129,65 @@ function pidGone(pid) {
     process.exit(fails);
   }
 
-  await step('read shows fixture title', async () => {
-    const t = text(await call('immorterm_browser_read'));
-    if (!t.includes('ImmorTerm Browser Fixture')) throw new Error(`title missing in: ${t.slice(0, 120)}`);
+  await step('read_page returns [ref_N] lines', async () => {
+    const listing = text(await call('immorterm_browser_read_page', { interactive_only: true }));
+    refs = parseRefs(listing);
+    if (refs.length < 3) throw new Error(`only ${refs.length} refs in: ${listing.slice(0, 200)}`);
+    if (!/ref_\d+/.test(listing)) throw new Error('no ref_N handle in listing');
+    // Pin the fields we act on by role + accessible name.
+    nameRef = pickRef(refs, /textbox|text/i, /name/i);
+    flavorRef = pickRef(refs, /combobox|listbox|select|menu/i, /flavor/i);
+    checkRef = pickRef(refs, /checkbox/i, /agree/i);
+    if (!nameRef) throw new Error(`no name textbox ref in: ${refs.map((r) => r.line).join(' | ')}`);
   });
 
-  await step('eval locates form coords', async () => {
-    coords = JSON.parse(text(await call('immorterm_browser_eval', { js: COORDS_JS })));
-    if (!coords.name || !coords.check || !coords.go) throw new Error('missing coords');
+  await step('find locates the submit button by text→ref', async () => {
+    const listing = text(await call('immorterm_browser_find', { query: 'the Submit button' }));
+    const found = parseRefs(listing);
+    submitRef = pickRef(found, /button/i, /submit/i) || found[0];
+    if (!submitRef) throw new Error(`no ref in find result: ${listing.slice(0, 200)}`);
+    if (!/button/i.test(submitRef.role)) throw new Error(`top result is ${submitRef.role}, not a button`);
   });
 
-  await step('click focuses text input', async () => {
-    const c = await call('immorterm_browser_click', coords.name);
-    if (!image(c)) throw new Error('no screenshot after click');
-    const active = text(await call('immorterm_browser_eval', { js: 'document.activeElement.id' }));
-    if (active !== 'name') throw new Error(`activeElement=${active}`);
+  await step('form_input fills the name textbox by ref', async () => {
+    if (!nameRef) throw new Error('no name ref from read_page');
+    const c = await call('immorterm_browser_form_input', { ref: nameRef.ref, value: 'mort' });
+    if (!image(c) && !text(c)) throw new Error('no caption/screenshot back');
   });
 
-  await step('type fills input', async () => {
-    await call('immorterm_browser_type', { text: 'mort' });
-    const v = text(await call('immorterm_browser_eval', { js: "document.getElementById('name').value" }));
-    if (v !== 'mort') throw new Error(`input value=${v}`);
+  await step('form_input sets the <select> by ref', async () => {
+    if (!flavorRef) throw new Error('no flavor <select> ref from read_page');
+    const c = await call('immorterm_browser_form_input', { ref: flavorRef.ref, value: 'mango' });
+    if (!image(c) && !text(c)) throw new Error('no caption/screenshot back');
+    // Confirm the option actually took via a fresh AX snapshot's value:"…".
+    const listing = text(await call('immorterm_browser_read_page', { interactive_only: true }));
+    if (!/flavor/i.test(listing) || !/mango/i.test(listing)) {
+      throw new Error(`select value not 'mango' in snapshot: ${listing.slice(0, 200)}`);
+    }
   });
 
-  await step('click checks checkbox', async () => {
-    await call('immorterm_browser_click', coords.check);
-    const v = text(await call('immorterm_browser_eval', { js: "String(document.getElementById('check').checked)" }));
-    if (v !== 'true') throw new Error(`checked=${v}`);
+  await step('form_input checks the checkbox by ref', async () => {
+    if (!checkRef) throw new Error('no checkbox ref from read_page');
+    await call('immorterm_browser_form_input', { ref: checkRef.ref, value: 'checked' });
   });
 
-  await step('submit renders SUBMITTED', async () => {
-    await call('immorterm_browser_click', coords.go);
-    const t = text(await call('immorterm_browser_read'));
-    if (!t.includes('SUBMITTED:mort:checked')) throw new Error(`no SUBMITTED marker in: ...${t.slice(-200)}`);
+  await step('click{ref} submits → SUBMITTED marker', async () => {
+    await call('immorterm_browser_click', { ref: submitRef.ref });
+    const t = text(await call('immorterm_browser_read_page', { interactive_only: false }));
+    // Reflects name + selected flavor + checkbox state — proves form_input on
+    // the textbox, the <select>, AND the checkbox all landed.
+    if (!/SUBMITTED:mort:mango:checked/.test(t)) {
+      throw new Error(`no SUBMITTED:mort:mango:checked in: ...${t.slice(-220)}`);
+    }
+  });
+
+  // wait_for post-dates the ref core — assert only if this deploy has it.
+  await optionalStep('wait_for resolves on the delayed element', async () => {
+    const c = await call('immorterm_browser_wait_for', { query: 'Delayed Ready Marker' }, 15000);
+    const body = text(c);
+    if (!/Delayed Ready Marker|ref_\d+/.test(body)) {
+      throw new Error(`wait_for gave nothing resolvable: ${body.slice(0, 200)}`);
+    }
   });
 
   await step('screenshot is a >10KB png', async () => {

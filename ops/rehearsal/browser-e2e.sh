@@ -1,6 +1,9 @@
 #!/bin/bash
-# ImmorTerm self-driven browser rehearsal — e2e for the immorterm_browser_*
-# MCP tools (open/screenshot/click/type/key/scroll/read/eval/close).
+# ImmorTerm self-driven browser rehearsal — e2e for the ref-based
+# immorterm_browser_* MCP tools: read_page ([ref_N] AX listing), find
+# (text→ref), form_input{ref,value} (textbox/select/checkbox), click{ref},
+# and wait_for (delayed element). Never uses browser_eval (gated off by
+# default), so it exercises only the default, secure surface.
 #
 # Mechanism: spawns the installed daemon's stdio MCP server
 # (`immorterm-ai mcp serve`, newline-delimited JSON-RPC 2.0) and drives the
@@ -30,14 +33,23 @@ if [ -z "${BIN:-}" ] || [ ! -x "$BIN" ]; then
   exit 0
 fi
 
-echo "═══ [0] probe: browser tools in the installed daemon? ═══"
+echo "═══ [0] probe: ref-based browser tools in the installed daemon? ═══"
 TOOLS=$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | "$BIN" mcp serve 2>/dev/null)
-if ! echo "$TOOLS" | grep -q '"immorterm_browser_open"'; then
-  echo "SKIP: immorterm_browser_* tools not in the installed daemon yet ($BIN)."
-  echo "      Re-run after deploying a daemon built with browser.rs (see /deploy-daemon)."
+# The scenario drives the ref surface (read_page/find/form_input/click{ref}).
+# Gate on read_page: a daemon with only v1 coordinate tools (open present,
+# read_page absent) must skip cleanly — this harness lands before that deploy.
+if ! echo "$TOOLS" | grep -q '"immorterm_browser_read_page"'; then
+  if echo "$TOOLS" | grep -q '"immorterm_browser_open"'; then
+    echo "SKIP: daemon has v1 coordinate browser tools but not the ref surface"
+    echo "      (immorterm_browser_read_page missing). Re-run after deploying the"
+    echo "      ref-based browser.rs (see /deploy-daemon)."
+  else
+    echo "SKIP: immorterm_browser_* tools not in the installed daemon yet ($BIN)."
+    echo "      Re-run after deploying a daemon built with browser.rs (see /deploy-daemon)."
+  fi
   exit 0
 fi
-ok "browser tools present in installed daemon"
+ok "ref-based browser tools present in installed daemon"
 
 echo "═══ [1] fixture server (python3 http.server, ephemeral port) ═══"
 SRV_LOG=$(mktemp)

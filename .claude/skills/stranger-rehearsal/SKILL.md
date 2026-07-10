@@ -51,11 +51,16 @@ ending with "the Tauri picker 'Open Project → docker' will connect."
 bash ops/rehearsal/browser-e2e.sh
 ```
 
-Proves the daemon's self-driven browser (`immorterm_browser_*` MCP tools):
-spawns the installed daemon's stdio MCP server (`immorterm-ai mcp serve`),
-serves a local fixture form, and runs open → read → eval-coords → click →
-type → checkbox → submit → screenshot (>10KB) → close (pid gone, daemons
-untouched). Exit code = failures, same verdict-banner style as Part 1.
+Proves the daemon's self-driven browser via its **ref-based** MCP surface
+(`immorterm_browser_*`): spawns the installed daemon's stdio MCP server
+(`immorterm-ai mcp serve`), serves a local fixture form, and runs
+open → read_page (asserts `[ref_N]` lines) → find (submit button text→ref) →
+form_input (fill textbox, set the `<select>` by ref, check the checkbox) →
+click{ref} to submit (asserts the `SUBMITTED:mort:mango:checked` marker) →
+wait_for (delayed element — asserted only if the deploy has it) →
+screenshot (>10KB) → close (pid gone, daemons untouched). It never calls
+`immorterm_browser_eval` (gated off by default), so it tests only the secure
+default surface. Exit code = failures, same verdict-banner style as Part 1.
 
 When to run it:
 - After deploying a daemon that touches `browser.rs` or the browser tool
@@ -65,7 +70,9 @@ When to run it:
   with a Chromium-engine browser (or `IMMORTERM_BROWSER_BIN`) and pops a
   visible window for a few seconds.
 - It SKIPS cleanly (exit 0, clear message) when the installed daemon predates
-  the browser tools — safe to run unconditionally alongside Parts 1–2.
+  the ref surface — including a daemon that has only the v1 coordinate tools
+  (probe gates on `immorterm_browser_read_page`). Safe to run unconditionally
+  alongside Parts 1–2.
 
 ## Known gotchas (each cost a debugging round — do not rediscover)
 
