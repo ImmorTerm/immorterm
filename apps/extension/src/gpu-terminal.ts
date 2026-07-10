@@ -2306,7 +2306,7 @@ Return ONLY a JSON object with these fields:
       .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
       .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '')
       .trim();
-    type Hit = { source: string; text: string };
+    type Hit = { source: string; text: string; image?: string };
     // Streaming protocol: each source posts a {partial:true, result} message
     // as it resolves so the popup can show drawers immediately. A final
     // {partial:false, anyHit} signals the end. The popup uses partial:false
@@ -2390,7 +2390,7 @@ Return ONLY a JSON object with these fields:
 
   /** Wikipedia REST API page-summary. Returns the lead-paragraph extract.
    *  Best for proper nouns, technical terms, multi-word concepts. */
-  private fetchWikipedia(query: string): Promise<{ text: string; source: string } | null> {
+  private fetchWikipedia(query: string): Promise<{ text: string; source: string; image?: string } | null> {
     const title = query.length > 0 ? query[0].toUpperCase() + query.slice(1) : query;
     return this.httpsGetJson(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}?redirect=true`)
       .then((data) => {
@@ -2399,15 +2399,18 @@ Return ONLY a JSON object with these fields:
         const extract = String(data.extract || '').trim();
         if (extract.length < 20) { logger.debug(`ImmorTerm AI: [wiki] short extract (${extract.length})`); return null; }
         const concise = extract.split(/(?<=[.!?])\s+/).slice(0, 3).join(' ');
-        logger.debug(`ImmorTerm AI: [wiki] hit (${concise.length} chars)`);
-        return { text: concise, source: 'Wikipedia' };
+        // The summary payload already carries a lead image — surface it (https only).
+        const img = String(data.thumbnail?.source || data.originalimage?.source || '').trim();
+        const image = img.startsWith('https:') ? img : undefined;
+        logger.debug(`ImmorTerm AI: [wiki] hit (${concise.length} chars${image ? ', +image' : ''})`);
+        return { text: concise, source: 'Wikipedia', image };
       })
       .catch((err) => { logger.debug(`ImmorTerm AI: [wiki] err: ${err && err.message || err}`); return null; });
   }
 
   /** DuckDuckGo Instant Answer (existing path). Sometimes catches things
    *  Wikipedia misses (e.g. acronyms with structured DDG data). */
-  private fetchDDG(query: string): Promise<{ text: string; source: string } | null> {
+  private fetchDDG(query: string): Promise<{ text: string; source: string; image?: string } | null> {
     return this.httpsGetJson(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1&t=immorterm`)
       .then((data) => {
         if (!data) { logger.debug('ImmorTerm AI: [ddg] empty'); return null; }
@@ -2416,8 +2419,13 @@ Return ONLY a JSON object with these fields:
         if (summary.length < 20) { logger.debug(`ImmorTerm AI: [ddg] short summary (${summary.length})`); return null; }
         const src = String(data.AbstractSource || data.DefinitionSource || 'DuckDuckGo').trim();
         const concise = summary.split(/(?<=[.!?])\s+/).slice(0, 3).join(' ');
-        logger.debug(`ImmorTerm AI: [ddg] hit (${concise.length} chars)`);
-        return { text: concise, source: `DuckDuckGo · ${src}` };
+        // DDG's Image is often a site-relative path (/i/...); make it absolute.
+        const rawImg = String(data.Image || '').trim();
+        const image = rawImg.startsWith('https:') ? rawImg
+          : rawImg.startsWith('/') ? `https://duckduckgo.com${rawImg}`
+          : undefined;
+        logger.debug(`ImmorTerm AI: [ddg] hit (${concise.length} chars${image ? ', +image' : ''})`);
+        return { text: concise, source: `DuckDuckGo · ${src}`, image };
       })
       .catch((err) => { logger.debug(`ImmorTerm AI: [ddg] err: ${err && err.message || err}`); return null; });
   }

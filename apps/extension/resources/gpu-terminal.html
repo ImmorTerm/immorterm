@@ -608,6 +608,14 @@
     #explore-popup .xp-drawer.xp-open .xp-drawer-body {
       display: block;
     }
+    #explore-popup .xp-img {
+      display: block;
+      max-width: 100%;
+      max-height: 160px;
+      margin: 0 auto 8px;
+      border-radius: 6px;
+      object-fit: contain;
+    }
     #explore-popup .xp-foot {
       margin-top: 8px;
       display: flex; justify-content: space-between; align-items: center;
@@ -5017,7 +5025,21 @@
       finalizeExploreResults(false, msg.error || 'Explain request failed.');
     }
 
-    /** Append a new {source, text} hit to the popup as it arrives.
+    /** Render a source's image thumbnail into `container`, if it has one.
+     *  CSP permits https: images (see img-src). A broken URL just hides the
+     *  element rather than leaving a broken-image glyph. */
+    function appendExploreImage(container, url) {
+      if (!container || !url || typeof url !== 'string' || !url.startsWith('https:')) return;
+      const img = document.createElement('img');
+      img.className = 'xp-img';
+      img.src = url;
+      img.loading = 'lazy';
+      img.referrerPolicy = 'no-referrer';
+      img.addEventListener('error', () => { img.remove(); });
+      container.appendChild(img);
+    }
+
+    /** Append a new {source, text, image?} hit to the popup as it arrives.
      *  First hit clears the loading state; LLM-only single hit renders
      *  plain; otherwise renders/extends the drawer accordion. */
     function appendExploreResult(result) {
@@ -5062,7 +5084,10 @@
         head.appendChild(cmEl('span', 'xp-drawer-chev', '›'));
         head.appendChild(cmEl('span', 'xp-drawer-src', result.source));
         drawer.appendChild(head);
-        drawer.appendChild(cmEl('div', 'xp-drawer-body', result.text));
+        const body = cmEl('div', 'xp-drawer-body');
+        appendExploreImage(body, result.image);
+        body.appendChild(document.createTextNode(result.text));
+        drawer.appendChild(body);
         head.addEventListener('click', () => drawer.classList.toggle('xp-open'));
         drawersEl.appendChild(drawer);
       }
