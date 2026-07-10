@@ -1049,6 +1049,20 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "immorterm_browser_wait_for",
+            "description": "Wait until a CSS selector appears and/or visible text shows up on the page, up to a timeout. Use this after a click/navigation that loads content asynchronously, INSTEAD of guessing with a sleep. Provide 'selector', 'text', or both (both must match).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "selector": { "type": "string", "description": "CSS selector to wait for, e.g. '.results' or '#done'." },
+                    "text": { "type": "string", "description": "Visible page text to wait for (substring match)." },
+                    "timeout_secs": { "type": "number", "description": "Max seconds to wait (default 15, max 120)." },
+                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror." }
+                },
+                "required": []
+            }
+        }),
+        json!({
             "name": "immorterm_browser_wait_for_human",
             "description": "Wait for the human to finish driving the paused browser and click ▶ Continue in the panel. Call this after a handoff (auto-detected or via immorterm_browser_request_human) INSTEAD of sleeping. Returns when the human resumes, or after the timeout — call again if it times out.",
             "inputSchema": {
@@ -2150,6 +2164,7 @@ fn handle_tool_call(
         "immorterm_browser_close" => handle_browser_close(),
         "immorterm_browser_request_human" => handle_browser_request_human(&arguments, rt),
         "immorterm_browser_wait_for_human" => handle_browser_wait_for_human(&arguments),
+        "immorterm_browser_wait_for" => handle_browser_wait_for(&arguments, rt),
         // AI Canvas Layer tools
         "immorterm_draw_rect" => handle_draw_rect(&arguments, rt),
         "immorterm_draw_text" => handle_draw_text(&arguments, rt),
@@ -3359,6 +3374,36 @@ fn handle_browser_wait_for_human(args: &Value) -> Result<String, String> {
         "⏳ Still waiting after {timeout_secs}s; the human hasn't signaled done yet \
          — call immorterm_browser_wait_for_human again."
     ))
+}
+
+/// Wait for a CSS selector to appear and/or visible text to show, up to a
+/// timeout. Poll happens inside the browser (page-driven), not a blind sleep.
+fn handle_browser_wait_for(args: &Value, rt: &tokio::runtime::Runtime) -> Result<String, String> {
+    let selector = args.get("selector").and_then(|s| s.as_str()).map(String::from);
+    let text = args.get("text").and_then(|s| s.as_str()).map(String::from);
+    if selector.is_none() && text.is_none() {
+        return Err("provide 'selector' and/or 'text' to wait for".to_string());
+    }
+    let timeout_secs = args
+        .get("timeout_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(15)
+        .min(120);
+    let timeout = std::time::Duration::from_secs(timeout_secs);
+    let found = with_browser(rt, None, |b| {
+        b.wait_for(selector.as_deref(), text.as_deref(), timeout)
+    })?;
+    let what = match (&selector, &text) {
+        (Some(s), Some(t)) => format!("selector {s:?} and text {t:?}"),
+        (Some(s), None) => format!("selector {s:?}"),
+        (None, Some(t)) => format!("text {t:?}"),
+        (None, None) => unreachable!(),
+    };
+    Ok(if found {
+        format!("✅ Found {what}.")
+    } else {
+        format!("⏳ Timed out after {timeout_secs}s waiting for {what}.")
+    })
 }
 
 fn handle_get_capabilities(_args: &Value, rt: &tokio::runtime::Runtime) -> Result<String, String> {

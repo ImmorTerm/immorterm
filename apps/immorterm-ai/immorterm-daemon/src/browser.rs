@@ -863,7 +863,7 @@ impl BrowserSession {
 
     /// Probe the current page for a state where the AI must NOT proceed and a
     /// human has to step in (bot-check, captcha, OAuth consent, password entry).
-    /// One `eval_raw` JS pass returns `{host, path, kind}`; we map `kind` to a
+    /// One `eval_raw` JS pass returns `{kind}`; we map `kind` to a
     /// `HandoffReason`. Returns `None` when nothing needs a human.
     /// ponytail: one probe covers all four cases — a per-case CDP domain
     /// (Fetch/Network heuristics) would be far more code for no more accuracy on
@@ -879,6 +879,32 @@ impl BrowserSession {
             Some("password") => Some(HandoffReason::Password),
             _ => None,
         }
+    }
+
+    /// Poll the page until an element matching `selector` (CSS) exists and/or
+    /// visible text contains `text`, or `timeout` elapses. At least one of
+    /// selector/text should be given; with neither this returns immediately.
+    /// Returns Ok(true) when found, Ok(false) on timeout.
+    pub fn wait_for(&mut self, selector: Option<&str>, text: Option<&str>, timeout: Duration) -> Result<bool, String> {
+        if selector.is_none() && text.is_none() {
+            return Ok(true);
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.matches_wait_condition(selector, text)? {
+                return Ok(true);
+            }
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    }
+
+    /// One in-page check for the wait_for condition. Both selector and text (if
+    /// given) must match. Defensive JS returns a bare bool.
+    fn matches_wait_condition(&mut self, selector: Option<&str>, text: Option<&str>) -> Result<bool, String> {
+        Ok(self.eval_raw(&build_wait_js(selector, text))?.as_bool().unwrap_or(false))
     }
 
     /// Title + URL only (for captions), without minting a ref snapshot.
@@ -1082,6 +1108,22 @@ fn parse_screencast_frame(v: &Value) -> Option<(String, i64)> {
     let data = params.get("data").and_then(|d| d.as_str())?;
     let sid = params.get("sessionId").and_then(|s| s.as_i64())?;
     Some((data.to_string(), sid))
+}
+
+/// Build the defensive in-page JS for `wait_for`: both selector and text (when
+/// given) must match; either omitted arg is `null` and skipped. `json!` escapes
+/// the values so a selector/text with quotes can't break out of the expression.
+fn build_wait_js(selector: Option<&str>, text: Option<&str>) -> String {
+    let sel = selector.map(|s| json!(s)).unwrap_or(Value::Null);
+    let txt = text.map(|t| json!(t)).unwrap_or(Value::Null);
+    format!(
+        "(() => {{ try {{ \
+           const sel = {sel}; const txt = {txt}; \
+           if (sel !== null && !document.querySelector(sel)) return false; \
+           if (txt !== null && !(document.body && document.body.innerText || '').includes(txt)) return false; \
+           return true; \
+         }} catch (e) {{ return false; }} }})()"
+    )
 }
 
 /// Map a key name to (code, windowsVirtualKeyCode, optional text).
@@ -1508,6 +1550,19 @@ mod tests {
             // Instructions steer the human to the panel's Continue control.
             assert!(r.instructions().contains("Continue"), "{r:?} missing Continue cue");
         }
+    }
+
+    #[test]
+    fn build_wait_js_escapes_and_skips_null_args() {
+        // Both args → both checks present, values JSON-escaped (quote-safe).
+        let js = build_wait_js(Some("a\"b"), Some("he\"llo"));
+        assert!(js.contains("document.querySelector(sel)"));
+        assert!(js.contains("includes(txt)"));
+        assert!(js.contains("\"a\\\"b\""), "selector not escaped: {js}");
+        // Text-only → selector is null and its querySelector guard short-circuits.
+        let js2 = build_wait_js(None, Some("done"));
+        assert!(js2.contains("const sel = null;"));
+        assert!(js2.trim_end().ends_with("})()"));
     }
 
     #[test]
