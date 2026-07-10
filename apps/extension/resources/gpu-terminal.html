@@ -6972,6 +6972,12 @@
               // from a background tab). Silently ignored if the module
               // failed to load — the daemon's show_image fallback covers it.
               if (browserPanel) browserPanel.showFrame(msg);
+            } else if (msg.type === 'browser_state') {
+              // Daemon-initiated pause/resume — {type, paused:bool}.
+              if (browserPanel) browserPanel.setState(msg);
+            } else if (msg.type === 'browser_human_request') {
+              // Handoff — {type, reason, instructions}. Claude needs the human.
+              if (browserPanel) browserPanel.humanRequest(msg);
             } else {
               // Track AI primitive count for non-active sessions too
               if (msg.type === 'ai_layer_update' && msg.data) {
@@ -14332,6 +14338,15 @@
               browserPanel = browserModule.createBrowserPanel({
                 container: document.getElementById('container'),
                 beforeEl: document.getElementById('workshop-panel'),
+                // Route browser_input/browser_control to the active session's
+                // daemon WS. Best-effort — the panel wraps this so an
+                // unacknowledged send on an older daemon never throws.
+                send: (m) => {
+                  const s = sessions.get(activeSessionName);
+                  if (s && s.ws && s.ws.readyState === WebSocket.OPEN) {
+                    s.ws.send(JSON.stringify(m));
+                  }
+                },
               });
               dbg('wasm-init: browser module loaded');
             } catch (e) {
