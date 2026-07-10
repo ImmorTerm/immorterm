@@ -13,7 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::audio::AudioEngine;
 use crate::commands;
-use rudder::BrowserSession;
+use envoyage::BrowserSession;
 use crate::ipc::{Request, Response};
 
 /// The single self-driven browser for this MCP server process (one per Claude
@@ -26,7 +26,7 @@ fn browser_slot() -> &'static Mutex<Option<BrowserSession>> {
 
 /// Id of the last AI-canvas primitive we mirrored the browser screenshot into,
 /// so the next mirror replaces it instead of stacking. Re-homed here (consumer
-/// side) when the browser driver moved to `rudder` — rudder's `BrowserSession`
+/// side) when the browser driver moved to `envoyage` — envoyage's `BrowserSession`
 /// no longer carries this ImmorTerm-only field. Lives parallel to `BROWSER`;
 /// both are process-global (one browser per MCP process).
 static LAST_MIRROR_PRIM_ID: Mutex<Option<u32>> = Mutex::new(None);
@@ -3020,8 +3020,8 @@ fn with_browser<T>(
         let self_pid = std::process::id();
         // Own / AlreadyOwn / stale-takeover all fall through to launch; only a
         // live foreign owner blocks us.
-        if let rudder::browser_lock::Decision::RouteTo { owner_pid, .. } =
-            rudder::browser_lock::decide(rudder::browser_lock::read().as_ref(), self_pid)
+        if let envoyage::browser_lock::Decision::RouteTo { owner_pid, .. } =
+            envoyage::browser_lock::decide(envoyage::browser_lock::read().as_ref(), self_pid)
         {
             return Err(format!(
                 "ImmorTerm's browser is already open and owned by another session \
@@ -3031,8 +3031,8 @@ fn with_browser<T>(
         let url = launch_url.unwrap_or("about:blank");
         let session = BrowserSession::launch(rt, url)?;
         // Claim ownership; re-read the nonce to win the takeover race.
-        if let Ok(nonce) = rudder::browser_lock::acquire(self_pid, 0, session.pid())
-            && !rudder::browser_lock::confirm_nonce(&nonce)
+        if let Ok(nonce) = envoyage::browser_lock::acquire(self_pid, 0, session.pid())
+            && !envoyage::browser_lock::confirm_nonce(&nonce)
         {
             // Another taker won between our rename and re-read: back off, close
             // the browser WE just spawned (exact pid), and report the race.
@@ -3057,11 +3057,11 @@ fn with_browser<T>(
     {
         *guard = None; // Drop → close() reaps the exact pid (a no-op if already gone).
         // Release the ownership lock only if it's ours (mirror the close path).
-        if rudder::browser_lock::read()
+        if envoyage::browser_lock::read()
             .map(|l| l.owner_pid == std::process::id())
             .unwrap_or(false)
         {
-            rudder::browser_lock::release();
+            envoyage::browser_lock::release();
         }
         return Err(
             "The browser closed — call immorterm_browser_open to start a fresh one.".to_string(),
@@ -3295,7 +3295,7 @@ fn handle_browser_read_page(args: &Value, rt: &tokio::runtime::Runtime) -> Resul
         .unwrap_or(true);
     with_browser(rt, None, |b| {
         let (title, url, nodes) = b.snapshot(interactive_only)?;
-        Ok(rudder::browser::render_ax_listing(&title, &url, &nodes, true))
+        Ok(envoyage::browser::render_ax_listing(&title, &url, &nodes, true))
     })
 }
 
@@ -3312,7 +3312,7 @@ fn handle_browser_find(args: &Value, rt: &tokio::runtime::Runtime) -> Result<Str
         const FIND_CAP: usize = 20;
         let extra = nodes.len().saturating_sub(FIND_CAP);
         nodes.truncate(FIND_CAP);
-        let mut out = rudder::browser::render_ax_listing(&title, &url, &nodes, false);
+        let mut out = envoyage::browser::render_ax_listing(&title, &url, &nodes, false);
         if extra > 0 {
             out.push_str(&format!("\n({extra} more — refine your query to narrow it.)"));
         }
@@ -3342,7 +3342,7 @@ fn handle_browser_tabs_switch(args: &Value, rt: &tokio::runtime::Runtime) -> Res
     with_browser(rt, None, |b| {
         b.tabs_switch(index, target_id.as_deref())?;
         let (title, url, nodes) = b.snapshot(true)?;
-        Ok(rudder::browser::render_ax_listing(&title, &url, &nodes, true))
+        Ok(envoyage::browser::render_ax_listing(&title, &url, &nodes, true))
     })
 }
 
@@ -3371,11 +3371,11 @@ fn handle_browser_close() -> Result<String, String> {
             BROWSER_PAUSED.store(false, std::sync::atomic::Ordering::Relaxed);
             // Release the ownership lock only if it is ours (don't clobber a
             // lock another live session took over).
-            if rudder::browser_lock::read()
+            if envoyage::browser_lock::read()
                 .map(|l| l.owner_pid == std::process::id())
                 .unwrap_or(false)
             {
-                rudder::browser_lock::release();
+                envoyage::browser_lock::release();
             }
             Ok(format!("Browser closed (pid {pid})."))
         }

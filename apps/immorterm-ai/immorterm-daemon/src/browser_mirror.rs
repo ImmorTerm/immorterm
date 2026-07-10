@@ -1,9 +1,9 @@
-//! ImmorTerm-specific browser mirroring — the consumer-side skin over rudder.
+//! ImmorTerm-specific browser mirroring — the consumer-side skin over envoyage.
 //!
-//! rudder (the extracted browser driver) draws nothing itself; it only streams
+//! envoyage (the extracted browser driver) draws nothing itself; it only streams
 //! frames + a mascot-neutral cursor/narration protocol. This module holds the
 //! bits that are ImmorTerm's own: rendering a screenshot into an AI-canvas HTML
-//! overlay. Re-homed here when the browser driver moved to the `rudder` crate.
+//! overlay. Re-homed here when the browser driver moved to the `envoyage` crate.
 
 /// Render a browser screenshot as a captioned HTML card for the AI canvas.
 ///

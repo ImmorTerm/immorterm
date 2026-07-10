@@ -55,10 +55,10 @@ image = { workspace = true }
 notify = { workspace = true }
 reqwest = { workspace = true }
 rodio = { workspace = true }
-# The extracted browser driver. Release form is the git dep against the private
-# repo (`rudder = { git = "https://github.com/ImmorTerm/rudder" }`); we use a
-# path dep here so the local proving build needs no crates.io/git auth round-trip.
-rudder = { path = "../../../../rudder" }
+# The extracted browser driver (renamed rudder → envoyage). Git dep against the
+# Envoyage-Browsing home. Fall back to a path dep (`envoyage = { path =
+# "../../../../envoyage" }`) if git auth becomes a bottleneck for local builds.
+envoyage = { git = "https://github.com/Envoyage-Browsing/envoyage" }
 
 # macOS-only AppKit/Foundation bindings — used by `websocket.rs::read_clipboard_file_url`
 # to read NSPasteboard `public.file-url` entries (Finder Cmd+C → POSIX path).

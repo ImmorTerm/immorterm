@@ -14,8 +14,8 @@
 
 mod attach;
 pub mod audio;
-// Browser driver now lives in the `rudder` crate (rudder::BrowserSession /
-// rudder::browser_lock). Only the ImmorTerm-specific canvas mirror stays local.
+// Browser driver now lives in the `envoyage` crate (envoyage::BrowserSession /
+// envoyage::browser_lock). Only the ImmorTerm-specific canvas mirror stays local.
 pub mod browser_mirror;
 pub mod claude;
 pub mod commands;
@@ -1203,6 +1203,14 @@ fn handle_restore_dump_cmd(args: &[String]) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    // envoyage's browser lock defaults to `~/.envoyage/browser.lock`; the ImmorTerm
+    // daemon has always kept it under `~/.immorterm/`. Pin ENVOYAGE_HOME to the old
+    // location so the lock path is byte-identical after the rudder→envoyage rename.
+    // Respect an operator-set ENVOYAGE_HOME if one already exists.
+    if std::env::var_os("ENVOYAGE_HOME").is_none() {
+        unsafe { std::env::set_var("ENVOYAGE_HOME", dirs_home().join(".immorterm")) };
+    }
+
     // Refresh the embedded immorterm-p wrapper on every launch. Cheap (one
     // file read + maybe one write); fire-and-forget — failures don't block
     // the daemon. See install_immorterm_p() docs above.
