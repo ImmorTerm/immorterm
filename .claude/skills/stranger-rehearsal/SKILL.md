@@ -45,6 +45,28 @@ registers, and the full remote chain passes — test → registry → attach —
 ending with "the Tauri picker 'Open Project → docker' will connect."
 (The GUI shell itself is desktop-only; this is the engine it talks to.)
 
+## Part 3 — browser (optional)
+
+```bash
+bash ops/rehearsal/browser-e2e.sh
+```
+
+Proves the daemon's self-driven browser (`immorterm_browser_*` MCP tools):
+spawns the installed daemon's stdio MCP server (`immorterm-ai mcp serve`),
+serves a local fixture form, and runs open → read → eval-coords → click →
+type → checkbox → submit → screenshot (>10KB) → close (pid gone, daemons
+untouched). Exit code = failures, same verdict-banner style as Part 1.
+
+When to run it:
+- After deploying a daemon that touches `browser.rs` or the browser tool
+  handlers in `mcp.rs` (via /deploy-daemon).
+- Before announcing any release that mentions the browser.
+- NOT in containers: the browser is headful by design — it needs a desktop
+  with a Chromium-engine browser (or `IMMORTERM_BROWSER_BIN`) and pops a
+  visible window for a few seconds.
+- It SKIPS cleanly (exit 0, clear message) when the installed daemon predates
+  the browser tools — safe to run unconditionally alongside Parts 1–2.
+
 ## Known gotchas (each cost a debugging round — do not rediscover)
 
 - **amd64 image on arm64 host**: if `docker images` shows an old

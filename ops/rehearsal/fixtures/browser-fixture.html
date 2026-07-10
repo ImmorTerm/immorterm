@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>ImmorTerm Browser Fixture</title>
+<style>
+  /* Big, well-spaced targets so coordinate clicks land reliably. */
+  body { font-family: sans-serif; margin: 40px; }
+  label, button { display: block; margin: 24px 0; font-size: 18px; }
+  input[type=text], select { font-size: 18px; padding: 8px; width: 300px; }
+  input[type=checkbox] { width: 24px; height: 24px; vertical-align: middle; }
+  button { font-size: 18px; padding: 12px 32px; }
+  #result { margin-top: 24px; font-size: 20px; font-weight: bold; }
+</style>
+</head>
+<body>
+<h1>ImmorTerm Browser Fixture</h1>
+<form id="f">
+  <label>Name <input id="name" type="text" autocomplete="off"></label>
+  <label>Flavor
+    <select id="flavor">
+      <option value="vanilla">vanilla</option>
+      <option value="axolotl">axolotl</option>
+    </select>
+  </label>
+  <label><input id="check" type="checkbox"> I agree</label>
+  <button id="go" type="submit">Submit</button>
+</form>
+<div id="result"></div>
+<script>
+document.getElementById('f').addEventListener('submit', function (e) {
+  e.preventDefault();
+  document.getElementById('result').textContent =
+    'SUBMITTED:' + document.getElementById('name').value +
+    ':' + (document.getElementById('check').checked ? 'checked' : 'unchecked');
+});
+</script>
+</body>
+</html>
