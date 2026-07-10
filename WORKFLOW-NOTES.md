@@ -106,3 +106,30 @@ UPDATING.md, a session-name example comment in gpu-terminal.ts.
 path is vestigial (C terminal removed). Consider removing the setting or the
 brew line. docs/UPDATING.md is internal-flavored (task IDs, CI line numbers,
 "never published" notes) — review whether it belongs in the public repo as-is.
+
+## browser_frame contract (webview browser panel, wave 1)
+
+The webview now renders a dedicated docked browser panel
+(`apps/extension/resources/gpu-terminal-browser.js`, loaded via the standard
+sidecar pattern from `gpu-terminal.html`; the Tauri app picks it up through the
+`apps/immorterm-app/dist` symlink). The daemon's `immorterm_browser_*` tools can
+switch their screenshot mirror to it ADDITIVELY in wave 2 by sending this
+message over the existing per-session daemon→webview WebSocket:
+
+```json
+{ "type": "browser_frame", "png_base64": "<raw base64 PNG, no data: prefix>",
+  "title": "<page title>", "url": "<page url>", "seq": 1 }
+```
+
+Semantics:
+- `seq` is monotonically increasing per browser session; the panel drops
+  stale frames (`seq <= last rendered`).
+- Each frame REPLACES the previous image (no stacking).
+- Panel auto-opens on the first frame (right side, ~45% width, resizable);
+  the close button only hides the panel for the webview session — it never
+  touches the browser. A "Claude is driving" pulse border shows while frames
+  arrive and fades after 3s of silence.
+- Frames are handled for ALL sessions, not just the active tab.
+- If `browser_frame` never arrives, the panel stays hidden — the existing
+  `show_image`/draw fallback keeps working unchanged, so the daemon can cut
+  over whenever it's ready.

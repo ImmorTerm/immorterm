@@ -521,6 +521,9 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
       const filesUri = webview.asWebviewUri(
         vscode.Uri.file(path.join(this.context.extensionPath, 'resources', 'gpu-terminal-files.js')),
       );
+      const browserUri = webview.asWebviewUri(
+        vscode.Uri.file(path.join(this.context.extensionPath, 'resources', 'gpu-terminal-browser.js')),
+      );
       const markedUri = webview.asWebviewUri(
         vscode.Uri.file(path.join(this.context.extensionPath, 'resources', 'vendor', 'marked.umd.js')),
       );
@@ -553,6 +556,7 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         pomodoroUri: pomodoroUri.toString(),
         tasksUri: tasksUri.toString(),
         filesUri: filesUri.toString(),
+        browserUri: browserUri.toString(),
         markedUri: markedUri.toString(),
         iroUri: iroUri.toString(),
         // Hub URL for webview-side fetches/sockets. The VS Code webview

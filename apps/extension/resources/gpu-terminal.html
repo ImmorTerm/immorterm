@@ -2227,6 +2227,7 @@
                 pomodoroUri: './gpu-terminal-pomodoro.js',
                 tasksUri: './gpu-terminal-tasks.js',
                 filesUri: './gpu-terminal-files.js',
+                browserUri: './gpu-terminal-browser.js',
                 projectName: _projectName,
                 projectDir: _projectDir,
                 fontData: fnt && fnt.data ? fnt.data : null,
@@ -6964,6 +6965,13 @@
               // its OWN session, then visibility filter shows/hides it based
               // on the active session.
               if (msg.data) handleWorkshopEvent(msg.data, sessionName);
+            } else if (msg.type === 'browser_frame') {
+              // Self-driven browser mirror — contract documented in
+              // gpu-terminal-browser.js: {type, png_base64, title, url, seq}.
+              // Rendered regardless of active session (Claude may be driving
+              // from a background tab). Silently ignored if the module
+              // failed to load — the daemon's show_image fallback covers it.
+              if (browserPanel) browserPanel.showFrame(msg);
             } else {
               // Track AI primitive count for non-active sessions too
               if (msg.type === 'ai_layer_update' && msg.data) {
@@ -13488,6 +13496,7 @@
     let pomodoro = null; // initialized in wasm-init handler (gpu-terminal-pomodoro.js)
     let tasksPanel = null; // initialized in wasm-init handler (gpu-terminal-tasks.js)
     let filesModule = null; // gpu-terminal-files.js module (floating menu + factory)
+    let browserPanel = null; // gpu-terminal-browser.js — self-driven browser mirror (browser_frame WS messages)
     let fileBrowserPanel = null; // createFileBrowser instance
     let fileBrowserRoot = ''; // project root for the file browser (wasm-init projectDir)
     let showTransientPopover = null; // exported from gpu-terminal-tasks.js once loaded
@@ -14312,6 +14321,21 @@
               dbg('wasm-init: files module loaded');
             } catch (e) {
               reportError('gpu-terminal-files', e);
+            }
+          }
+          // Import browser panel module (self-driven browser mirror).
+          // Stays hidden until the first `browser_frame` WS message arrives,
+          // so it costs nothing when the feature is unused.
+          if (msg.browserUri && !browserPanel) {
+            try {
+              const browserModule = await import(msg.browserUri);
+              browserPanel = browserModule.createBrowserPanel({
+                container: document.getElementById('container'),
+                beforeEl: document.getElementById('workshop-panel'),
+              });
+              dbg('wasm-init: browser module loaded');
+            } catch (e) {
+              reportError('gpu-terminal-browser', e);
             }
           }
           // Kick off actual WASM compilation NOW, regardless of session
