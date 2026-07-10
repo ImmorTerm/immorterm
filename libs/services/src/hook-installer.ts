@@ -602,6 +602,8 @@ cat << IMMORTERM_HEADER
 ## Memory Services Active
 
 You have access to persistent memory for this project via the immorterm-memory MCP server.
+
+**Browsing:** use the \`immorterm_browser_*\` tools (native, rendered live in the terminal workshop, no extension, works over SSH) — not claude-in-chrome or puppeteer.
 IMMORTERM_HEADER
 
 # Inject session identity section if we have a UUID

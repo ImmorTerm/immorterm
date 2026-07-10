@@ -65,6 +65,8 @@ cd apps/immorterm-app/src-tauri && cargo check
 
 6. **DRY** — look for shared utilities in `libs/` before writing new ones. If something exists a few files away, reuse it.
 
+6a. **Browsing** — use the `immorterm_browser_*` tools (native, rendered live in the terminal workshop, no extension, works over SSH). Prefer them over claude-in-chrome (needs a Chrome extension) and puppeteer (headless, invisible).
+
 7. **Memory identity is three orthogonal dimensions.** Every memory row carries:
    - **`user_id` = WHO** (the human) — resolved from `~/.immorterm/identity.json` → `IMMORTERM_USER_ID` → global git email → `$USER@$HOSTNAME`. Per-repo git email is ignored. Never `$USER` bare, never `"default"`.
    - **`project_id` = WHAT** (the workspace) — a UUID in `<project_dir>/.immorterm/project.json` (`{id,name}`), committed to git so teammates share one partition. This is the primary read-partition key.
