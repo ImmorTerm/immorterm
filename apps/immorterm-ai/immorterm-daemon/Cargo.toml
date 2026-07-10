@@ -55,6 +55,10 @@ image = { workspace = true }
 notify = { workspace = true }
 reqwest = { workspace = true }
 rodio = { workspace = true }
+# The extracted browser driver. Release form is the git dep against the private
+# repo (`rudder = { git = "https://github.com/ImmorTerm/rudder" }`); we use a
+# path dep here so the local proving build needs no crates.io/git auth round-trip.
+rudder = { path = "../../../../rudder" }
 
 # macOS-only AppKit/Foundation bindings — used by `websocket.rs::read_clipboard_file_url`
 # to read NSPasteboard `public.file-url` entries (Finder Cmd+C → POSIX path).

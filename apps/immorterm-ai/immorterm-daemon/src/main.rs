@@ -14,8 +14,9 @@
 
 mod attach;
 pub mod audio;
-pub mod browser;
-pub mod browser_lock;
+// Browser driver now lives in the `rudder` crate (rudder::BrowserSession /
+// rudder::browser_lock). Only the ImmorTerm-specific canvas mirror stays local.
+pub mod browser_mirror;
 pub mod claude;
 pub mod commands;
 mod daemon;

@@ -12,8 +12,8 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::audio::AudioEngine;
-use crate::browser::{self, BrowserSession};
 use crate::commands;
+use rudder::BrowserSession;
 use crate::ipc::{Request, Response};
 
 /// The single self-driven browser for this MCP server process (one per Claude
@@ -23,6 +23,13 @@ static BROWSER: OnceLock<Mutex<Option<BrowserSession>>> = OnceLock::new();
 fn browser_slot() -> &'static Mutex<Option<BrowserSession>> {
     BROWSER.get_or_init(|| Mutex::new(None))
 }
+
+/// Id of the last AI-canvas primitive we mirrored the browser screenshot into,
+/// so the next mirror replaces it instead of stacking. Re-homed here (consumer
+/// side) when the browser driver moved to `rudder` — rudder's `BrowserSession`
+/// no longer carries this ImmorTerm-only field. Lives parallel to `BROWSER`;
+/// both are process-global (one browser per MCP process).
+static LAST_MIRROR_PRIM_ID: Mutex<Option<u32>> = Mutex::new(None);
 
 /// True once the screencast pump thread has been spawned. The pump lives for
 /// the MCP process lifetime (one browser per process); it idles cheaply when no
@@ -3013,8 +3020,8 @@ fn with_browser<T>(
         let self_pid = std::process::id();
         // Own / AlreadyOwn / stale-takeover all fall through to launch; only a
         // live foreign owner blocks us.
-        if let crate::browser_lock::Decision::RouteTo { owner_pid, .. } =
-            crate::browser_lock::decide(crate::browser_lock::read().as_ref(), self_pid)
+        if let rudder::browser_lock::Decision::RouteTo { owner_pid, .. } =
+            rudder::browser_lock::decide(rudder::browser_lock::read().as_ref(), self_pid)
         {
             return Err(format!(
                 "ImmorTerm's browser is already open and owned by another session \
@@ -3024,8 +3031,8 @@ fn with_browser<T>(
         let url = launch_url.unwrap_or("about:blank");
         let session = BrowserSession::launch(rt, url)?;
         // Claim ownership; re-read the nonce to win the takeover race.
-        if let Ok(nonce) = crate::browser_lock::acquire(self_pid, 0, session.pid())
-            && !crate::browser_lock::confirm_nonce(&nonce)
+        if let Ok(nonce) = rudder::browser_lock::acquire(self_pid, 0, session.pid())
+            && !rudder::browser_lock::confirm_nonce(&nonce)
         {
             // Another taker won between our rename and re-read: back off, close
             // the browser WE just spawned (exact pid), and report the race.
@@ -3050,11 +3057,11 @@ fn with_browser<T>(
     {
         *guard = None; // Drop → close() reaps the exact pid (a no-op if already gone).
         // Release the ownership lock only if it's ours (mirror the close path).
-        if crate::browser_lock::read()
+        if rudder::browser_lock::read()
             .map(|l| l.owner_pid == std::process::id())
             .unwrap_or(false)
         {
-            crate::browser_lock::release();
+            rudder::browser_lock::release();
         }
         return Err(
             "The browser closed — call immorterm_browser_open to start a fresh one.".to_string(),
@@ -3093,7 +3100,7 @@ fn mirror_to_canvas(
     if let Some(id) = prev_id {
         let _ = simple_ipc_query(&session, Request::RemoveAiPrimitive { id }, rt);
     }
-    let html = browser::mirror_html(png_base64, title, url);
+    let html = crate::browser_mirror::mirror_html(png_base64, title, url);
     let resp = raw_ipc_query(
         &session,
         Request::DrawHtml {
@@ -3228,7 +3235,8 @@ fn handle_browser_shot(
         } else {
             b.screenshot()?
         };
-        Ok((png, title, url, b.last_mirror_prim_id, handoff, cursor, narration))
+        let prev_mirror = LAST_MIRROR_PRIM_ID.lock().ok().and_then(|g| *g);
+        Ok((png, title, url, prev_mirror, handoff, cursor, narration))
     })?;
 
     // Emit the intent balloon + Mort cursor to the panel (fire-and-forget).
@@ -3265,10 +3273,8 @@ fn handle_browser_shot(
 
     // Mirror onto the canvas (best-effort), and remember the new overlay id.
     let new_id = mirror_to_canvas(args, &png, &title, &url, prev_id, rt);
-    if let Ok(mut guard) = browser_slot().lock()
-        && let Some(b) = guard.as_mut()
-    {
-        b.last_mirror_prim_id = new_id.or(prev_id);
+    if let Ok(mut guard) = LAST_MIRROR_PRIM_ID.lock() {
+        *guard = new_id.or(prev_id);
     }
 
     Ok(vec![
@@ -3289,7 +3295,7 @@ fn handle_browser_read_page(args: &Value, rt: &tokio::runtime::Runtime) -> Resul
         .unwrap_or(true);
     with_browser(rt, None, |b| {
         let (title, url, nodes) = b.snapshot(interactive_only)?;
-        Ok(browser::render_ax_listing(&title, &url, &nodes, true))
+        Ok(rudder::browser::render_ax_listing(&title, &url, &nodes, true))
     })
 }
 
@@ -3306,7 +3312,7 @@ fn handle_browser_find(args: &Value, rt: &tokio::runtime::Runtime) -> Result<Str
         const FIND_CAP: usize = 20;
         let extra = nodes.len().saturating_sub(FIND_CAP);
         nodes.truncate(FIND_CAP);
-        let mut out = browser::render_ax_listing(&title, &url, &nodes, false);
+        let mut out = rudder::browser::render_ax_listing(&title, &url, &nodes, false);
         if extra > 0 {
             out.push_str(&format!("\n({extra} more — refine your query to narrow it.)"));
         }
@@ -3336,7 +3342,7 @@ fn handle_browser_tabs_switch(args: &Value, rt: &tokio::runtime::Runtime) -> Res
     with_browser(rt, None, |b| {
         b.tabs_switch(index, target_id.as_deref())?;
         let (title, url, nodes) = b.snapshot(true)?;
-        Ok(browser::render_ax_listing(&title, &url, &nodes, true))
+        Ok(rudder::browser::render_ax_listing(&title, &url, &nodes, true))
     })
 }
 
@@ -3365,11 +3371,11 @@ fn handle_browser_close() -> Result<String, String> {
             BROWSER_PAUSED.store(false, std::sync::atomic::Ordering::Relaxed);
             // Release the ownership lock only if it is ours (don't clobber a
             // lock another live session took over).
-            if crate::browser_lock::read()
+            if rudder::browser_lock::read()
                 .map(|l| l.owner_pid == std::process::id())
                 .unwrap_or(false)
             {
-                crate::browser_lock::release();
+                rudder::browser_lock::release();
             }
             Ok(format!("Browser closed (pid {pid})."))
         }

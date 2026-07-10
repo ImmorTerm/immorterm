@@ -2015,6 +2015,7 @@ dependencies = [
  "portable-pty",
  "reqwest",
  "rodio",
+ "rudder",
  "serde",
  "serde_json",
  "signal-hook",
@@ -4225,6 +4226,19 @@ dependencies = [
  "syn",
  "syn_derive",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "rudder"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "futures-util",
+ "nix 0.29.0",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
 ]
 
 [[package]]
