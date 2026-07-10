@@ -15,6 +15,7 @@
 mod attach;
 pub mod audio;
 pub mod browser;
+pub mod browser_lock;
 pub mod claude;
 pub mod commands;
 mod daemon;

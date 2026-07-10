@@ -307,7 +307,7 @@ fn cli_supports_hooks(cli: &str, owner_dir: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn generate_uuid_v4() -> String {
+pub(crate) fn generate_uuid_v4() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     // Crude but adequate: 16 random-ish bytes from nanos + pid + counter,
     // formatted as UUIDv4. We accept the entropy weakness because the file

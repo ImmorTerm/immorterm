@@ -9,6 +9,13 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 /// Terminal log event matching the OpenMemory `terminal_logs` schema.
+///
+/// Screenshot ephemerality (BROKER-DESIGN.md): this event carries only text
+/// (`content`) — there is no image/PNG field, and no code path feeds a browser
+/// screenshot in here. Self-driven-browser frames are therefore structurally
+/// excluded from the OpenMemory push; nothing in this file ever sees a browser
+/// PNG. Keep it that way — do not add a binary/base64 field that a browser
+/// frame could reach.
 #[derive(Debug, Serialize, Clone)]
 pub struct TerminalLogEvent {
     pub session_name: String,
