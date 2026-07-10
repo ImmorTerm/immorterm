@@ -208,7 +208,17 @@ pub struct BrowserSession {
     /// during other command round-trips, waiting for the pump to drain them.
     /// Only the newest is worth sending, but we keep the last `sessionId` to ack.
     pending_screencast: Vec<ScreencastFrame>,
+    /// Recent console messages (`level: text`) captured off the CDP event stream,
+    /// newest last. Bounded ring — see `push_capped`.
+    console: Vec<String>,
+    /// Recent network responses (`status method url`) captured off the CDP event
+    /// stream, newest last. Bounded ring.
+    network: Vec<String>,
 }
+
+/// Cap for the console/network ring buffers — enough to debug a page load
+/// without unbounded memory if a page is chatty.
+const LOG_RING_CAP: usize = 200;
 
 /// One `Page.screencastFrame` event pulled off the CDP pipe.
 pub struct ScreencastFrame {
@@ -310,6 +320,8 @@ impl BrowserSession {
             last_mirror_prim_id: None,
             screencast_on: false,
             pending_screencast: Vec::new(),
+            console: Vec::new(),
+            network: Vec::new(),
         };
 
         // Attach to a page target and enable Page events. If the handshake
@@ -383,6 +395,15 @@ impl BrowserSession {
         self.screencast_on = false;
         // Page domain is reachable on the page session once attached.
         self.cdp("Page.enable", json!({}))?;
+        // Console + network capture: enable the domains so their events flow on
+        // the pipe; our event-capture path (capture_cdp_event) buffers them.
+        // Best-effort — a page that can't enable a domain shouldn't block attach.
+        let _ = self.cdp("Runtime.enable", json!({}));
+        let _ = self.cdp("Log.enable", json!({}));
+        let _ = self.cdp("Network.enable", json!({}));
+        // Buffers belonged to the previous target.
+        self.console.clear();
+        self.network.clear();
         Ok(())
     }
 
@@ -502,10 +523,10 @@ impl BrowserSession {
             if let Some(matched) = match_cdp_reply(&v, id, method) {
                 return matched;
             }
-            // Stash screencast frames that arrive interleaved with a command's
-            // round-trip so they aren't silently discarded — the pump drains
-            // them. Everything else (other events) is ignored as before.
-            self.capture_screencast_event(&v);
+            // Stash screencast frames + console/network events that arrive
+            // interleaved with a command's round-trip so they aren't silently
+            // discarded. Everything else is ignored as before.
+            self.capture_cdp_event(&v);
         }
     }
 
@@ -1020,14 +1041,44 @@ impl BrowserSession {
         self.pending_screencast.clear();
     }
 
-    /// If a decoded CDP frame is a `Page.screencastFrame` event, stash it (and
-    /// its ack session id). No-op for anything else.
-    fn capture_screencast_event(&mut self, v: &Value) {
+    /// Capture the events we care about out of a decoded CDP frame: screencast
+    /// frames (for the panel) and console/network entries (for the debug tools).
+    /// No-op for replies and any other event.
+    fn capture_cdp_event(&mut self, v: &Value) {
         if let Some((data, sid)) = parse_screencast_frame(v) {
             self.pending_screencast.push(ScreencastFrame {
                 data_base64: data,
                 ack_session_id: sid,
             });
+            return;
+        }
+        if let Some(line) = parse_console_entry(v) {
+            push_capped(&mut self.console, line);
+        } else if let Some(line) = parse_network_entry(v) {
+            push_capped(&mut self.network, line);
+        }
+    }
+
+    /// Recent console messages (oldest→newest), for `immorterm_browser_console`.
+    pub fn console_log(&self) -> &[String] {
+        &self.console
+    }
+
+    /// Recent network responses (oldest→newest), for `immorterm_browser_network`.
+    pub fn network_log(&self) -> &[String] {
+        &self.network
+    }
+
+    /// Drain any pending CDP events off the pipe into the console/network rings
+    /// without blocking, so the debug tools see events that arrived since the
+    /// last command round-trip. Best-effort — a dead pipe surfaces elsewhere.
+    pub fn pump_events(&mut self) {
+        if let Ok(frames) = self.drain_available_frames() {
+            for frame in frames {
+                if let Ok(v) = serde_json::from_slice::<Value>(&frame) {
+                    self.capture_cdp_event(&v);
+                }
+            }
         }
     }
 
@@ -1046,7 +1097,7 @@ impl BrowserSession {
         // every complete frame currently buffered, keeping a partial tail.
         for frame in self.drain_available_frames()? {
             if let Ok(v) = serde_json::from_slice::<Value>(&frame) {
-                self.capture_screencast_event(&v);
+                self.capture_cdp_event(&v);
             }
         }
         if self.pending_screencast.is_empty() {
@@ -1152,6 +1203,76 @@ fn build_wait_js(selector: Option<&str>, text: Option<&str>) -> String {
            return true; \
          }} catch (e) {{ return false; }} }})()"
     )
+}
+
+/// Push onto a bounded ring buffer, dropping the oldest entry past the cap.
+fn push_capped(buf: &mut Vec<String>, line: String) {
+    buf.push(line);
+    if buf.len() > LOG_RING_CAP {
+        buf.remove(0);
+    }
+}
+
+/// Render a console-related CDP event (`Runtime.consoleAPICalled` or
+/// `Log.entryAdded`) as `level: text`. Returns `None` for any other frame.
+fn parse_console_entry(v: &Value) -> Option<String> {
+    let method = v.get("method").and_then(|m| m.as_str())?;
+    let params = v.get("params")?;
+    match method {
+        "Runtime.consoleAPICalled" => {
+            let level = params.get("type").and_then(|t| t.as_str()).unwrap_or("log");
+            let args = params.get("args").and_then(|a| a.as_array());
+            let text = args
+                .map(|arr| {
+                    arr.iter()
+                        .map(console_arg_to_string)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+            Some(format!("{level}: {text}"))
+        }
+        "Log.entryAdded" => {
+            let entry = params.get("entry")?;
+            let level = entry.get("level").and_then(|l| l.as_str()).unwrap_or("info");
+            let text = entry.get("text").and_then(|t| t.as_str()).unwrap_or("");
+            Some(format!("{level}: {text}"))
+        }
+        _ => None,
+    }
+}
+
+/// Best-effort string for one `Runtime.consoleAPICalled` arg (a `RemoteObject`).
+fn console_arg_to_string(arg: &Value) -> String {
+    if let Some(v) = arg.get("value") {
+        return match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+    }
+    arg.get("description")
+        .and_then(|d| d.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| arg.get("type").and_then(|t| t.as_str()).unwrap_or("?").to_string())
+}
+
+/// Render a `Network.responseReceived` CDP event as `status method url`.
+/// Returns `None` for any other frame.
+fn parse_network_entry(v: &Value) -> Option<String> {
+    if v.get("method").and_then(|m| m.as_str()) != Some("Network.responseReceived") {
+        return None;
+    }
+    let resp = v.get("params")?.get("response")?;
+    let status = resp.get("status").and_then(|s| s.as_i64()).unwrap_or(0);
+    let url = resp.get("url").and_then(|u| u.as_str()).unwrap_or("");
+    // `method` lives on the request, not the response, in this event — the
+    // response object carries requestHeaders sometimes; fall back to GET.
+    let method = resp
+        .get("requestHeaders")
+        .and_then(|h| h.get(":method"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("GET");
+    Some(format!("{status} {method} {url}"))
 }
 
 /// Map a key name to (code, windowsVirtualKeyCode, optional text).
@@ -1578,6 +1699,46 @@ mod tests {
             // Instructions steer the human to the panel's Continue control.
             assert!(r.instructions().contains("Continue"), "{r:?} missing Continue cue");
         }
+    }
+
+    #[test]
+    fn parse_console_entry_handles_both_event_shapes() {
+        let api = json!({
+            "method": "Runtime.consoleAPICalled",
+            "params": { "type": "error", "args": [
+                { "type": "string", "value": "boom" },
+                { "type": "number", "value": 42 }
+            ]}
+        });
+        assert_eq!(parse_console_entry(&api).unwrap(), "error: boom 42");
+        let log = json!({
+            "method": "Log.entryAdded",
+            "params": { "entry": { "level": "warning", "text": "deprecated" } }
+        });
+        assert_eq!(parse_console_entry(&log).unwrap(), "warning: deprecated");
+        // Non-console events are ignored.
+        assert!(parse_console_entry(&json!({ "method": "Page.loadEventFired" })).is_none());
+    }
+
+    #[test]
+    fn parse_network_entry_renders_status_and_url() {
+        let ev = json!({
+            "method": "Network.responseReceived",
+            "params": { "response": { "status": 404, "url": "https://x/y" } }
+        });
+        assert_eq!(parse_network_entry(&ev).unwrap(), "404 GET https://x/y");
+        assert!(parse_network_entry(&json!({ "method": "Network.requestWillBeSent" })).is_none());
+    }
+
+    #[test]
+    fn push_capped_drops_oldest_past_cap() {
+        let mut buf = Vec::new();
+        for i in 0..(LOG_RING_CAP + 5) {
+            push_capped(&mut buf, format!("line {i}"));
+        }
+        assert_eq!(buf.len(), LOG_RING_CAP);
+        assert_eq!(buf.first().unwrap(), "line 5"); // first 5 dropped
+        assert_eq!(buf.last().unwrap(), &format!("line {}", LOG_RING_CAP + 4));
     }
 
     #[test]
