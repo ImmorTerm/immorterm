@@ -336,6 +336,12 @@ impl BrowserSession {
         Ok(session)
     }
 
+    // ponytail: named-profile isolation via Target.createBrowserContext is
+    // deliberately NOT built here — the browser is one-per-user (broker model)
+    // and incognito contexts would fork the persistent-login profile this whole
+    // module is designed around. Approach sketched in
+    // docs/plans/browser/isolation-notes.md if it's ever wanted.
+
     /// Attach to a page target (browser-level CDP has no `Page` domain) and
     /// route all subsequent commands to it via its `sessionId`. Retries briefly
     /// because the first page target may not exist the instant the pipe opens.
