@@ -29,11 +29,20 @@
   <label><input id="check" type="checkbox"> I agree</label>
   <button id="go" type="submit">Submit</button>
 </form>
+<!-- Opens a popup/new tab (like an OAuth sign-in window) so tab-following can
+     be exercised: after clicking, a second page target must appear. It reloads
+     the fixture with #popup so it has a real, distinguishable URL/title (a blank
+     popup's title isn't reflected in CDP targetInfo). -->
+<button id="popup" type="button" onclick="window.open(location.pathname + '#popup', '_blank');">Open popup</button>
 <div id="result" role="status"></div>
 <!-- Injected after a delay so wait_for has a genuinely-absent-then-present
      element to resolve on (proves it polls, not just reads once). -->
 <div id="late-slot"></div>
 <script>
+// The popup opens this same page with #popup; give it a distinct title so
+// tab-following can be verified by title (a blank popup's title is invisible to
+// CDP getTargets).
+if (location.hash === '#popup') document.title = 'Popup Login';
 document.getElementById('f').addEventListener('submit', function (e) {
   e.preventDefault();
   document.getElementById('result').textContent =

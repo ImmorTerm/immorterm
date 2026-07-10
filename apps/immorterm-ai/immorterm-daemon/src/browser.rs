@@ -120,11 +120,16 @@ pub struct AxNode {
     pub role: String,
     pub name: String,
     pub value: Option<String>,
-    /// Center of the element in CSS pixels (for ref → click resolution).
+    /// Center of the element in CSS pixels, measured at snapshot time. Used only
+    /// as a fallback if the live re-query (via `dom_idx`) fails.
     pub cx: f64,
     pub cy: f64,
     /// Whether the role accepts an action (link/button/textbox/…).
     pub interactive: bool,
+    /// Stable index the snapshot JS stamped onto the DOM element as
+    /// `data-immorterm-ref="N"`. Lets click/form_input re-query the live element
+    /// and re-measure its box, so refs survive non-navigating reflows.
+    pub dom_idx: u64,
 }
 
 /// A live browser process + the CDP pipe (fds 3/4) to it.
@@ -144,6 +149,9 @@ pub struct BrowserSession {
     /// domain; we `Target.attachToTarget{flatten:true}` a page and tag every
     /// command with this `sessionId` so it routes to the page.
     session_id: Option<String>,
+    /// The page target we're currently pinned to. Tracked so we can detect it
+    /// closing (popup dismissed / tab closed) and auto-follow to another page.
+    target_id: Option<String>,
     /// The spawned process handle, kept so close() can reap it (waitpid).
     child: std::process::Child,
     /// Current AX snapshot: `ref_N` → node. Cleared on navigation / new read.
@@ -234,6 +242,7 @@ impl BrowserSession {
             next_id: 1,
             binary,
             session_id: None,
+            target_id: None,
             child,
             refs: HashMap::new(),
             ref_counter: 0,
@@ -256,37 +265,140 @@ impl BrowserSession {
     /// route all subsequent commands to it via its `sessionId`. Retries briefly
     /// because the first page target may not exist the instant the pipe opens.
     fn attach_page(&mut self) -> Result<(), String> {
+        // Discover targets so getTargets reliably enumerates popups / new tabs
+        // opened later (window.open, target="_blank", OAuth flows).
+        let _ = self.cdp("Target.setDiscoverTargets", json!({ "discover": true }));
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            let targets = self.cdp("Target.getTargets", json!({}))?;
-            let page = targets
-                .get("targetInfos")
-                .and_then(|v| v.as_array())
-                .and_then(|arr| {
-                    arr.iter()
-                        .find(|t| t.get("type").and_then(|x| x.as_str()) == Some("page"))
-                })
-                .and_then(|t| t.get("targetId").and_then(|x| x.as_str()).map(String::from));
-            if let Some(target_id) = page {
-                let res = self.cdp(
-                    "Target.attachToTarget",
-                    json!({ "targetId": target_id, "flatten": true }),
-                )?;
-                let sid = res
-                    .get("sessionId")
-                    .and_then(|x| x.as_str())
-                    .ok_or("attachToTarget returned no sessionId")?
-                    .to_string();
-                self.session_id = Some(sid);
-                // Now Page domain is reachable on the page session.
-                self.cdp("Page.enable", json!({}))?;
-                return Ok(());
+            if let Some(tid) = self.newest_page_target()? {
+                return self.attach_target(&tid);
             }
             if Instant::now() >= deadline {
                 return Err("no page target appeared over the CDP pipe".to_string());
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    /// All live page targets as `(targetId, title, url)`, browser-level order
+    /// (newest last, which is where popups/new tabs land).
+    fn page_targets(&mut self) -> Result<Vec<(String, String, String)>, String> {
+        let targets = self.cdp("Target.getTargets", json!({}))?;
+        let arr = targets.get("targetInfos").and_then(|v| v.as_array());
+        Ok(arr
+            .into_iter()
+            .flatten()
+            .filter(|t| t.get("type").and_then(|x| x.as_str()) == Some("page"))
+            .map(|t| {
+                let s = |k| t.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                (s("targetId"), s("title"), s("url"))
+            })
+            .collect())
+    }
+
+    /// The newest page target's id (popups/new tabs sort last), if any.
+    fn newest_page_target(&mut self) -> Result<Option<String>, String> {
+        Ok(self.page_targets()?.pop().map(|(id, _, _)| id))
+    }
+
+    /// Attach to a specific page target and re-pin the routing session_id.
+    fn attach_target(&mut self, target_id: &str) -> Result<(), String> {
+        let res = self.cdp(
+            "Target.attachToTarget",
+            json!({ "targetId": target_id, "flatten": true }),
+        )?;
+        let sid = res
+            .get("sessionId")
+            .and_then(|x| x.as_str())
+            .ok_or("attachToTarget returned no sessionId")?
+            .to_string();
+        self.session_id = Some(sid);
+        self.target_id = Some(target_id.to_string());
+        self.clear_refs(); // refs belonged to the previous target
+        // Page domain is reachable on the page session once attached.
+        self.cdp("Page.enable", json!({}))?;
+        Ok(())
+    }
+
+    /// Before a tool acts, make sure we're pinned to a LIVE page target. If our
+    /// pinned target vanished (popup dismissed / tab closed), auto-follow to the
+    /// newest remaining page so a closed popup falls back to its opener instead
+    /// of leaving the AI driving a dead target. Returns Err only if no page is
+    /// left (the whole browser is gone → dead-session reset handles it upstream).
+    pub fn ensure_live_target(&mut self) -> Result<(), String> {
+        let live = self.page_targets()?;
+        if live.is_empty() {
+            return Err("CDP pipe closed (browser exited)".to_string());
+        }
+        let pinned_ok = self
+            .target_id
+            .as_deref()
+            .is_some_and(|t| live.iter().any(|(id, _, _)| id == t));
+        if !pinned_ok {
+            let newest = live.last().map(|(id, _, _)| id.clone()).unwrap();
+            self.attach_target(&newest)?;
+        }
+        Ok(())
+    }
+
+    /// Tools-facing: list open page targets as `(index, targetId, title, url,
+    /// is_active)`. Also auto-follows if our pinned target died.
+    pub fn tabs_list(&mut self) -> Result<Vec<(usize, String, String, String, bool)>, String> {
+        self.ensure_live_target()?;
+        let active = self.target_id.clone();
+        Ok(self
+            .page_targets()?
+            .into_iter()
+            .enumerate()
+            .map(|(i, (id, title, url))| {
+                let is_active = active.as_deref() == Some(id.as_str());
+                (i, id, title, url, is_active)
+            })
+            .collect())
+    }
+
+    /// Page target ids at this instant — snapshot BEFORE an action so
+    /// `follow_new_target` can tell a genuinely-new popup from a restored/existing
+    /// tab (getTargets order is unreliable across restored profiles).
+    pub fn page_target_ids(&mut self) -> Vec<String> {
+        self.page_targets()
+            .map(|v| v.into_iter().map(|(id, _, _)| id).collect())
+            .unwrap_or_default()
+    }
+
+    /// After an action that may have opened a popup / new tab, follow a page
+    /// target that appeared since `known_before`. Best-effort — a same-origin nav
+    /// reuses the current target and creates none, so this only fires on a
+    /// genuine new target (window.open, target="_blank", OAuth popup). Diffing
+    /// against the pre-action set is robust to profiles that restore old tabs.
+    pub fn follow_new_target(&mut self, known_before: &[String]) {
+        if let Ok(now) = self.page_targets()
+            && let Some((new_id, _, _)) =
+                now.into_iter().rev().find(|(id, _, _)| !known_before.contains(id))
+        {
+            let _ = self.attach_target(&new_id);
+        }
+    }
+
+    /// Tools-facing: switch the pinned page target by 0-based index or targetId.
+    pub fn tabs_switch(&mut self, index: Option<usize>, target_id: Option<&str>) -> Result<(), String> {
+        let live = self.page_targets()?;
+        if live.is_empty() {
+            return Err("CDP pipe closed (browser exited)".to_string());
+        }
+        let tid = match (index, target_id) {
+            (_, Some(id)) => live
+                .iter()
+                .find(|(t, _, _)| t == id)
+                .map(|(t, _, _)| t.clone())
+                .ok_or_else(|| format!("No open tab with targetId {id} — call tabs_list."))?,
+            (Some(i), None) => live
+                .get(i)
+                .map(|(t, _, _)| t.clone())
+                .ok_or_else(|| format!("No tab at index {i} — {} open; call tabs_list.", live.len()))?,
+            (None, None) => return Err("provide 'index' or 'targetId' (from tabs_list)".to_string()),
+        };
+        self.attach_target(&tid)
     }
 
     // ── CDP framing over the pipe ────────────────────────────────────
@@ -530,9 +642,10 @@ impl BrowserSession {
                     .map(|s| s.to_string());
                 let cx = item.get("cx").and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let cy = item.get("cy").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let dom_idx = item.get("idx").and_then(|v| v.as_u64()).unwrap_or(0);
                 self.ref_counter += 1;
                 let handle = format!("ref_{}", self.ref_counter);
-                let node = AxNode { role, name, value, cx, cy, interactive };
+                let node = AxNode { role, name, value, cx, cy, interactive, dom_idx };
                 self.refs.insert(handle.clone(), node.clone());
                 out.push((handle, node));
             }
@@ -563,22 +676,44 @@ impl BrowserSession {
         })
     }
 
-    /// Click the element behind a `ref_N` handle (its center, in CSS pixels).
+    /// Re-measure a ref's live center from the DOM (via its `data-immorterm-ref`
+    /// tag), so a reflow since the snapshot doesn't leave us clicking stale
+    /// coordinates. Falls back to the snapshot-time center if the element is
+    /// gone (returns `None` → caller decides). Returns `Some((cx, cy))` fresh.
+    fn live_center(&mut self, node: &AxNode) -> Option<(f64, f64)> {
+        let js = format!(
+            "(() => {{ const el = document.querySelector('[data-immorterm-ref=\"{}\"]'); \
+             if (!el) return null; const r = el.getBoundingClientRect(); \
+             if (r.width === 0 || r.height === 0) return null; \
+             return JSON.stringify({{ cx: Math.round(r.x + r.width/2), cy: Math.round(r.y + r.height/2) }}); }})()",
+            node.dom_idx
+        );
+        let v = self.eval_raw(&js).ok()?;
+        let s = v.as_str()?;
+        let p: Value = serde_json::from_str(s).ok()?;
+        Some((p.get("cx")?.as_f64()?, p.get("cy")?.as_f64()?))
+    }
+
+    /// Click the element behind a `ref_N` handle. Re-measures the live element's
+    /// center first (surviving reflows within a snapshot); falls back to the
+    /// snapshot-time center only if the element can't be re-found.
     pub fn click_ref(&mut self, handle: &str) -> Result<(), String> {
         let node = self.resolve_ref(handle)?;
-        self.click(node.cx, node.cy)
+        let (cx, cy) = self.live_center(&node).unwrap_or((node.cx, node.cy));
+        self.click(cx, cy)
     }
 
     /// Set a form field/checkbox/dropdown by ref. Text: focus + insertText.
     /// Checkbox: click to reach the target state. Select: choose the option.
     pub fn form_input(&mut self, handle: &str, value: &str) -> Result<(), String> {
         let node = self.resolve_ref(handle)?;
+        let (cx, cy) = self.live_center(&node).unwrap_or((node.cx, node.cy));
         match node.role.as_str() {
             "checkbox" | "radio" => {
                 let want_checked = matches!(value.to_ascii_lowercase().as_str(), "checked" | "true" | "on" | "1");
                 let is_checked = node.value.as_deref() == Some("checked");
                 if want_checked != is_checked {
-                    self.click(node.cx, node.cy)?;
+                    self.click(cx, cy)?;
                 }
                 Ok(())
             }
@@ -597,7 +732,7 @@ impl BrowserSession {
             }
             _ => {
                 // Text-like: focus by clicking, clear, then insert.
-                self.click(node.cx, node.cy)?;
+                self.click(cx, cy)?;
                 self.eval_raw("document.activeElement && (document.activeElement.value='')")?;
                 self.type_text(value)?;
                 Ok(())
@@ -830,6 +965,19 @@ pub fn decode_png_len(b64: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// Decode a base64 PNG's pixel width from its IHDR chunk (bytes 16..20, big-
+/// endian). Lets the smoke test lock the Retina CSS-pixel invariant (rendered
+/// width must equal the CSS viewport, not the device-pixel width). Returns 0 if
+/// the bytes aren't a PNG.
+pub fn decode_png_width(b64: &str) -> u32 {
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).unwrap_or_default();
+    // 8-byte signature + 4 length + "IHDR" → width at offset 16.
+    if bytes.len() < 20 || &bytes[0..8] != b"\x89PNG\r\n\x1a\n" {
+        return 0;
+    }
+    u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]])
+}
+
 /// In-page snapshot: role, accessible name, value, and CSS-pixel center for
 /// every relevant element. Returns JSON `{title,url,items:[…]}`. Kept as a
 /// string constant so it can be unit-inspected without a live browser.
@@ -852,32 +1000,42 @@ const AX_SNAPSHOT_JS: &str = r#"(() => {
     return el.tagName.toLowerCase();
   };
   const INTERACTIVE = new Set(['link','button','textbox','checkbox','radio','combobox','listbox','select','menuitem','tab','switch']);
-  const NAME = (el) => {
+  const NAME = (el, role, idx) => {
     const al = el.getAttribute('aria-label'); if (al) return al.trim();
-    if (el.id) { const l = document.querySelector(`label[for="${el.id}"]`); if (l) return l.textContent.trim(); }
-    const lbl = el.closest('label'); if (lbl) return lbl.textContent.trim();
+    if (el.id) { const l = document.querySelector(`label[for="${el.id}"]`); if (l && l.textContent.trim()) return l.textContent.trim(); }
+    const lbl = el.closest('label'); if (lbl && lbl.textContent.trim()) return lbl.textContent.trim();
     if (el.placeholder) return el.placeholder.trim();
     if (el.value && (el.tagName === 'BUTTON' || (el.tagName==='INPUT' && (el.type==='submit'||el.type==='button')))) return String(el.value).trim();
-    return (el.textContent || '').trim().slice(0, 200);
+    const txt = (el.textContent || '').trim(); if (txt) return txt.slice(0, 200);
+    // Icon-only controls (no aria-label/text): title → alt → role@position.
+    const title = el.getAttribute('title'); if (title) return title.trim();
+    const alt = el.getAttribute('alt'); if (alt) return alt.trim();
+    const img = el.querySelector && el.querySelector('img[alt]'); if (img && img.alt.trim()) return img.alt.trim();
+    return `${role}@${idx}`;
   };
   const items = [];
   const sel = 'a[href],button,input,select,textarea,[role],[onclick],h1,h2,h3,p,li';
+  let idx = 0;
   for (const el of document.querySelectorAll(sel)) {
     const rect = el.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) continue;
     const style = getComputedStyle(el);
     if (style.visibility === 'hidden' || style.display === 'none') continue;
     const role = ROLE(el);
+    // Stamp a stable handle so click/form_input can re-query the LIVE element
+    // and re-measure it after reflows.
+    el.setAttribute('data-immorterm-ref', String(idx));
     let value = undefined;
     if (role === 'checkbox' || role === 'radio') value = el.checked ? 'checked' : 'unchecked';
     else if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') value = String(el.value || '');
     else if (el.tagName === 'SELECT') value = String(el.value || '');
     items.push({
-      role, name: NAME(el), value,
+      role, name: NAME(el, role, idx), value, idx,
       interactive: INTERACTIVE.has(role),
       cx: Math.round(rect.x + rect.width / 2),
       cy: Math.round(rect.y + rect.height / 2),
     });
+    idx++;
   }
   return JSON.stringify({ title: document.title, url: location.href, items });
 })()"#;
@@ -959,11 +1117,11 @@ mod tests {
         let nodes = vec![
             ("ref_1".to_string(), AxNode {
                 role: "button".into(), name: "Sign in".into(), value: None,
-                cx: 10.0, cy: 20.0, interactive: true,
+                cx: 10.0, cy: 20.0, interactive: true, dom_idx: 0,
             }),
             ("ref_2".to_string(), AxNode {
                 role: "textbox".into(), name: "Search".into(), value: Some(String::new()),
-                cx: 5.0, cy: 6.0, interactive: true,
+                cx: 5.0, cy: 6.0, interactive: true, dom_idx: 1,
             }),
         ];
         let out = render_ax_listing("T", "https://x", &nodes, true);
@@ -978,7 +1136,7 @@ mod tests {
     fn ref_listing_find_omits_header() {
         let nodes = vec![("ref_9".to_string(), AxNode {
             role: "link".into(), name: "Home".into(), value: None,
-            cx: 1.0, cy: 2.0, interactive: true,
+            cx: 1.0, cy: 2.0, interactive: true, dom_idx: 0,
         })];
         let out = render_ax_listing("T", "u", &nodes, false);
         assert!(!out.contains("Title:"));
@@ -989,7 +1147,7 @@ mod tests {
     fn rank_prefers_exact_then_prefix_then_substring() {
         let mk = |name: &str, role: &str| AxNode {
             role: role.into(), name: name.into(), value: None,
-            cx: 0.0, cy: 0.0, interactive: true,
+            cx: 0.0, cy: 0.0, interactive: true, dom_idx: 0,
         };
         assert_eq!(rank_match("sign in", &mk("Sign In", "button")), 100);
         assert_eq!(rank_match("sign", &mk("Sign In", "button")), 70);
@@ -1056,7 +1214,7 @@ mod tests {
         let mut refs = HashMap::new();
         refs.insert("ref_3".to_string(), AxNode {
             role: "button".into(), name: "Go".into(), value: None,
-            cx: 42.0, cy: 84.0, interactive: true,
+            cx: 42.0, cy: 84.0, interactive: true, dom_idx: 0,
         });
         // Emulate resolve_ref lookup + center extraction.
         let node = refs.get("ref_3").cloned().unwrap();
@@ -1094,9 +1252,48 @@ mod tests {
             b.form_input(h, "mort").expect("form_input");
         }
 
-        // screenshot: >10KB and CSS-pixel dims.
+        // screenshot: >10KB and CSS-pixel dims. The rendered width MUST equal
+        // the CSS viewport (WINDOW_WIDTH), not the Retina device-pixel width —
+        // this locks the 1/dpr scale so click coords stay 1:1.
         let png = b.screenshot().expect("screenshot");
         assert!(decode_png_len(&png) > 10_000, "screenshot should be >10KB");
+        assert_eq!(
+            decode_png_width(&png),
+            WINDOW_WIDTH,
+            "screenshot width must be CSS pixels ({WINDOW_WIDTH}), not device pixels"
+        );
+
+        // Multi-tab: click the fixture's "Open popup" button (window.open) → a
+        // second page target must appear, be auto-followed, and be switchable.
+        let (_t3, _u3, all) = b.find("Open popup").expect("find popup button");
+        let (popup_ref, _) = all.first().expect("popup button present");
+        let before_ids = b.page_target_ids();
+        let before = before_ids.len();
+        b.click_ref(popup_ref).expect("click popup");
+        std::thread::sleep(Duration::from_millis(500));
+        let tabs = b.tabs_list().expect("tabs after");
+        assert!(tabs.len() > before, "a popup target should have appeared: {tabs:?}");
+        assert!(
+            tabs.iter().any(|(_, _, _, url, _)| url.contains("#popup")),
+            "the popup tab (URL #popup) should be listed: {tabs:?}"
+        );
+        // Auto-follow the target that appeared since before the click (the popup),
+        // diffing against the pre-click set — robust to restored tabs.
+        b.follow_new_target(&before_ids);
+        let (title, url, _n) = b.snapshot(false).expect("snapshot popup");
+        assert!(
+            title == "Popup Login" || url.contains("#popup"),
+            "should be driving the popup after follow_newest, got title {title:?} url {url:?}"
+        );
+        // Switch back to the opener tab (the one without #popup) by index.
+        let opener_ix = tabs
+            .iter()
+            .find(|(_, _, _, url, _)| url.contains("browser-fixture") && !url.contains("#popup"))
+            .map(|(i, _, _, _, _)| *i)
+            .expect("opener tab in list");
+        b.tabs_switch(Some(opener_ix), None).expect("switch to opener by index");
+        let (_t_o, u_opener, _n2) = b.snapshot(false).expect("snapshot opener");
+        assert!(!u_opener.contains("#popup"), "switched-to tab should be the opener, got {u_opener:?}");
 
         b.close();
         // Poll up to 8s for the exact pid to disappear (SIGTERM teardown).
@@ -1109,5 +1306,15 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
         }
         assert!(!alive, "browser pid {pid} should be dead after close()");
+
+        // Dead-session recovery: after the browser is gone, an operation on the
+        // corpse must surface a dead-pipe error, and a FRESH launch must work.
+        let dead = b.navigate(&fixture);
+        assert!(dead.is_err(), "navigate on a dead session should error");
+        let mut b2 = BrowserSession::launch(&rt, &fixture).expect("relaunch after dead session");
+        b2.navigate(&fixture).expect("navigate on the fresh session");
+        let png2 = b2.screenshot().expect("screenshot on the fresh session");
+        assert!(decode_png_len(&png2) > 10_000, "fresh session should render");
+        b2.close();
     }
 }
