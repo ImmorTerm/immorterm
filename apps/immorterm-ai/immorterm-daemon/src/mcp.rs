@@ -4,7 +4,7 @@
 //! via their Unix sockets to provide AI agents with structured terminal access.
 
 use std::io::{BufRead, Write};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -12,8 +12,17 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::audio::AudioEngine;
+use crate::browser::{self, BrowserSession};
 use crate::commands;
 use crate::ipc::{Request, Response};
+
+/// The single self-driven browser for this MCP server process (one per Claude
+/// session). Launched lazily on first browser tool use, reused after.
+static BROWSER: OnceLock<Mutex<Option<BrowserSession>>> = OnceLock::new();
+
+fn browser_slot() -> &'static Mutex<Option<BrowserSession>> {
+    BROWSER.get_or_init(|| Mutex::new(None))
+}
 
 /// Lazily initialized audio engine for the MCP server process.
 /// The MCP server runs as a normal foreground process (spawned by Claude Code)
@@ -694,6 +703,105 @@ fn tool_definitions() -> Vec<Value> {
                         "default": true
                     }
                 },
+                "required": []
+            }
+        }),
+        // ─── Self-driven browser (CDP) ───────────────────────────────
+        json!({
+            "name": "immorterm_browser_open",
+            "description": "Open (or reuse) ImmorTerm's self-driven browser and navigate to a URL. Returns a PNG screenshot plus the page title and URL. The browser window is REAL and VISIBLE on the user's screen — it uses a persistent profile, so the USER signs into sites and enters any credentials themselves in that window; sessions persist across restarts. Every screenshot's coordinates are in CSS pixels of the returned image (1280x800, device pixel ratio 1). NEVER type passwords, payment, or other secrets via the browser tools — ask the user to enter those in the visible window.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "URL to navigate to (e.g. https://example.com)" },
+                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror. Pass your immorterm_id. Auto-resolves when a single session is active." }
+                },
+                "required": ["url"]
+            }
+        }),
+        json!({
+            "name": "immorterm_browser_screenshot",
+            "description": "Screenshot the current page in ImmorTerm's self-driven browser. Returns a PNG. Coordinates you use with browser_click/browser_scroll are CSS pixels of this image (1280x800, DPR 1).",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror. Auto-resolves when a single session is active." } },
+                "required": []
+            }
+        }),
+        json!({
+            "name": "immorterm_browser_click",
+            "description": "Click at (x, y) in CSS pixels of the last browser screenshot, then return a fresh screenshot after a short settle. Never click to enter credentials — the user does that in the visible window.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "x": { "type": "number", "description": "X in CSS pixels of the screenshot" },
+                    "y": { "type": "number", "description": "Y in CSS pixels of the screenshot" },
+                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror." }
+                },
+                "required": ["x", "y"]
+            }
+        }),
+        json!({
+            "name": "immorterm_browser_type",
+            "description": "Type text into the focused element of the browser page (click a field first). Optionally press Enter to submit. Returns a screenshot. NEVER type passwords, card numbers, or other secrets — ask the user to enter those in the visible browser window.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string", "description": "Text to insert into the focused element" },
+                    "submit": { "type": "boolean", "description": "Press Enter after typing (default false)" },
+                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror." }
+                },
+                "required": ["text"]
+            }
+        }),
+        json!({
+            "name": "immorterm_browser_key",
+            "description": "Press a single key in the browser page: Enter, Tab, Escape, Backspace, or ArrowUp/ArrowDown/ArrowLeft/ArrowRight. Returns a screenshot.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "key": { "type": "string", "description": "Key name: Enter | Tab | Escape | Backspace | ArrowUp | ArrowDown | ArrowLeft | ArrowRight" },
+                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror." }
+                },
+                "required": ["key"]
+            }
+        }),
+        json!({
+            "name": "immorterm_browser_scroll",
+            "description": "Scroll the browser page vertically by dy CSS pixels (positive scrolls down). Returns a screenshot.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "dy": { "type": "number", "description": "Vertical scroll delta in CSS pixels (positive = down)" },
+                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror." }
+                },
+                "required": ["dy"]
+            }
+        }),
+        json!({
+            "name": "immorterm_browser_read",
+            "description": "Read the current browser page as text — returns title, URL, and visible body text (truncated to ~20k chars). Use this instead of a screenshot when you only need to read content, to avoid spending image tokens.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }),
+        json!({
+            "name": "immorterm_browser_eval",
+            "description": "Evaluate a JavaScript expression in the current browser page and return the result as text (returnByValue). Runs in the user's real browser page — do not use it to exfiltrate credentials or session tokens.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "js": { "type": "string", "description": "JavaScript expression to evaluate" } },
+                "required": ["js"]
+            }
+        }),
+        json!({
+            "name": "immorterm_browser_close",
+            "description": "Close ImmorTerm's self-driven browser — kills the exact browser process and clears state. The next browser_open launches a fresh one.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
                 "required": []
             }
         }),
@@ -1716,6 +1824,31 @@ fn handle_tool_call(
         };
     }
 
+    // Browser tools that return a screenshot image (text caption + image).
+    if matches!(
+        tool_name,
+        "immorterm_browser_open"
+            | "immorterm_browser_screenshot"
+            | "immorterm_browser_click"
+            | "immorterm_browser_type"
+            | "immorterm_browser_key"
+            | "immorterm_browser_scroll"
+    ) {
+        return match handle_browser_shot(tool_name, &arguments, rt) {
+            Ok(content) => JsonRpcResponse {
+                result: Some(json!({ "content": content })),
+                ..base
+            },
+            Err(e) => JsonRpcResponse {
+                result: Some(json!({
+                    "content": [{ "type": "text", "text": format!("Error: {}", e) }],
+                    "isError": true
+                })),
+                ..base
+            },
+        };
+    }
+
     let result = match tool_name {
         "immorterm_list_sessions" => handle_list_sessions(&arguments),
         "immorterm_read_screen" => handle_read_screen(&arguments, rt),
@@ -1732,6 +1865,10 @@ fn handle_tool_call(
         "immorterm_show_chart" => handle_show_chart(&arguments, rt),
         "immorterm_clear_overlays" => handle_clear_overlays(&arguments, rt),
         "immorterm_get_capabilities" => handle_get_capabilities(&arguments, rt),
+        // Self-driven browser (text-returning subset)
+        "immorterm_browser_read" => handle_browser_read(rt),
+        "immorterm_browser_eval" => handle_browser_eval(&arguments, rt),
+        "immorterm_browser_close" => handle_browser_close(),
         // AI Canvas Layer tools
         "immorterm_draw_rect" => handle_draw_rect(&arguments, rt),
         "immorterm_draw_text" => handle_draw_text(&arguments, rt),
@@ -2515,6 +2652,167 @@ fn handle_screenshot(args: &Value, rt: &tokio::runtime::Runtime) -> Result<Value
         "data": png_base64,
         "mimeType": "image/png"
     }))
+}
+
+// ─── Self-driven browser handlers ────────────────────────────────────
+
+/// Ensure the process-global browser exists (launch on first use), then run
+/// `f` against it. Serializes all browser access behind the mutex.
+fn with_browser<T>(
+    rt: &tokio::runtime::Runtime,
+    launch_url: Option<&str>,
+    f: impl FnOnce(&mut BrowserSession) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut guard = browser_slot()
+        .lock()
+        .map_err(|_| "browser lock poisoned".to_string())?;
+    if guard.is_none() {
+        let url = launch_url.unwrap_or("about:blank");
+        *guard = Some(BrowserSession::launch(rt, url)?);
+    }
+    let session = guard.as_mut().unwrap();
+    f(session)
+}
+
+/// Push a browser screenshot onto the terminal's AI canvas as a top-right
+/// image overlay. Best-effort: if no session/webview is attached, the error is
+/// swallowed so the browser tools still work headless/remote. Replaces the
+/// previous mirror overlay (tracked by primitive id) instead of stacking.
+fn mirror_to_canvas(
+    args: &Value,
+    png_base64: &str,
+    title: &str,
+    url: &str,
+    prev_id: Option<u32>,
+    rt: &tokio::runtime::Runtime,
+) -> Option<u32> {
+    let session = resolve_session(args).ok()?;
+    // Remove the prior mirror so overlays don't stack.
+    if let Some(id) = prev_id {
+        let _ = simple_ipc_query(&session, Request::RemoveAiPrimitive { id }, rt);
+    }
+    let html = browser::mirror_html(png_base64, title, url);
+    let resp = raw_ipc_query(
+        &session,
+        Request::DrawHtml {
+            html,
+            css: String::new(),
+            x: -1.0,
+            y: -1.0,
+            width: 0.0,
+            height: 0.0,
+            anchor: Some("top-right".to_string()),
+            anchor_to: None,
+            name: Some("browser-mirror".to_string()),
+            on_click_prompt: None,
+            on_click_inject_context: None,
+        },
+        rt,
+    )
+    .ok()?;
+    match resp {
+        Response::PrimitiveId { id } => Some(id),
+        _ => None,
+    }
+}
+
+/// Shared body for the screenshot-returning browser tools: perform the action,
+/// screenshot, mirror to canvas, and return MCP content (caption + image).
+fn handle_browser_shot(
+    tool: &str,
+    args: &Value,
+    rt: &tokio::runtime::Runtime,
+) -> Result<Vec<Value>, String> {
+    let launch_url = if tool == "immorterm_browser_open" {
+        args.get("url").and_then(|s| s.as_str())
+    } else {
+        None
+    };
+
+    let (png, title, url, prev_id) = with_browser(rt, launch_url, |b| {
+        match tool {
+            "immorterm_browser_open" => {
+                let url = args.get("url").and_then(|s| s.as_str())
+                    .ok_or("'url' is required")?;
+                b.navigate(url)?;
+            }
+            "immorterm_browser_screenshot" => {}
+            "immorterm_browser_click" => {
+                let x = args.get("x").and_then(|v| v.as_f64()).ok_or("'x' is required")?;
+                let y = args.get("y").and_then(|v| v.as_f64()).ok_or("'y' is required")?;
+                b.click(x, y)?;
+                settle();
+            }
+            "immorterm_browser_type" => {
+                let text = args.get("text").and_then(|s| s.as_str())
+                    .ok_or("'text' is required")?;
+                b.type_text(text)?;
+                if args.get("submit").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    b.key("Enter")?;
+                }
+                settle();
+            }
+            "immorterm_browser_key" => {
+                let key = args.get("key").and_then(|s| s.as_str())
+                    .ok_or("'key' is required")?;
+                b.key(key)?;
+                settle();
+            }
+            "immorterm_browser_scroll" => {
+                let dy = args.get("dy").and_then(|v| v.as_f64()).ok_or("'dy' is required")?;
+                b.scroll(0.0, dy)?;
+                settle();
+            }
+            _ => return Err(format!("unhandled browser tool {tool}")),
+        }
+        let png = b.screenshot()?;
+        let (title, url) = b.current_title_url();
+        Ok((png, title, url, b.last_mirror_prim_id))
+    })?;
+
+    // Mirror onto the canvas (best-effort), and remember the new overlay id.
+    let new_id = mirror_to_canvas(args, &png, &title, &url, prev_id, rt);
+    if let Ok(mut guard) = browser_slot().lock()
+        && let Some(b) = guard.as_mut()
+    {
+        b.last_mirror_prim_id = new_id.or(prev_id);
+    }
+
+    Ok(vec![
+        json!({ "type": "text", "text": format!("🌐 {} — {}", title, url) }),
+        json!({ "type": "image", "data": png, "mimeType": "image/png" }),
+    ])
+}
+
+/// Brief pause after an interaction so the page can react before screenshot.
+fn settle() {
+    std::thread::sleep(std::time::Duration::from_millis(300));
+}
+
+fn handle_browser_read(rt: &tokio::runtime::Runtime) -> Result<String, String> {
+    with_browser(rt, None, |b| {
+        let (title, url, text) = b.read_page()?;
+        Ok(format!("Title: {title}\nURL: {url}\n\n{text}"))
+    })
+}
+
+fn handle_browser_eval(args: &Value, rt: &tokio::runtime::Runtime) -> Result<String, String> {
+    let js = args.get("js").and_then(|s| s.as_str()).ok_or("'js' is required")?.to_string();
+    with_browser(rt, None, |b| b.eval(&js))
+}
+
+fn handle_browser_close() -> Result<String, String> {
+    let mut guard = browser_slot()
+        .lock()
+        .map_err(|_| "browser lock poisoned".to_string())?;
+    match guard.take() {
+        Some(session) => {
+            let pid = session.pid();
+            drop(session); // Drop → close() kills the exact PID.
+            Ok(format!("Browser closed (pid {pid})."))
+        }
+        None => Ok("No browser session was open.".to_string()),
+    }
 }
 
 fn handle_get_capabilities(_args: &Value, rt: &tokio::runtime::Runtime) -> Result<String, String> {

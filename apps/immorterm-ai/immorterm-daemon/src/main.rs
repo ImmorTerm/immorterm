@@ -14,6 +14,7 @@
 
 mod attach;
 pub mod audio;
+pub mod browser;
 pub mod claude;
 pub mod commands;
 mod daemon;
