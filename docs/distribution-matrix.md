@@ -11,6 +11,7 @@ transition, and what the user must do (usually: nothing).
 | **MCP Gateway** (`immorterm-mcp-gateway`) | npm (global) | One long-lived MCP proxy shared by all AI sessions (port 9100) |
 | **VS Code extension** (`immorterm.immorterm-extension`) | Marketplace / `.vsix` | Persistent GPU terminals in VS Code + GUI onboarding for everything above |
 | **Desktop app** (ImmorTerm) | DMG / installer (Tauri) | Standalone GPU terminal app; bundles its own daemon + hub |
+| **Self-driven browser** | Built into the terminal daemon (nothing to install) | Claude drives a real Chromium-engine browser via `immorterm_browser_*` tools; live frames mirror onto the terminal canvas ([guide](browser.md)) |
 
 The source of truth for what's active in a project is
 **`<project>/.immorterm/config.json`** — `services.memory.enabled`,
@@ -71,6 +72,15 @@ sessions/tools.
     (shown once per project, then never again).
 - The app's terminal + canvas work with no other pieces installed.
 - Updates: the app checks GitHub Releases (`latest.json`) and self-updates.
+
+### S-BROWSER — self-driven browser
+
+Ships inside the terminal daemon — present in every state that has an
+ImmorTerm terminal (S-VSC, S-TAURI); no separate install or flag. The only
+requirement is any Chromium-engine browser on the machine (Chrome, Brave,
+Edge, Chromium). If none is found, the first `immorterm_browser_open` call
+fails with a clear error naming what to install; every other capability
+keeps working.
 
 ### Composite states (the common upgrade paths)
 

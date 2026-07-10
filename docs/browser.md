@@ -1,0 +1,101 @@
+# The self-driven browser — your terminal can browse
+
+Your terminal can browse: Claude opens a real browser, clicks through it for
+you, and you watch it happen inside the terminal. Ask for something that
+lives on a website — "find the tracking page for my package", "get me to the
+Azure token settings" — and Claude opens an actual browser window on your
+machine, navigates it step by step, and mirrors live frames onto the
+terminal canvas so you can follow along without leaving your prompt.
+
+## What it is
+
+Every Claude session inside an ImmorTerm terminal gets a set of browser
+tools, served by the same daemon that runs your terminal. When Claude calls
+them, the daemon launches a real Chromium-engine browser (Chrome, Brave,
+Edge, or plain Chromium — whichever you already have) and drives it over the
+Chrome DevTools Protocol. Three things make this different from what you may
+have seen elsewhere:
+
+- **It is a real, visible browser window** with a persistent profile. You
+  can watch it, take over at any moment, and your logins survive between
+  sessions.
+- **It needs no browser extension and no connection to claude.ai.** The
+  terminal daemon talks to the browser directly, so it works anywhere the
+  terminal works — including over SSH, where installing an extension into a
+  remote browser is not even a meaningful concept.
+- **You see everything on the terminal canvas.** Live frames of the page are
+  mirrored right into the terminal, so the whole task — the conversation and
+  the browsing — happens in one place.
+
+## Try it in 60 seconds
+
+1. Open an ImmorTerm terminal (VS Code extension or the desktop app) and
+   start Claude the way you normally do.
+2. Ask something a browser can answer, for example:
+
+   > Open news.ycombinator.com and tell me the top three stories.
+
+3. A browser window appears, loads the page, and the terminal canvas shows
+   what Claude sees. Claude reads the page and answers in the terminal.
+
+That is the whole setup. If no Chromium-engine browser is installed on the
+machine, the first browser call fails with a clear message telling you to
+install one — nothing else breaks.
+
+## The tools
+
+Claude picks these on its own; you never call them directly. Listed here so
+you know what it can and cannot do:
+
+| Tool | What it does |
+|---|---|
+| `immorterm_browser_open` | Opens (or reuses) the browser and navigates to a URL, returning a screenshot. |
+| `immorterm_browser_screenshot` | Takes a fresh screenshot of the current page. |
+| `immorterm_browser_click` | Clicks at a position on the page, then screenshots the result. |
+| `immorterm_browser_type` | Types text into the focused field, optionally pressing Enter to submit. |
+| `immorterm_browser_key` | Presses a single key such as Enter, Tab, Escape, or an arrow key. |
+| `immorterm_browser_scroll` | Scrolls the page up or down. |
+| `immorterm_browser_read` | Reads the page as plain text — cheaper and faster than a screenshot when only the words matter. |
+| `immorterm_browser_eval` | Runs a JavaScript expression in the page and returns the result. |
+| `immorterm_browser_close` | Closes the browser; the next open starts fresh. |
+
+## How sign-ins work: you do them
+
+Claude never types passwords, card numbers, or any other secret — the tools
+themselves refuse to be used that way. When a task reaches a login page or a
+payment step, Claude stops and asks you to handle it in the visible browser
+window. You click over, sign in or pay like you always do, and tell Claude
+to continue. Because the browser keeps a persistent profile, you usually
+only sign in to a given site once; after that, Claude finds you already
+logged in.
+
+This is a deliberate line, not a limitation we plan to remove: the human
+holds the credentials, the assistant does the legwork.
+
+## Compared to browser extensions
+
+Browser-extension assistants (Claude in Chrome and friends) drive the
+browser from inside the browser. That works well on your own laptop, but it
+has a hard boundary: the assistant has to live where the browser lives.
+
+The self-driven browser flips that. The terminal daemon drives the browser
+from outside, which means:
+
+- **It works over SSH and on remote machines.** Your Claude session on a
+  remote box can browse with the browser on that box — no extension to
+  install, no browser UI to reach.
+- **It is not tied to one browser or one vendor.** Any Chromium-engine
+  browser works, and nothing routes through claude.ai.
+- **The terminal stays the single pane of glass.** You do not switch windows
+  to supervise; the canvas shows you the browsing as it happens.
+
+## Limits (v1, honest list)
+
+- **Coordinate-driven.** Claude works from screenshots and clicks at pixel
+  positions, the same way a person aims a mouse. It is accurate but can need
+  an extra look-and-adjust step on dense pages. Element-finding (clicking
+  things by name instead of by position) lands next.
+- One browser window at a time per daemon; a fixed 1280×800 viewport.
+- Chromium-engine browsers only — Firefox and Safari are not supported.
+- No file downloads or uploads through the tools yet; Claude will ask you to
+  do those in the visible window.

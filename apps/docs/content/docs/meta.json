@@ -3,6 +3,7 @@
 	"pages": [
 		"index",
 		"---Guides---",
+		"browser",
 		"memory-standalone",
 		"claude-code",
 		"updating",
