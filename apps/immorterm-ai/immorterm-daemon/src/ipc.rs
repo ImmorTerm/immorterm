@@ -472,6 +472,51 @@ pub enum Request {
     },
     /// Toggle mute state.
     ToggleMute,
+
+    // ─── Self-driven browser screencast ──────────────────────────────
+    // The browser lives in the MCP-server process, not the daemon. The MCP
+    // process pumps CDP screencast frames + status through these requests; the
+    // daemon just relays them to raw-mode webview clients over `control_tx`,
+    // which the browser panel already listens for (`browser_frame` etc).
+
+    /// Relay one screencast frame to the webview browser panel.
+    BrowserFrame {
+        /// Base64 PNG (webview hardcodes `data:image/png` — must be PNG).
+        png_base64: String,
+        title: String,
+        url: String,
+        /// Monotonic sequence; the panel drops any frame <= the last shown.
+        seq: u64,
+    },
+    /// Relay the AI-driving pause state to the panel.
+    BrowserState {
+        paused: bool,
+    },
+    /// Ask the human to take over the browser pane (handoff banner).
+    BrowserHumanRequest {
+        reason: String,
+        #[serde(default)]
+        instructions: Option<String>,
+    },
+    /// Drain queued human→browser input the webview forwarded to the daemon
+    /// (clicks/keys/scroll/pause). The MCP pump dispatches these to the live
+    /// browser. Returns `BrowserInput` and clears the queue.
+    PollBrowserInput,
+}
+
+/// One human-driven browser action forwarded webview → daemon → MCP pump.
+/// Mirrors the webview's `browser_input` / `browser_control` wire messages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum BrowserInputEvent {
+    /// Click at page CSS pixels (webview already un-letterboxed to page space).
+    Click { x: f64, y: f64 },
+    /// A single named key (Enter/Tab/Backspace/Escape/Arrow*) or printable char.
+    Key { key: String },
+    /// Vertical wheel scroll by `dy` CSS pixels (positive = down).
+    Scroll { dy: f64 },
+    /// pause / continue the AI's automation from the panel toggle.
+    Control { action: String },
 }
 
 /// Daemon → Client response.
@@ -635,5 +680,9 @@ pub enum Response {
         /// that haven't been re-detected since this field was added.
         #[serde(default)]
         tool: Option<String>,
+    },
+    /// Queued human→browser input events (from PollBrowserInput). Cleared on read.
+    BrowserInput {
+        events: Vec<BrowserInputEvent>,
     },
 }

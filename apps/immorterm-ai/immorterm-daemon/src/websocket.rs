@@ -445,6 +445,26 @@ pub enum WsClientMsg {
         #[serde(default)]
         request_id: Option<String>,
     },
+    /// Human input on the self-driven browser panel → queued for the MCP
+    /// screencast pump to dispatch to the live browser (page CSS px). `kind`
+    /// is click/key/scroll; the payload fields are flattened alongside it.
+    #[serde(rename = "browser_input")]
+    BrowserInput {
+        kind: String,
+        #[serde(default)]
+        x: Option<f64>,
+        #[serde(default)]
+        y: Option<f64>,
+        #[serde(default)]
+        key: Option<String>,
+        #[serde(default)]
+        dy: Option<f64>,
+    },
+    /// Panel pause/continue toggle → queued as a Control browser-input event.
+    #[serde(rename = "browser_control")]
+    BrowserControl {
+        action: String,
+    },
     /// Ask the daemon whether the system clipboard currently holds image
     /// bytes. The webview's Async Clipboard API only exposes `image/png`,
     /// not JPEG/TIFF, so it falls back to this RPC for non-PNG images.
@@ -719,6 +739,9 @@ pub enum WsCommand {
     },
     /// Write UTF-8 text to PTY.
     Input(Vec<u8>),
+    /// Queue a human browser-panel input event for the MCP screencast pump
+    /// (`PollBrowserInput`). Pushed onto `state.browser_input_queue`.
+    BrowserInput(crate::ipc::BrowserInputEvent),
     /// Draw a rect and reply with the primitive ID.
     DrawRect {
         x: f32,
@@ -1279,6 +1302,9 @@ async fn handle_ws_connection(
                                 || json_arc.contains("\"event\":\"idle\"")
                                 || json_arc.contains("\"type\":\"title_changed\"")
                                 || json_arc.contains("\"type\":\"expression_update\"")
+                                || json_arc.contains("\"type\":\"browser_frame\"")
+                                || json_arc.contains("\"type\":\"browser_state\"")
+                                || json_arc.contains("\"type\":\"browser_human_request\"")
                         } else {
                             true
                         };
@@ -1513,6 +1539,30 @@ async fn handle_client_message(
             ) {
                 let _ = cmd_tx.send(WsCommand::Input(bytes)).await;
             }
+        }
+        WsClientMsg::BrowserInput { kind, x, y, key, dy } => {
+            // Map the wire shape → the poll event the MCP pump drains. Silently
+            // drop malformed events (missing coords/key) — best-effort input.
+            use crate::ipc::BrowserInputEvent;
+            let event = match kind.as_str() {
+                "click" => match (x, y) {
+                    (Some(x), Some(y)) => Some(BrowserInputEvent::Click { x, y }),
+                    _ => None,
+                },
+                "key" => key.map(|key| BrowserInputEvent::Key { key }),
+                "scroll" => dy.map(|dy| BrowserInputEvent::Scroll { dy }),
+                _ => None,
+            };
+            if let Some(event) = event {
+                let _ = cmd_tx.send(WsCommand::BrowserInput(event)).await;
+            }
+        }
+        WsClientMsg::BrowserControl { action } => {
+            let _ = cmd_tx
+                .send(WsCommand::BrowserInput(
+                    crate::ipc::BrowserInputEvent::Control { action },
+                ))
+                .await;
         }
         WsClientMsg::ClipboardCheckImage { request_id } => {
             // Read from the user's pasteboard via arboard. Browsers' Async
@@ -1830,6 +1880,55 @@ async fn handle_client_message(
             };
             if let Ok(json) = serde_json::to_string(&resp) {
                 let _ = ws_sink.send(Message::Text(json)).await;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod browser_input_tests {
+    use super::WsClientMsg;
+
+    // The webview forwards these EXACT wire shapes (gpu-terminal-browser.js).
+    // A rename/tag drift here silently drops human input, so pin the contract.
+    #[test]
+    fn parses_webview_browser_input_shapes() {
+        let click = r#"{"type":"browser_input","kind":"click","x":120.5,"y":40}"#;
+        match serde_json::from_str::<WsClientMsg>(click).unwrap() {
+            WsClientMsg::BrowserInput { kind, x, y, .. } => {
+                assert_eq!(kind, "click");
+                assert_eq!(x, Some(120.5));
+                assert_eq!(y, Some(40.0));
+            }
+            _ => panic!("click did not parse as BrowserInput"),
+        }
+
+        let key = r#"{"type":"browser_input","kind":"key","key":"Enter"}"#;
+        match serde_json::from_str::<WsClientMsg>(key).unwrap() {
+            WsClientMsg::BrowserInput { kind, key, .. } => {
+                assert_eq!(kind, "key");
+                assert_eq!(key.as_deref(), Some("Enter"));
+            }
+            _ => panic!("key did not parse as BrowserInput"),
+        }
+
+        let scroll = r#"{"type":"browser_input","kind":"scroll","dy":-90}"#;
+        match serde_json::from_str::<WsClientMsg>(scroll).unwrap() {
+            WsClientMsg::BrowserInput { kind, dy, .. } => {
+                assert_eq!(kind, "scroll");
+                assert_eq!(dy, Some(-90.0));
+            }
+            _ => panic!("scroll did not parse as BrowserInput"),
+        }
+    }
+
+    #[test]
+    fn parses_webview_browser_control() {
+        for action in ["pause", "continue"] {
+            let msg = format!(r#"{{"type":"browser_control","action":"{action}"}}"#);
+            match serde_json::from_str::<WsClientMsg>(&msg).unwrap() {
+                WsClientMsg::BrowserControl { action: a } => assert_eq!(a, action),
+                _ => panic!("{action} did not parse as BrowserControl"),
             }
         }
     }

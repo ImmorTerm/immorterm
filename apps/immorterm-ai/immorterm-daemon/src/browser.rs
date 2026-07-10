@@ -160,6 +160,20 @@ pub struct BrowserSession {
     /// AI-canvas primitive id of the last screenshot mirror, so the next mirror
     /// replaces it instead of stacking overlays.
     pub last_mirror_prim_id: Option<u32>,
+    /// Whether `Page.startScreencast` is currently running on the pinned target.
+    /// Screencast is per-target: re-armed after every `attach_target` switch.
+    screencast_on: bool,
+    /// Screencast frames (base64 JPEG/PNG) captured out of the CDP event stream
+    /// during other command round-trips, waiting for the pump to drain them.
+    /// Only the newest is worth sending, but we keep the last `sessionId` to ack.
+    pending_screencast: Vec<ScreencastFrame>,
+}
+
+/// One `Page.screencastFrame` event pulled off the CDP pipe.
+pub struct ScreencastFrame {
+    pub data_base64: String,
+    /// CDP session id to acknowledge (frees the encoder for the next frame).
+    pub ack_session_id: i64,
 }
 
 impl BrowserSession {
@@ -190,6 +204,12 @@ impl BrowserSession {
             .arg(format!("--user-data-dir={profile_dir}"))
             .arg("--no-first-run")
             .arg("--no-default-browser-check")
+            // Headless: the browser renders OFF-screen and is mirrored into the
+            // workshop panel via CDP screencast. No external OS window appears.
+            // `=new` is the modern headless mode that still runs the full
+            // renderer (extensions, GPU, real page layout) — required for the
+            // screencast + persistent-profile logins to behave like headful.
+            .arg("--headless=new")
             .arg(format!("--window-size={WINDOW_WIDTH},{WINDOW_HEIGHT}"))
             .arg(start_url)
             .stdin(Stdio::null())
@@ -247,6 +267,8 @@ impl BrowserSession {
             refs: HashMap::new(),
             ref_counter: 0,
             last_mirror_prim_id: None,
+            screencast_on: false,
+            pending_screencast: Vec::new(),
         };
 
         // Attach to a page target and enable Page events. If the handshake
@@ -315,6 +337,9 @@ impl BrowserSession {
         self.session_id = Some(sid);
         self.target_id = Some(target_id.to_string());
         self.clear_refs(); // refs belonged to the previous target
+        // Screencast is bound to the previous page session — it's gone now.
+        // The pump re-arms it on the new target via `ensure_screencast`.
+        self.screencast_on = false;
         // Page domain is reachable on the page session once attached.
         self.cdp("Page.enable", json!({}))?;
         Ok(())
@@ -436,7 +461,10 @@ impl BrowserSession {
             if let Some(matched) = match_cdp_reply(&v, id, method) {
                 return matched;
             }
-            // else: an event or another command's reply — keep reading.
+            // Stash screencast frames that arrive interleaved with a command's
+            // round-trip so they aren't silently discarded — the pump drains
+            // them. Everything else (other events) is ignored as before.
+            self.capture_screencast_event(&v);
         }
     }
 
@@ -787,6 +815,10 @@ impl BrowserSession {
     /// (leader == our exact pid via `process_group(0)`) for a graceful shutdown,
     /// then SIGKILL after a short grace period if still alive, then reap.
     pub fn close(&mut self) {
+        // Best-effort: stop the screencast before we kill the process so the
+        // encoder isn't left running mid-frame. Ignores errors (pipe may be
+        // dead already — we're tearing down regardless).
+        self.stop_screencast();
         let pid = self.pid as i32;
         // SAFETY: signalling the process group we created for our own child.
         unsafe { nix::libc::kill(-pid, nix::libc::SIGTERM) };
@@ -811,6 +843,81 @@ impl BrowserSession {
 
     pub fn binary(&self) -> &str {
         &self.binary
+    }
+
+    // ── Screencast (live mirror into the workshop panel) ─────────────
+
+    /// Arm `Page.startScreencast` on the current page target if not already on.
+    /// PNG (not JPEG): the webview panel hardcodes a `data:image/png` URI, so a
+    /// JPEG payload would carry the wrong MIME. Scale 1 keeps frame px == CSS px
+    /// so the panel's letterbox→CSS-px click mapping stays 1:1 (matching the
+    /// Retina screenshot clip). Idempotent per target.
+    pub fn ensure_screencast(&mut self) -> Result<(), String> {
+        if self.screencast_on {
+            return Ok(());
+        }
+        self.cdp(
+            "Page.startScreencast",
+            json!({
+                "format": "png",
+                "maxWidth": WINDOW_WIDTH,
+                "maxHeight": WINDOW_HEIGHT,
+                "everyNthFrame": 1,
+            }),
+        )?;
+        self.screencast_on = true;
+        Ok(())
+    }
+
+    /// Stop the screencast (on close / before teardown). Best-effort.
+    pub fn stop_screencast(&mut self) {
+        if self.screencast_on {
+            let _ = self.cdp("Page.stopScreencast", json!({}));
+            self.screencast_on = false;
+        }
+        self.pending_screencast.clear();
+    }
+
+    /// If a decoded CDP frame is a `Page.screencastFrame` event, stash it (and
+    /// its ack session id). No-op for anything else.
+    fn capture_screencast_event(&mut self, v: &Value) {
+        if let Some((data, sid)) = parse_screencast_frame(v) {
+            self.pending_screencast.push(ScreencastFrame {
+                data_base64: data,
+                ack_session_id: sid,
+            });
+        }
+    }
+
+    /// Pump the pipe for new screencast frames, then return the NEWEST one (the
+    /// panel only shows the latest; older frames are stale and dropped). Acks
+    /// EVERY drained frame so Chromium's encoder keeps producing. Returns
+    /// `None` when no new frame arrived. Non-blocking: polls the pipe once.
+    pub fn poll_screencast_frame(&mut self) -> Result<Option<String>, String> {
+        if !self.screencast_on {
+            return Ok(None);
+        }
+        // Drain whatever is already buffered on the pipe without blocking:
+        // deadline = now means next_frame returns Ok(None) as soon as the pipe
+        // has no complete frame ready.
+        let deadline = Instant::now();
+        while let Some(frame) = self.next_frame(deadline)? {
+            if let Ok(v) = serde_json::from_slice::<Value>(&frame) {
+                self.capture_screencast_event(&v);
+            }
+        }
+        if self.pending_screencast.is_empty() {
+            return Ok(None);
+        }
+        // Ack all frames (frees the encoder); keep only the newest to display.
+        let frames = std::mem::take(&mut self.pending_screencast);
+        for f in &frames {
+            let _ = self.cdp(
+                "Page.screencastFrameAck",
+                json!({ "sessionId": f.ack_session_id }),
+            );
+        }
+        Ok(frames.into_iter().next_back().map(|f| f.data_base64))
     }
 }
 
@@ -873,6 +980,19 @@ fn match_cdp_reply(v: &Value, id: i64, method: &str) -> Option<Result<Value, Str
         return Some(Err(format!("CDP {method} error: {err}")));
     }
     Some(Ok(v.get("result").cloned().unwrap_or(json!({}))))
+}
+
+/// Recognize a `Page.screencastFrame` CDP event and pull out `(data_base64,
+/// ack_session_id)`. Returns `None` for any other frame (replies, other events,
+/// malformed screencast events missing `data`/`sessionId`).
+fn parse_screencast_frame(v: &Value) -> Option<(String, i64)> {
+    if v.get("method").and_then(|m| m.as_str()) != Some("Page.screencastFrame") {
+        return None;
+    }
+    let params = v.get("params")?;
+    let data = params.get("data").and_then(|d| d.as_str())?;
+    let sid = params.get("sessionId").and_then(|s| s.as_i64())?;
+    Some((data.to_string(), sid))
 }
 
 /// Map a key name to (code, windowsVirtualKeyCode, optional text).
@@ -1110,6 +1230,77 @@ mod tests {
     fn cdp_reply_surfaces_errors() {
         let frame = json!({ "id": 7, "error": { "message": "boom" } });
         assert!(match_cdp_reply(&frame, 7, "m").unwrap().is_err());
+    }
+
+    #[test]
+    fn parse_screencast_frame_extracts_data_and_ack() {
+        let ev = json!({
+            "method": "Page.screencastFrame",
+            "params": { "data": "aGVsbG8=", "sessionId": 42, "metadata": {} }
+        });
+        let (data, sid) = parse_screencast_frame(&ev).unwrap();
+        assert_eq!(data, "aGVsbG8=");
+        assert_eq!(sid, 42);
+    }
+
+    #[test]
+    fn parse_screencast_frame_ignores_other_frames() {
+        // A command reply and an unrelated event are both None.
+        assert!(parse_screencast_frame(&json!({ "id": 3, "result": {} })).is_none());
+        assert!(parse_screencast_frame(
+            &json!({ "method": "Page.loadEventFired", "params": {} })
+        )
+        .is_none());
+        // A malformed screencast event (no sessionId) is None, not a panic.
+        assert!(parse_screencast_frame(
+            &json!({ "method": "Page.screencastFrame", "params": { "data": "x" } })
+        )
+        .is_none());
+    }
+
+    /// Live smoke: launch a REAL headless browser, start the screencast, assert
+    /// a frame arrives, dispatch a click, and close cleanly (exact pid reaped,
+    /// no external window since headless). Ignored by default — needs a
+    /// Chromium-engine browser installed. Run with:
+    ///   cargo test -p immorterm-daemon -- --ignored screencast_live_smoke
+    #[test]
+    #[ignore = "needs a real browser; run explicitly"]
+    fn screencast_live_smoke() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut b = BrowserSession::launch(&rt, "about:blank")
+            .expect("headless browser should launch");
+        let pid = b.pid();
+        // Process is alive right after launch.
+        assert_eq!(unsafe { nix::libc::kill(pid as i32, 0) }, 0, "browser not alive");
+
+        b.ensure_screencast().expect("startScreencast");
+        // Poll up to ~5s for the first frame.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut got_frame = false;
+        while Instant::now() < deadline {
+            if let Ok(Some(png)) = b.poll_screencast_frame() {
+                assert!(!png.is_empty(), "empty screencast frame");
+                got_frame = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(got_frame, "no screencast frame within 5s");
+
+        // Dispatch a human-style click; must not error on a live page.
+        b.click(100.0, 100.0).expect("dispatch click");
+
+        // Close: exact pid must be reaped (kill(pid,0) fails afterwards).
+        b.close();
+        let mut reaped = false;
+        for _ in 0..20 {
+            if unsafe { nix::libc::kill(pid as i32, 0) } != 0 {
+                reaped = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(reaped, "browser pid {pid} not reaped after close");
     }
 
     #[test]

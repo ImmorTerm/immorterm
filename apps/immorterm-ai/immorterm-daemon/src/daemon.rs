@@ -171,6 +171,13 @@ pub struct SessionState {
     /// Consumed at event-loop start: fed through the emulator as a dim line
     /// above the first shell prompt.
     pub pending_memory_banner: Option<String>,
+    /// Human→browser input (clicks/keys/scroll/pause) forwarded from the webview
+    /// browser panel, queued here for the MCP screencast pump to drain via
+    /// `PollBrowserInput`. The browser itself lives in the MCP process, so the
+    /// daemon can only stash these — same poll bridge as `PollAiEvents`.
+    /// ponytail: unbounded Vec, drained every pump tick (~15fps); cap if a
+    /// wedged pump ever lets it grow.
+    pub browser_input_queue: Vec<crate::ipc::BrowserInputEvent>,
 }
 
 impl SessionState {
@@ -664,6 +671,7 @@ fn run_daemon(
         branch: None,
         workshops: std::collections::HashMap::new(),
         pending_memory_banner,
+        browser_input_queue: Vec::new(),
     };
 
     // Record daemon start time for uptime tracking in death events
@@ -2327,6 +2335,45 @@ async fn handle_client_connection(
             };
             send_response(&mut stream, &resp).await;
         }
+        // ─── Self-driven browser screencast (MCP process → panel) ────────
+        // Relay the panel messages straight over control_tx; the raw-mode WS
+        // loop forwards them and the browser panel's handleServerMessage
+        // already dispatches on these `type`s. Fire-and-forget.
+        Request::BrowserFrame { png_base64, title, url, seq } => {
+            let env = serde_json::json!({
+                "type": "browser_frame",
+                "png_base64": png_base64,
+                "title": title,
+                "url": url,
+                "seq": seq,
+            });
+            if let Ok(json) = serde_json::to_string(&env) {
+                let _ = control_tx.send(Arc::new(json));
+            }
+            send_response(&mut stream, &Response::Ok("frame".into())).await;
+        }
+        Request::BrowserState { paused } => {
+            let env = serde_json::json!({ "type": "browser_state", "paused": paused });
+            if let Ok(json) = serde_json::to_string(&env) {
+                let _ = control_tx.send(Arc::new(json));
+            }
+            send_response(&mut stream, &Response::Ok("state".into())).await;
+        }
+        Request::BrowserHumanRequest { reason, instructions } => {
+            let env = serde_json::json!({
+                "type": "browser_human_request",
+                "reason": reason,
+                "instructions": instructions,
+            });
+            if let Ok(json) = serde_json::to_string(&env) {
+                let _ = control_tx.send(Arc::new(json));
+            }
+            send_response(&mut stream, &Response::Ok("human_request".into())).await;
+        }
+        Request::PollBrowserInput => {
+            let events = std::mem::take(&mut state.browser_input_queue);
+            send_response(&mut stream, &Response::BrowserInput { events }).await;
+        }
         Request::EvalInPrimitive { id, js } => {
             // Verify the primitive exists so we can fail fast on bad ids.
             let exists = state.terminal.ai_layer.primitives.iter().any(|p| p.id == id);
@@ -3875,6 +3922,9 @@ fn handle_ws_command(cmd: crate::websocket::WsCommand, state: &mut SessionState)
     match cmd {
         WsCommand::Input(data) => {
             state.pty.write_all(&data).ok();
+        }
+        WsCommand::BrowserInput(event) => {
+            state.browser_input_queue.push(event);
         }
         WsCommand::DrawRect {
             x, y, width, height, color, border_color, border_width, anchor, reply,

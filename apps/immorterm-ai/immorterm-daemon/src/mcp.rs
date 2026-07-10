@@ -24,6 +24,136 @@ fn browser_slot() -> &'static Mutex<Option<BrowserSession>> {
     BROWSER.get_or_init(|| Mutex::new(None))
 }
 
+/// True once the screencast pump thread has been spawned. The pump lives for
+/// the MCP process lifetime (one browser per process); it idles cheaply when no
+/// browser is open, so we start it at most once rather than per-launch.
+static BROWSER_PUMP_STARTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Paused flag toggled by the human via the panel's ⏸/▶. While paused we still
+/// stream frames + forward the human's own input, but the pump signals the AI
+/// side (browser_state) so tool narration knows a human has taken the wheel.
+/// ponytail: an AtomicBool is enough — the "gate the MCP automation" contract is
+/// advisory (tool handlers can read it later); the human's input path is
+/// independent and always dispatches.
+static BROWSER_PAUSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the human has paused the AI's browser automation from the panel.
+pub fn browser_is_paused() -> bool {
+    BROWSER_PAUSED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Interval between screencast pump ticks (~15fps). Frame coalescing means a
+/// slower tick just drops intermediate frames — never buffers unbounded.
+const PUMP_TICK: std::time::Duration = std::time::Duration::from_millis(66);
+
+/// Start the screencast pump for `session` if it isn't already running. The
+/// pump owns a dedicated single-thread tokio runtime for its IPC round-trips
+/// and shares the process-global `BROWSER` mutex with tool calls — it grabs the
+/// lock only for the brief poll each tick, so tool calls interleave freely.
+fn ensure_browser_pump(session: String) {
+    use std::sync::atomic::Ordering;
+    if BROWSER_PUMP_STARTED.swap(true, Ordering::SeqCst) {
+        return; // already running
+    }
+    std::thread::Builder::new()
+        .name("browser-screencast-pump".into())
+        .spawn(move || browser_pump_loop(session))
+        .ok();
+}
+
+/// The pump body: each tick, arm the screencast, forward the newest frame, and
+/// dispatch any human input the daemon queued. Exits only if IPC can't reach
+/// the daemon repeatedly (session gone) — the browser mutex being empty just
+/// means no browser is open, so it idles.
+fn browser_pump_loop(session: String) {
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(_) => {
+            BROWSER_PUMP_STARTED.store(false, std::sync::atomic::Ordering::SeqCst);
+            return;
+        }
+    };
+    let mut seq: u64 = 0;
+    loop {
+        std::thread::sleep(PUMP_TICK);
+        // IPC round-trips (input poll + frame push) happen OUTSIDE the browser
+        // mutex so a blocking daemon call never stalls tool calls. Only the
+        // synchronous CDP work (dispatch input, ensure screencast, poll frame)
+        // holds the lock, and only briefly.
+        let inputs = poll_browser_input(&session, &rt);
+        let (frame, title, url) = {
+            let mut guard = match browser_slot().lock() {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+            let Some(b) = guard.as_mut() else { continue };
+            for ev in inputs {
+                dispatch_browser_input(b, ev);
+            }
+            if b.ensure_screencast().is_err() {
+                continue;
+            }
+            match b.poll_screencast_frame() {
+                Ok(Some(png)) => {
+                    let (t, u) = b.current_title_url();
+                    (Some(png), t, u)
+                }
+                _ => (None, String::new(), String::new()),
+            }
+        };
+        if let Some(png) = frame {
+            seq += 1;
+            let _ = raw_ipc_query(
+                &session,
+                Request::BrowserFrame { png_base64: png, title, url, seq },
+                &rt,
+            );
+        }
+    }
+}
+
+/// Ask the daemon for queued human browser-panel input (best-effort).
+fn poll_browser_input(
+    session: &str,
+    rt: &tokio::runtime::Runtime,
+) -> Vec<crate::ipc::BrowserInputEvent> {
+    match raw_ipc_query(session, Request::PollBrowserInput, rt) {
+        Ok(Response::BrowserInput { events }) => events,
+        _ => Vec::new(),
+    }
+}
+
+/// Apply one human input event to the live browser. Errors are swallowed —
+/// the human can retry, and a dead pipe surfaces on the next tool call.
+fn dispatch_browser_input(b: &mut BrowserSession, ev: crate::ipc::BrowserInputEvent) {
+    use crate::ipc::BrowserInputEvent as E;
+    match ev {
+        E::Click { x, y } => {
+            let _ = b.click(x, y);
+        }
+        E::Key { key } => {
+            // Named keys go through the CDP key mapper; a single printable
+            // char is inserted directly (key_spec only knows the named set).
+            if b.key(&key).is_err() && key.chars().count() == 1 {
+                let _ = b.type_text(&key);
+            }
+        }
+        E::Scroll { dy } => {
+            let _ = b.scroll(dy);
+        }
+        E::Control { action } => apply_browser_control(&action),
+    }
+}
+
+/// Apply a panel pause/continue action to the process-global paused flag.
+/// Any action other than the literal "pause" resumes (matches the panel, which
+/// only ever sends "pause"/"continue").
+fn apply_browser_control(action: &str) {
+    BROWSER_PAUSED.store(action == "pause", std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Lazily initialized audio engine for the MCP server process.
 /// The MCP server runs as a normal foreground process (spawned by Claude Code)
 /// so it has full audio output access, unlike the double-forked daemon.
@@ -2911,6 +3041,11 @@ fn handle_browser_shot(
     {
         b.last_mirror_prim_id = new_id.or(prev_id);
     }
+    // Start the live screencast pump (idempotent) so the panel keeps streaming
+    // between tool calls. Scoped to the session we're mirroring into.
+    if let Ok(session) = resolve_session(args) {
+        ensure_browser_pump(session);
+    }
 
     Ok(vec![
         json!({ "type": "text", "text": format!("🌐 {} — {}", title, url) }),
@@ -3001,7 +3136,9 @@ fn handle_browser_close() -> Result<String, String> {
     match guard.take() {
         Some(session) => {
             let pid = session.pid();
-            drop(session); // Drop → close() kills the exact PID.
+            drop(session); // Drop → close() stops screencast + kills the exact PID.
+            // Clear the human-paused flag so a fresh browser starts un-paused.
+            BROWSER_PAUSED.store(false, std::sync::atomic::Ordering::Relaxed);
             // Release the ownership lock only if it is ours (don't clobber a
             // lock another live session took over).
             if crate::browser_lock::read()
@@ -4467,6 +4604,18 @@ mod tests {
         ] {
             assert!(is_dead_pipe(msg), "should be dead-pipe: {msg}");
         }
+    }
+
+    #[test]
+    fn browser_control_toggles_paused_flag() {
+        // The panel's ⏸/▶ toggle maps to pause/continue actions; only "pause"
+        // sets the flag, anything else resumes.
+        apply_browser_control("continue");
+        assert!(!browser_is_paused());
+        apply_browser_control("pause");
+        assert!(browser_is_paused());
+        apply_browser_control("continue");
+        assert!(!browser_is_paused());
     }
 
     #[test]
