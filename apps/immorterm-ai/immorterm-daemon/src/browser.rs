@@ -498,6 +498,33 @@ impl BrowserSession {
         }
     }
 
+    /// Non-blocking single read pass: pull every byte currently available on the
+    /// pipe (the fd is O_NONBLOCK) into `read_buf`, then split out all COMPLETE
+    /// `\0`-delimited frames. A partial trailing frame stays buffered for the
+    /// next call. Returns an empty Vec when nothing is ready — never sleeps.
+    /// Used by the screencast pump, which must poll without blocking tool calls.
+    fn drain_available_frames(&mut self) -> Result<Vec<Vec<u8>>, String> {
+        loop {
+            let mut chunk = [0u8; 65536];
+            match self.cdp_read.read(&mut chunk) {
+                Ok(0) => return Err("CDP pipe closed (browser exited)".to_string()),
+                Ok(n) => self.read_buf.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(format!("CDP read: {e}")),
+            }
+        }
+        let mut frames = Vec::new();
+        while let Some(pos) = self.read_buf.iter().position(|&b| b == 0) {
+            let frame: Vec<u8> = self.read_buf.drain(..=pos).collect();
+            let frame = frame[..frame.len() - 1].to_vec(); // strip NUL
+            if !frame.is_empty() {
+                frames.push(frame);
+            }
+        }
+        Ok(frames)
+    }
+
     // ── Navigation ───────────────────────────────────────────────────
 
     pub fn navigate(&mut self, url: &str) -> Result<(), String> {
@@ -897,11 +924,12 @@ impl BrowserSession {
         if !self.screencast_on {
             return Ok(None);
         }
-        // Drain whatever is already buffered on the pipe without blocking:
-        // deadline = now means next_frame returns Ok(None) as soon as the pipe
-        // has no complete frame ready.
-        let deadline = Instant::now();
-        while let Some(frame) = self.next_frame(deadline)? {
+        // Drain frames sitting on the pipe in one non-blocking read pass (the
+        // fd is O_NONBLOCK). We can't reuse `next_frame`: with deadline=now it
+        // returns before reading, and with a future deadline it sleeps until
+        // then. `drain_available_frames` reads until WouldBlock and returns
+        // every complete frame currently buffered, keeping a partial tail.
+        for frame in self.drain_available_frames()? {
             if let Ok(v) = serde_json::from_slice::<Value>(&frame) {
                 self.capture_screencast_event(&v);
             }
@@ -1273,6 +1301,8 @@ mod tests {
         // Process is alive right after launch.
         assert_eq!(unsafe { nix::libc::kill(pid as i32, 0) }, 0, "browser not alive");
 
+        // A real page paints; about:blank may never emit a screencast frame.
+        b.navigate("https://example.com").expect("navigate");
         b.ensure_screencast().expect("startScreencast");
         // Poll up to ~5s for the first frame.
         let deadline = Instant::now() + Duration::from_secs(5);
