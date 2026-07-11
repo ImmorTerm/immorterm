@@ -51,6 +51,17 @@ pub fn browser_is_paused() -> bool {
     BROWSER_PAUSED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Set when the human closes (✕) the panel: the pump stops the screencast and
+/// skips frame encoding/push (the expensive part) until any fresh browser
+/// activity — a human input event or a browser tool call — clears it. The
+/// BrowserSession stays alive (minimize/close never kills the tab).
+static BROWSER_CLOSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn browser_reopen() {
+    BROWSER_CLOSED.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Interval between screencast pump ticks (~60fps). Frame coalescing means a
 /// slower tick just drops intermediate frames — never buffers unbounded — so
 /// the real ceiling is how fast CDP produces frames + IPC throughput, not this.
@@ -62,6 +73,9 @@ const PUMP_TICK: std::time::Duration = std::time::Duration::from_millis(16);
 /// lock only for the brief poll each tick, so tool calls interleave freely.
 fn ensure_browser_pump(session: String) {
     use std::sync::atomic::Ordering;
+    // A browser tool call means the AI is driving — reopen a human-closed panel
+    // so frames resume even when the pump is already running.
+    browser_reopen();
     if BROWSER_PUMP_STARTED.swap(true, Ordering::SeqCst) {
         return; // already running
     }
@@ -100,6 +114,12 @@ fn browser_pump_loop(session: String) {
             for ev in inputs {
                 dispatch_browser_input(b, ev);
             }
+            // Panel closed by the human: stop encoding frames (the costly part)
+            // and idle. The tab stays alive; reopens on the next activity.
+            if BROWSER_CLOSED.load(std::sync::atomic::Ordering::Relaxed) {
+                b.stop_screencast();
+                continue;
+            }
             if b.ensure_screencast().is_err() {
                 continue;
             }
@@ -137,6 +157,11 @@ fn poll_browser_input(
 /// the human can retry, and a dead pipe surfaces on the next tool call.
 fn dispatch_browser_input(b: &mut BrowserSession, ev: crate::ipc::BrowserInputEvent) {
     use crate::ipc::BrowserInputEvent as E;
+    // Any human input other than an explicit "close" reopens a closed panel so
+    // frames resume streaming.
+    if !matches!(&ev, E::Control { action } if action == "close") {
+        browser_reopen();
+    }
     match ev {
         E::Click { x, y } => {
             let _ = b.click(x, y);
@@ -151,15 +176,23 @@ fn dispatch_browser_input(b: &mut BrowserSession, ev: crate::ipc::BrowserInputEv
         E::Scroll { dy } => {
             let _ = b.scroll(dy);
         }
+        E::Resize { width, height } => {
+            // Match the browser viewport to the panel so the page fills it with
+            // no letterbox. Debounced webview-side; cheap no-op if unchanged.
+            let _ = b.set_viewport(width.round() as u32, height.round() as u32);
+        }
         E::Control { action } => apply_browser_control(&action),
     }
 }
 
-/// Apply a panel pause/continue action to the process-global paused flag.
-/// Any action other than the literal "pause" resumes (matches the panel, which
-/// only ever sends "pause"/"continue").
+/// Apply a panel control action. "pause"/"continue" toggle the paused flag;
+/// "close" stops the screencast (panel ✕) via the pump's BROWSER_CLOSED gate,
+/// leaving the tab alive. Anything else resumes.
 fn apply_browser_control(action: &str) {
-    BROWSER_PAUSED.store(action == "pause", std::sync::atomic::Ordering::Relaxed);
+    match action {
+        "close" => BROWSER_CLOSED.store(true, std::sync::atomic::Ordering::Relaxed),
+        _ => BROWSER_PAUSED.store(action == "pause", std::sync::atomic::Ordering::Relaxed),
+    }
 }
 
 /// Emit a "Mort" cursor move to the panel (fire-and-forget). Coords are PAGE

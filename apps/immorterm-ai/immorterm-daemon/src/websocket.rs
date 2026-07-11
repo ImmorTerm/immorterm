@@ -447,7 +447,7 @@ pub enum WsClientMsg {
     },
     /// Human input on the self-driven browser panel → queued for the MCP
     /// screencast pump to dispatch to the live browser (page CSS px). `kind`
-    /// is click/key/scroll; the payload fields are flattened alongside it.
+    /// is click/key/scroll/resize; the payload fields are flattened alongside it.
     #[serde(rename = "browser_input")]
     BrowserInput {
         kind: String,
@@ -459,6 +459,10 @@ pub enum WsClientMsg {
         key: Option<String>,
         #[serde(default)]
         dy: Option<f64>,
+        #[serde(default)]
+        width: Option<f64>,
+        #[serde(default)]
+        height: Option<f64>,
     },
     /// Panel pause/continue toggle → queued as a Control browser-input event.
     #[serde(rename = "browser_control")]
@@ -1542,7 +1546,7 @@ async fn handle_client_message(
                 let _ = cmd_tx.send(WsCommand::Input(bytes)).await;
             }
         }
-        WsClientMsg::BrowserInput { kind, x, y, key, dy } => {
+        WsClientMsg::BrowserInput { kind, x, y, key, dy, width, height } => {
             // Map the wire shape → the poll event the MCP pump drains. Silently
             // drop malformed events (missing coords/key) — best-effort input.
             use crate::ipc::BrowserInputEvent;
@@ -1553,6 +1557,12 @@ async fn handle_client_message(
                 },
                 "key" => key.map(|key| BrowserInputEvent::Key { key }),
                 "scroll" => dy.map(|dy| BrowserInputEvent::Scroll { dy }),
+                "resize" => match (width, height) {
+                    (Some(width), Some(height)) => {
+                        Some(BrowserInputEvent::Resize { width, height })
+                    }
+                    _ => None,
+                },
                 _ => None,
             };
             if let Some(event) = event {

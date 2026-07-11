@@ -481,7 +481,9 @@ pub enum Request {
 
     /// Relay one screencast frame to the webview browser panel.
     BrowserFrame {
-        /// Base64 PNG (webview hardcodes `data:image/png` — must be PNG).
+        /// Base64 screencast frame (JPEG q75 from envoyage). Field name kept as
+        /// `png_base64` for wire compat; the webview panel sniffs the base64
+        /// magic bytes for the MIME, so JPEG or PNG both render.
         png_base64: String,
         title: String,
         url: String,
@@ -526,6 +528,10 @@ pub enum BrowserInputEvent {
     Key { key: String },
     /// Vertical wheel scroll by `dy` CSS pixels (positive = down).
     Scroll { dy: f64 },
+    /// Panel pixel size changed (open / drag-resize / debounced). The MCP pump
+    /// sets the browser viewport to match so the page fills the panel with no
+    /// letterbox. CSS px.
+    Resize { width: f64, height: f64 },
     /// pause / continue the AI's automation from the panel toggle.
     Control { action: String },
 }
