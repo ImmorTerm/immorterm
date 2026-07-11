@@ -463,6 +463,8 @@ pub enum WsClientMsg {
         width: Option<f64>,
         #[serde(default)]
         height: Option<f64>,
+        #[serde(default)]
+        text: Option<String>,
     },
     /// Panel pause/continue toggle → queued as a Control browser-input event.
     #[serde(rename = "browser_control")]
@@ -1546,7 +1548,7 @@ async fn handle_client_message(
                 let _ = cmd_tx.send(WsCommand::Input(bytes)).await;
             }
         }
-        WsClientMsg::BrowserInput { kind, x, y, key, dy, width, height } => {
+        WsClientMsg::BrowserInput { kind, x, y, key, dy, width, height, text } => {
             // Map the wire shape → the poll event the MCP pump drains. Silently
             // drop malformed events (missing coords/key) — best-effort input.
             use crate::ipc::BrowserInputEvent;
@@ -1556,6 +1558,8 @@ async fn handle_client_message(
                     _ => None,
                 },
                 "key" => key.map(|key| BrowserInputEvent::Key { key }),
+                "paste" => text.filter(|t| !t.is_empty()).map(|text| BrowserInputEvent::Paste { text }),
+                "copy" => Some(BrowserInputEvent::Copy),
                 "scroll" => dy.map(|dy| BrowserInputEvent::Scroll { dy }),
                 "resize" => match (width, height) {
                     (Some(width), Some(height)) => {

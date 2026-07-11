@@ -105,6 +105,7 @@ fn browser_pump_loop(session: String) {
         // synchronous CDP work (dispatch input, ensure screencast, poll frame)
         // holds the lock, and only briefly.
         let inputs = poll_browser_input(&session, &rt);
+        let mut copied: Option<String> = None;
         let (frame, title, url) = {
             let mut guard = match browser_slot().lock() {
                 Ok(g) => g,
@@ -112,7 +113,9 @@ fn browser_pump_loop(session: String) {
             };
             let Some(b) = guard.as_mut() else { continue };
             for ev in inputs {
-                dispatch_browser_input(b, ev);
+                if let Some(text) = dispatch_browser_input(b, ev) {
+                    copied = Some(text);
+                }
             }
             // Panel closed by the human: stop encoding frames (the costly part)
             // and idle. The tab stays alive; reopens on the next activity.
@@ -139,6 +142,10 @@ fn browser_pump_loop(session: String) {
                 &rt,
             );
         }
+        // Relay a copy result back to the webview (outside the browser mutex).
+        if let Some(text) = copied {
+            let _ = raw_ipc_query(&session, Request::BrowserCopy { text }, &rt);
+        }
     }
 }
 
@@ -155,7 +162,8 @@ fn poll_browser_input(
 
 /// Apply one human input event to the live browser. Errors are swallowed —
 /// the human can retry, and a dead pipe surfaces on the next tool call.
-fn dispatch_browser_input(b: &mut BrowserSession, ev: crate::ipc::BrowserInputEvent) {
+/// Returns copied text (from a `Copy` event) for the pump to relay back.
+fn dispatch_browser_input(b: &mut BrowserSession, ev: crate::ipc::BrowserInputEvent) -> Option<String> {
     use crate::ipc::BrowserInputEvent as E;
     // Any human input other than an explicit "close" reopens a closed panel so
     // frames resume streaming.
@@ -173,6 +181,15 @@ fn dispatch_browser_input(b: &mut BrowserSession, ev: crate::ipc::BrowserInputEv
                 let _ = b.type_text(&key);
             }
         }
+        E::Paste { text } => {
+            // Insert the clipboard text into the focused field (login fields etc).
+            let _ = b.type_text(&text);
+        }
+        E::Copy => {
+            // Return the page's current selection for the webview to put on the
+            // OS clipboard. String result already unwrapped by `eval`.
+            return b.eval("window.getSelection().toString()").ok().filter(|s| !s.is_empty());
+        }
         E::Scroll { dy } => {
             let _ = b.scroll(dy);
         }
@@ -183,6 +200,7 @@ fn dispatch_browser_input(b: &mut BrowserSession, ev: crate::ipc::BrowserInputEv
         }
         E::Control { action } => apply_browser_control(&action),
     }
+    None
 }
 
 /// Apply a panel control action. "pause"/"continue" toggle the paused flag;

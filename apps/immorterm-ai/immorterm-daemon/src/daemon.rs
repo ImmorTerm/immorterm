@@ -2409,6 +2409,13 @@ async fn handle_client_connection(
             }
             send_response(&mut stream, &Response::Ok("narration".into())).await;
         }
+        Request::BrowserCopy { text } => {
+            let env = serde_json::json!({ "type": "browser_copy", "text": text });
+            if let Ok(json) = serde_json::to_string(&env) {
+                let _ = control_tx.send(Arc::new(json));
+            }
+            send_response(&mut stream, &Response::Ok("copy".into())).await;
+        }
         Request::PollBrowserInput => {
             let events = std::mem::take(&mut state.browser_input_queue);
             send_response(&mut stream, &Response::BrowserInput { events }).await;

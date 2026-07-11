@@ -511,6 +511,11 @@ pub enum Request {
     BrowserNarration {
         text: String,
     },
+    /// Relay the page's copied selection back to the panel so the webview writes
+    /// it to the OS clipboard (response to a human Cmd/Ctrl+C on the frame).
+    BrowserCopy {
+        text: String,
+    },
     /// Drain queued human→browser input the webview forwarded to the daemon
     /// (clicks/keys/scroll/pause). The MCP pump dispatches these to the live
     /// browser. Returns `BrowserInput` and clears the queue.
@@ -526,6 +531,12 @@ pub enum BrowserInputEvent {
     Click { x: f64, y: f64 },
     /// A single named key (Enter/Tab/Backspace/Escape/Arrow*) or printable char.
     Key { key: String },
+    /// Paste text into the focused field (Cmd/Ctrl+V). The webview reads the
+    /// clipboard under the user gesture; the pump inserts it via Input.insertText.
+    Paste { text: String },
+    /// Copy the page's current selection (Cmd/Ctrl+C). The pump evals the
+    /// selection and relays it back for the webview to write to the clipboard.
+    Copy,
     /// Vertical wheel scroll by `dy` CSS pixels (positive = down).
     Scroll { dy: f64 },
     /// Panel pixel size changed (open / drag-resize / debounced). The MCP pump
