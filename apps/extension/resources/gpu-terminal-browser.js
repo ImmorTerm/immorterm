@@ -36,6 +36,10 @@ const IDLE_MS = 3000; // "Mort is driving" pulse fades after this much frame sil
 export function browserWorkshopCss() {
   return `
 :host, .bw-root { height: 100%; }
+/* The renderWorkshop wrapper is content-sized with 16px padding by default;
+   the browser must fill the card, so neutralize both here (this CSS is injected
+   into the workshop's shadow root, so .ai-html-content is in scope). */
+.ai-html-content { height: 100%; padding: 0; }
 .bw-root {
   display: flex; flex-direction: column;
   height: 100%; min-height: 0;
@@ -291,17 +295,17 @@ export function createBrowserController({ shadow, send }) {
   });
 
   // ── Input forwarding ──────────────────────────────────────────
-  // Map a pointer event on the frame img back to page CSS px. With the viewport
-  // matched to the card (object-fit:fill), this is ~1:1; the letterbox math is
-  // a safety net for the transient AR-mismatch window before a resize lands.
+  // Map a pointer event on the frame img back to page CSS px. CDP dispatches in
+  // CSS px (the layout viewport), which the engine pins to this panel's CSS
+  // size (via the resize message). With object-fit:fill the img box == the CSS
+  // viewport, so the CSS-px offset inside the box IS the page CSS coordinate —
+  // measured off the box rect, so it's independent of the frame's pixel density.
   function mapToPageCss(ev) {
-    const nw = img.naturalWidth, nh = img.naturalHeight;
-    if (!nw || !nh) return null;
     const rect = img.getBoundingClientRect();
-    // object-fit:fill stretches to the box, so map linearly box→natural.
-    const px = ((ev.clientX - rect.left) / rect.width) * nw;
-    const py = ((ev.clientY - rect.top) / rect.height) * nh;
-    if (px < 0 || py < 0 || px > nw || py > nh) return null;
+    if (!rect.width || !rect.height) return null;
+    const px = ev.clientX - rect.left;
+    const py = ev.clientY - rect.top;
+    if (px < 0 || py < 0 || px > rect.width || py > rect.height) return null;
     return { x: Math.round(px), y: Math.round(py) };
   }
 
@@ -314,8 +318,31 @@ export function createBrowserController({ shadow, send }) {
   img.addEventListener('keydown', (ev) => {
     if (!paused) return;
     if (ev.key === 'Escape') { img.blur(); return; }
+    // Let the browser's native paste/copy events fire (handled below) instead
+    // of forwarding a bare 'v'/'c' keystroke — clipboardData only reaches us
+    // via the paste/copy events under the user gesture.
+    const accel = ev.metaKey || ev.ctrlKey;
+    if (accel && (ev.key === 'v' || ev.key === 'c')) return;
     ev.preventDefault();
     emit({ type: 'browser_input', kind: 'key', key: ev.key });
+  });
+  // Paste: read text from the paste event's clipboardData (works under the user
+  // gesture; navigator.clipboard.readText is blocked in webviews). preventDefault
+  // + stopPropagation so the terminal's own Cmd+V handler doesn't also fire.
+  img.addEventListener('paste', (ev) => {
+    if (!paused) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const text = ev.clipboardData && ev.clipboardData.getData('text');
+    if (text) emit({ type: 'browser_input', kind: 'paste', text });
+  });
+  // Copy: ask the daemon for the page selection; it replies over the control
+  // channel and the host writes it to the clipboard (see applyCopy below).
+  img.addEventListener('copy', (ev) => {
+    if (!paused) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    emit({ type: 'browser_input', kind: 'copy' });
   });
   bodyEl.addEventListener('wheel', (ev) => {
     if (!paused) return;
@@ -396,15 +423,14 @@ export function createBrowserController({ shadow, send }) {
   }
 
   // ── Mort cursor ───────────────────────────────────────────────
+  // Daemon cursor coords are page CSS px. The img box == the CSS viewport
+  // (viewport pinned to the box CSS size), so page CSS px maps to box-relative
+  // px 1:1 — measured off the box rect, independent of frame pixel density.
   function mapPageToPanel(x, y) {
-    const nw = img.naturalWidth, nh = img.naturalHeight;
-    if (!nw || !nh) return null;
     const ir = img.getBoundingClientRect();
     const br = bodyEl.getBoundingClientRect();
-    // object-fit:fill → linear natural→box.
-    const bx = (ir.left - br.left) + (x / nw) * ir.width;
-    const by = (ir.top - br.top) + (y / nh) * ir.height;
-    return { x: bx, y: by };
+    if (!ir.width || !ir.height) return null;
+    return { x: (ir.left - br.left) + x, y: (ir.top - br.top) + y };
   }
   const HOT_X = 8, HOT_Y = 6;
   function moveMortTo(px, py) {
@@ -451,11 +477,35 @@ export function createBrowserController({ shadow, send }) {
     }, BALLOON_MS);
   }
 
+  // Daemon replied with the page's current selection → write to the OS
+  // clipboard. Prefer the async Clipboard API; fall back to execCommand for
+  // webviews where writeText is blocked outside a user gesture.
+  function applyCopy(msg) {
+    const text = msg && typeof msg.text === 'string' ? msg.text : '';
+    if (!text) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).catch(() => execCopyFallback(text));
+    } else {
+      execCopyFallback(text);
+    }
+  }
+  function execCopyFallback(text) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    } catch { /* best-effort */ }
+  }
+
   function destroy() {
     if (ro) ro.disconnect();
     if (sizeTimer) clearTimeout(sizeTimer);
     if (idleTimer) clearTimeout(idleTimer);
   }
 
-  return { showFrame, setState, humanRequest, cursorMove, narrate, destroy, isPaused: () => paused };
+  return { showFrame, setState, humanRequest, cursorMove, narrate, applyCopy, destroy, isPaused: () => paused };
 }

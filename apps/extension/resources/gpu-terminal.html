@@ -2957,6 +2957,10 @@
         if (canvas.style.display === 'none') return;
         if (!document.hasFocus()) return;
         const ae = document.activeElement;
+        // Human is driving the self-driven browser — leave focus on the frame.
+        // (activeElement resolves to the workshop card whose shadow root holds
+        // the frame img; snapping back to kbInput would kill browser typing.)
+        if (ae && ae.closest && ae.closest('.workshop-content[data-workshop-name="🦕 Browser"]')) return;
         if (!ae) { kbInput.focus({ preventScroll: true }); return; }
         // If a modal is visible, leave focus where it is.
         const mc = document.getElementById('modal-container');
@@ -6985,6 +6989,10 @@
               // Intent balloon — fires on browser_open, the reliable open trigger.
               const c = browserControllerFor(sessionName);
               if (c) c.narrate(msg);
+            } else if (msg.type === 'browser_copy') {
+              // Page selection copied (human Cmd/Ctrl+C) → OS clipboard.
+              const c = browserControllers.get(sessionName);
+              if (c) c.applyCopy(msg);
             } else {
               // Track AI primitive count for non-active sessions too
               if (msg.type === 'ai_layer_update' && msg.data) {

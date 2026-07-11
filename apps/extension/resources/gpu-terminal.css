@@ -316,6 +316,12 @@ body.with-tab-bar #container {
   display: none;
 }
 .workshop-content.active { display: block; }
+/* The 🦕 Browser workshop fills the whole panel (live frame + input surface),
+   unlike content-sized workshops. Completes the height chain so the frame
+   stretches instead of showing at intrinsic size in a void:
+   panel-body(flex:1) → card → shadow-host div → (shadow) .ai-html-content → .bw-root → img. */
+.workshop-content[data-workshop-name="🦕 Browser"] { height: 100%; }
+.workshop-content[data-workshop-name="🦕 Browser"] > div { height: 100%; }
 
 /* ── Session Sidebar (VS Code terminal-style) ── */
 #sidebar {
