@@ -6978,6 +6978,13 @@
             } else if (msg.type === 'browser_human_request') {
               // Handoff — {type, reason, instructions}. Claude needs the human.
               if (browserPanel) browserPanel.humanRequest(msg);
+            } else if (msg.type === 'browser_cursor') {
+              // Mort's virtual cursor — {type, x, y, action}. Reveals the panel.
+              if (browserPanel) browserPanel.cursorMove(msg);
+            } else if (msg.type === 'browser_narration') {
+              // Intent balloon — {type, text}. Fires on browser_open ("Opening…")
+              // so it's the reliable panel-open trigger, not just first-frame.
+              if (browserPanel) browserPanel.narrate(msg);
             } else {
               // Track AI primitive count for non-active sessions too
               if (msg.type === 'ai_layer_update' && msg.data) {

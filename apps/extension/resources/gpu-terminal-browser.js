@@ -588,6 +588,9 @@ export function createBrowserPanel({ container, beforeEl, send }) {
   // frame isn't laid out yet. Idle/hidden while paused (human is driving).
   function cursorMove(msg) {
     if (!msg || typeof msg.x !== 'number' || typeof msg.y !== 'number') return;
+    // Any AI browser activity reveals the panel — Mort moving is proof the
+    // browser is live even before the first screencast frame lands.
+    if (!userClosed) panel.style.display = 'flex';
     if (paused) { mort.classList.remove('on'); return; }
     const p = mapPageToPanel(msg.x, msg.y);
     if (!p) return;
@@ -607,6 +610,9 @@ export function createBrowserPanel({ container, beforeEl, send }) {
   function narrate(msg) {
     const text = msg && typeof msg.text === 'string' ? msg.text.trim() : '';
     if (!text) return;
+    // Narration fires on browser_open ("Opening …") before any frame, so this
+    // is the reliable "open the panel" trigger the daemon guarantees per action.
+    if (!userClosed) panel.style.display = 'flex';
     const chip = el('div', 'bp-balloon', text);
     chip.title = text;
     balloons.appendChild(chip);
