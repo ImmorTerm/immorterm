@@ -14343,8 +14343,10 @@
             try {
               const browserModule = await import(msg.browserUri);
               browserPanel = browserModule.createBrowserPanel({
-                container: document.getElementById('container'),
-                beforeEl: document.getElementById('workshop-panel'),
+                // Mount into #terminal-area (position:relative) as a floating
+                // OVERLAY (position:absolute), so the panel sits ON TOP of the
+                // terminal and never shrinks it — mirrors the fs-browser reveal.
+                container: document.getElementById('terminal-area'),
                 // Route browser_input/browser_control to the active session's
                 // daemon WS. Best-effort — the panel wraps this so an
                 // unacknowledged send on an older daemon never throws.

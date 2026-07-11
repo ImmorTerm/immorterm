@@ -31,14 +31,16 @@
 //   {type:"browser_input", kind:"click", x, y}   // x,y = page CSS px
 //   {type:"browser_input", kind:"key", key}      // while pane focused
 //   {type:"browser_input", kind:"scroll", dy}
+//   {type:"browser_input", kind:"resize", width, height}  // panel px → viewport
 //   {type:"browser_control", action:"pause"}
 //   {type:"browser_control", action:"continue"}
+//   {type:"browser_control", action:"close"}     // stop live view, tab stays
 //
-// Coordinate mapping: the frame image is scaled to fit (object-fit:contain),
-// so the rendered <img> is letterboxed. We map a click on the <img> back to
-// page CSS pixels using the image's naturalWidth/naturalHeight (the daemon
-// captures at CSS px per the hardening spec, so natural size == page CSS
-// size). See mapToPageCss().
+// Coordinate mapping: the engine sets the page viewport to the panel's actual
+// pixel size (via the resize message), so the page fills the panel at its own
+// aspect ratio — no letterbox in the common case (frame px == panel px == page
+// CSS px, mapping ~1:1). mapToPageCss() still handles any transient AR mismatch
+// (object-fit:contain) before a resize round-trip lands.
 //
 // Pure factory module — no host globals. Loaded via dynamic import from
 // gpu-terminal.html (wasm-init), same pattern as gpu-terminal-files.js.
@@ -50,19 +52,43 @@
 const IDLE_MS = 3000; // "Claude is driving" pulse fades after this much frame silence
 
 const PANEL_CSS = `
+/* Floating OVERLAY over the terminal — never a flex sibling, so the terminal
+   keeps its full width behind it. Mirrors the fs-browser reveal overlay:
+   position:absolute inside #terminal-area (position:relative), high z-index,
+   drop shadow. Anchored to the right, ~55% wide, full height. */
 #browser-panel {
-  width: 45%;
-  min-width: 240px;
-  max-width: 70%;
+  position: absolute;
+  top: 0; right: 0; bottom: 0;
+  width: 55%;
+  min-width: 320px;
+  max-width: 90%;
   background: var(--sidebar-bg, #181825);
-  border-left: 1px solid var(--sidebar-border, #313244);
+  /* Themed edge + accent glow: reads as part of the terminal, not a foreign
+     modal. Mirrors the status bar's border+glow language (--theme/--sidebar
+     accent tokens). */
+  border-left: 1px solid var(--theme-4, var(--sidebar-accent, #b482ff));
   display: flex; flex-direction: column;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   color: var(--sidebar-text, #cdd6f4);
-  position: relative;
   overflow: hidden;
-  flex-shrink: 0;
+  z-index: 60;
+  box-shadow: -6px 0 18px rgba(0, 0, 0, 0.4),
+              -1px 0 14px var(--badge-glow-soft, rgba(180, 130, 255, 0.14));
 }
+/* Minimized: collapse to just the header pill; the terminal is fully visible.
+   The browser + pump stay alive; the header click restores it. */
+#browser-panel.minimized {
+  width: auto; min-width: 0; max-width: none;
+  left: auto; right: 12px; top: 12px; bottom: auto;
+  border: 1px solid var(--sidebar-border, #313244);
+  border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+}
+#browser-panel.minimized #browser-panel-resize,
+#browser-panel.minimized #browser-panel-banner,
+#browser-panel.minimized #browser-panel-body { display: none; }
+#browser-panel.minimized #browser-panel-header { border-bottom: 0; }
 #browser-panel-resize {
   position: absolute;
   top: 0; left: 0; bottom: 0;
@@ -78,23 +104,54 @@ const PANEL_CSS = `
   opacity: 0.4;
 }
 #browser-panel-header {
-  display: flex; align-items: center; gap: 6px;
-  padding: 5px 8px 5px 12px;
+  display: flex; align-items: center; gap: 7px;
+  padding: 6px 8px 6px 10px;
   border-bottom: 1px solid var(--sidebar-border, #313244);
   flex-shrink: 0;
   font-size: 11px;
   min-width: 0;
 }
-#browser-panel-header .bp-globe { flex-shrink: 0; }
+/* Mort = the driver. Solid axolotl avatar (no glow-aura, no float — brand
+   NEVER-HAS), sits left of a lowercase state label. */
+#browser-panel-header .bp-mort {
+  flex-shrink: 0;
+  width: 22px; height: 22px;
+  display: flex; align-items: center; justify-content: center;
+}
+#browser-panel-header .bp-mort svg { width: 22px; height: 22px; display: block; }
+/* State label: "mort's driving" (self-driven) / "you're driving" (handoff).
+   Lowercase deadpan — brand voice. Accent-glows when Mort drives. */
+#browser-panel-header .bp-driver {
+  flex-shrink: 0;
+  font-size: 10px; font-weight: 600; letter-spacing: 0.01em;
+  white-space: nowrap;
+  color: var(--sidebar-accent, #b482ff);
+  text-shadow: 0 0 8px var(--badge-glow-soft, rgba(180, 130, 255, 0.35));
+}
+#browser-panel.paused #browser-panel-header .bp-driver {
+  color: #f9e2af; /* handoff amber — matches the paused frame border */
+  text-shadow: 0 0 8px rgba(249, 226, 175, 0.4);
+}
 #browser-panel-header .bp-title {
   font-weight: 600;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  flex-shrink: 1; min-width: 0;
+  flex-shrink: 1; min-width: 0; opacity: 0.85;
 }
+/* URL = a themed PILL, not a boxy input: rounded, accent border, subtle glow. */
 #browser-panel-header .bp-url {
-  opacity: 0.55;
+  flex: 1; min-width: 40px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  flex: 1; min-width: 0;
+  font-size: 10px; opacity: 0.8;
+  padding: 3px 9px; border-radius: 999px;
+  border: 1px solid var(--badge-glow-border, rgba(180, 130, 255, 0.3));
+  background: color-mix(in srgb, var(--sidebar-accent, #b482ff) 7%, transparent);
+  box-shadow: inset 0 0 6px var(--badge-glow-soft, rgba(180, 130, 255, 0.08));
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+#browser-panel-header .bp-url:hover {
+  border-color: var(--badge-glow-border-bright, rgba(224, 176, 255, 0.5));
+  box-shadow: inset 0 0 6px var(--badge-glow-soft, rgba(180, 130, 255, 0.12)),
+              0 0 10px var(--badge-glow-soft, rgba(180, 130, 255, 0.15));
 }
 #browser-panel-header .bp-toggle {
   flex-shrink: 0;
@@ -123,8 +180,39 @@ const PANEL_CSS = `
 }
 #browser-panel-header .bp-close:hover {
   opacity: 1;
-  background: var(--sidebar-border, #313244);
+  color: var(--sidebar-accent, #b482ff);
+  background: color-mix(in srgb, var(--sidebar-accent, #b482ff) 14%, transparent);
+  box-shadow: 0 0 8px var(--badge-glow-soft, rgba(180, 130, 255, 0.25));
 }
+/* Minimize button — same chrome as the workshop tools' header buttons, themed. */
+#browser-panel-header .bp-min {
+  flex-shrink: 0;
+  background: transparent; border: 0;
+  color: var(--sidebar-text, #cdd6f4);
+  font-size: 14px; line-height: 1;
+  cursor: pointer; opacity: 0.6;
+  padding: 2px 6px; border-radius: 4px;
+  transition: background 120ms ease, box-shadow 120ms ease, opacity 120ms ease;
+}
+#browser-panel-header .bp-min:hover {
+  opacity: 1;
+  color: var(--sidebar-accent, #b482ff);
+  background: color-mix(in srgb, var(--sidebar-accent, #b482ff) 14%, transparent);
+  box-shadow: 0 0 8px var(--badge-glow-soft, rgba(180, 130, 255, 0.25));
+}
+/* Live delivered-FPS: a tiny HUD stat — muted accent that glows, not debug text. */
+#browser-panel-header .bp-fps {
+  flex-shrink: 0;
+  font-size: 9px; font-variant-numeric: tabular-nums; font-weight: 600;
+  letter-spacing: 0.02em; white-space: nowrap;
+  color: var(--sidebar-accent, #b482ff); opacity: 0.75;
+  padding: 2px 6px; border-radius: 999px;
+  border: 1px solid var(--badge-glow-border, rgba(180, 130, 255, 0.28));
+  background: color-mix(in srgb, var(--sidebar-accent, #b482ff) 8%, transparent);
+  box-shadow: 0 0 6px var(--badge-glow-soft, rgba(180, 130, 255, 0.12));
+}
+/* When minimized, show a 'restore' affordance on the header. */
+#browser-panel.minimized #browser-panel-header .bp-min { transform: rotate(180deg); }
 /* Banner (pause / human-handoff) — sits above the frame. */
 #browser-panel-banner {
   display: none;
@@ -295,12 +383,13 @@ function el(tag, cls, text) {
 }
 
 /**
- * Create the browser mirror panel. DOM + styles are built here and inserted
- * into `container` before `beforeEl` (the workshop panel), so the column
- * order stays: terminal | browser | workshops | sessions.
+ * Create the browser mirror panel. DOM + styles are built here and appended
+ * into `container` — pass #terminal-area (position:relative) so the panel
+ * (position:absolute) floats as an OVERLAY on top of the terminal and never
+ * shrinks it. `beforeEl` is optional (legacy flex-sibling insertion point).
  *
  * @param {object} opts
- * @param {HTMLElement} opts.container
+ * @param {HTMLElement} opts.container  positioned ancestor (e.g. #terminal-area)
  * @param {HTMLElement} [opts.beforeEl]
  * @param {(msg:object)=>void} [opts.send] — routes a message to the active
  *   session's daemon WS. Best-effort: wrapped so a throw never breaks input.
@@ -326,14 +415,22 @@ export function createBrowserPanel({ container, beforeEl, send }) {
 
   const header = el('div');
   header.id = 'browser-panel-header';
-  const globe = el('span', 'bp-globe', '\u{1F310}');
+  // Mort is the driver — solid axolotl avatar (same art as the cursor) + a
+  // lowercase deadpan state label that swaps mort's-driving / you're-driving.
+  const mortAvatar = el('span', 'bp-mort');
+  mortAvatar.innerHTML = MORT_SVG;
+  const driverEl = el('span', 'bp-driver', "mort's driving");
   const titleEl = el('span', 'bp-title', 'Browser');
   const urlEl = el('span', 'bp-url', '');
+  const fpsEl = el('span', 'bp-fps', ''); // live delivered-FPS HUD readout
+  fpsEl.title = 'Live delivered frame rate';
   const toggleBtn = el('button', 'bp-toggle', '⏸ Pause'); // ⏸
   toggleBtn.title = 'Pause the AI and take over';
+  const minBtn = el('button', 'bp-min', '–'); // en-dash "minimize"
+  minBtn.title = 'Minimize (browser keeps running)';
   const closeBtn = el('button', 'bp-close', '×');
-  closeBtn.title = 'Hide panel (browser keeps running)';
-  header.append(globe, titleEl, urlEl, toggleBtn, closeBtn);
+  closeBtn.title = 'Close panel & stop the live view (tab stays alive)';
+  header.append(mortAvatar, driverEl, titleEl, urlEl, fpsEl, toggleBtn, minBtn, closeBtn);
 
   const banner = el('div');
   banner.id = 'browser-panel-banner';
@@ -377,6 +474,7 @@ export function createBrowserPanel({ container, beforeEl, send }) {
     toggleBtn.classList.toggle('paused', paused);
     toggleBtn.textContent = paused ? '▶ Continue' : '⏸ Pause'; // ▶ / ⏸
     toggleBtn.title = paused ? 'Resume the AI' : 'Pause the AI and take over';
+    driverEl.textContent = paused ? "you're driving" : "mort's driving";
     if (paused) {
       // Only show the generic "you're driving" banner if a richer
       // human-request banner isn't already up.
@@ -415,10 +513,31 @@ export function createBrowserPanel({ container, beforeEl, send }) {
     emit({ type: 'browser_control', action: 'continue' });
   });
 
-  closeBtn.addEventListener('click', () => {
+  // ── Minimize / close (workshop-style chrome) ──────────────────
+  let minimized = false;
+  function setMinimized(next) {
+    minimized = !!next;
+    panel.classList.toggle('minimized', minimized);
+    minBtn.title = minimized ? 'Restore' : 'Minimize (browser keeps running)';
+    // Restoring re-syncs the viewport to the newly-expanded panel size.
+    if (!minimized) reportSize();
+  }
+  minBtn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    setMinimized(!minimized);
+  });
+  // Clicking the minimized pill restores it.
+  header.addEventListener('click', (ev) => {
+    if (minimized && ev.target !== closeBtn && ev.target !== minBtn) setMinimized(false);
+  });
+
+  closeBtn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
     userClosed = true;
     panel.style.display = 'none';
-    // Closing the panel never touches the browser — no control message.
+    // Close stops the live view (screencast) but leaves the tab alive; the
+    // daemon reopens on the AI's next tool call or the human's next input.
+    emit({ type: 'browser_control', action: 'close' });
   });
 
   // ── Input forwarding ──────────────────────────────────────────
@@ -464,6 +583,28 @@ export function createBrowserPanel({ container, beforeEl, send }) {
     emit({ type: 'browser_input', kind: 'scroll', dy: ev.deltaY });
   }, { passive: false });
 
+  // ── Report panel size → daemon → engine viewport (fill, no letterbox) ──
+  // The engine sets the page viewport to match, so the page fills the panel
+  // at its aspect ratio. Debounced; skipped while minimized or zero-sized.
+  let lastReportedW = 0, lastReportedH = 0, sizeTimer = null;
+  function reportSize() {
+    if (minimized) return;
+    const r = bodyEl.getBoundingClientRect();
+    const w = Math.round(r.width), h = Math.round(r.height);
+    if (w < 50 || h < 50) return;
+    if (w === lastReportedW && h === lastReportedH) return;
+    lastReportedW = w; lastReportedH = h;
+    emit({ type: 'browser_input', kind: 'resize', width: w, height: h });
+  }
+  function reportSizeDebounced() {
+    if (sizeTimer) clearTimeout(sizeTimer);
+    sizeTimer = setTimeout(reportSize, 200);
+  }
+  // Observe the body (the frame area) so drag-resize + window resize re-sync.
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(reportSizeDebounced).observe(bodyEl);
+  }
+
   // ── Drag-to-resize ────────────────────────────────────────────
   // Same geometry as the workshop panel: the handle sits on the LEFT edge,
   // dragging left grows the panel.
@@ -491,6 +632,30 @@ export function createBrowserPanel({ container, beforeEl, send }) {
     document.body.style.cursor = '';
   });
 
+  // ── FPS: rolling 1s window of delivered frames ───────────────
+  const frameTimes = [];
+  function tickFps() {
+    const now = performance.now();
+    frameTimes.push(now);
+    while (frameTimes.length && now - frameTimes[0] > 1000) frameTimes.shift();
+    fpsEl.textContent = frameTimes.length + ' fps';
+  }
+
+  // MIME sniff from the base64 magic bytes: JPEG starts "/9j/", PNG "iVBOR".
+  // The engine streams JPEG now; older daemons may still send PNG.
+  function frameMime(b64) {
+    return b64.startsWith('/9j/') ? 'image/jpeg' : 'image/png';
+  }
+
+  // Reveal the panel (unless the human closed it) and sync the viewport on the
+  // transition from hidden → shown so the first frame is already panel-sized.
+  function revealPanel() {
+    if (userClosed) return;
+    const firstShow = panel.style.display === 'none';
+    panel.style.display = 'flex';
+    if (firstShow) reportSize();
+  }
+
   // ── Inbound messages ──────────────────────────────────────────
   function showFrame(msg) {
     if (!msg || typeof msg.png_base64 !== 'string' || !msg.png_base64) return;
@@ -498,12 +663,13 @@ export function createBrowserPanel({ container, beforeEl, send }) {
     if (seq <= lastSeq) return; // stale/out-of-order frame — newest wins
     lastSeq = seq;
 
-    img.src = 'data:image/png;base64,' + msg.png_base64;
+    img.src = `data:${frameMime(msg.png_base64)};base64,` + msg.png_base64;
     titleEl.textContent = msg.title || 'Browser';
     urlEl.textContent = msg.url ? '— ' + msg.url : '';
     header.title = (msg.title || '') + (msg.url ? '\n' + msg.url : '');
+    tickFps();
 
-    if (!userClosed) panel.style.display = 'flex';
+    revealPanel();
 
     // Driving pulse only while the AI is actually streaming (not paused).
     if (!paused) {
@@ -525,7 +691,7 @@ export function createBrowserPanel({ container, beforeEl, send }) {
   // overwriting it with the generic pause banner.
   function humanRequest(msg) {
     if (!msg) return;
-    if (!userClosed) panel.style.display = 'flex';
+    revealPanel();
     banner.dataset.request = '1';
     bannerTitle.textContent = '\u{1F64B} Claude needs you: ' + (msg.reason || 'take over');
     if (msg.instructions) {
@@ -542,6 +708,7 @@ export function createBrowserPanel({ container, beforeEl, send }) {
     panel.classList.add('paused');
     toggleBtn.classList.add('paused');
     toggleBtn.textContent = '▶ Continue';
+    driverEl.textContent = "you're driving";
     img.classList.remove('driving');
     img.focus();
   }
@@ -590,7 +757,7 @@ export function createBrowserPanel({ container, beforeEl, send }) {
     if (!msg || typeof msg.x !== 'number' || typeof msg.y !== 'number') return;
     // Any AI browser activity reveals the panel — Mort moving is proof the
     // browser is live even before the first screencast frame lands.
-    if (!userClosed) panel.style.display = 'flex';
+    revealPanel();
     if (paused) { mort.classList.remove('on'); return; }
     const p = mapPageToPanel(msg.x, msg.y);
     if (!p) return;
@@ -612,7 +779,7 @@ export function createBrowserPanel({ container, beforeEl, send }) {
     if (!text) return;
     // Narration fires on browser_open ("Opening …") before any frame, so this
     // is the reliable "open the panel" trigger the daemon guarantees per action.
-    if (!userClosed) panel.style.display = 'flex';
+    revealPanel();
     const chip = el('div', 'bp-balloon', text);
     chip.title = text;
     balloons.appendChild(chip);
