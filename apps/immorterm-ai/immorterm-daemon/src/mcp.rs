@@ -51,9 +51,10 @@ pub fn browser_is_paused() -> bool {
     BROWSER_PAUSED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Interval between screencast pump ticks (~15fps). Frame coalescing means a
-/// slower tick just drops intermediate frames — never buffers unbounded.
-const PUMP_TICK: std::time::Duration = std::time::Duration::from_millis(66);
+/// Interval between screencast pump ticks (~60fps). Frame coalescing means a
+/// slower tick just drops intermediate frames — never buffers unbounded — so
+/// the real ceiling is how fast CDP produces frames + IPC throughput, not this.
+const PUMP_TICK: std::time::Duration = std::time::Duration::from_millis(16);
 
 /// Start the screencast pump for `session` if it isn't already running. The
 /// pump owns a dedicated single-thread tokio runtime for its IPC round-trips
@@ -543,11 +544,19 @@ fn resolve_session(args: &Value) -> Result<String, String> {
         && !session.is_empty() {
             return Ok(session.to_string());
         }
-    // 2. Environment variable
-    if let Ok(name) = std::env::var("IMMORTERM_SESSION_NAME")
-        && !name.is_empty() {
-            return Ok(name);
-        }
+    // 2. Environment variable. The terminal sets IMMORTERM_SESSION to the full
+    //    daemon session name (e.g. `immorterm-ai-<id>`), which is exactly what
+    //    discover_sessions / the IPC socket lookup expect. IMMORTERM_SESSION_NAME
+    //    was an earlier name that is no longer exported — kept as a fallback.
+    //    (This is why the browser screencast pump never started for the panel:
+    //    the old var was unset, so with many live sessions resolve_session errored
+    //    and ensure_browser_pump was never reached.)
+    for var in ["IMMORTERM_SESSION", "IMMORTERM_SESSION_NAME"] {
+        if let Ok(name) = std::env::var(var)
+            && !name.is_empty() {
+                return Ok(name);
+            }
+    }
     // 3. Auto-discover: use the sole alive session (skip .ws WebSocket bridges)
     let alive: Vec<_> = commands::discover_sessions()
         .into_iter()
