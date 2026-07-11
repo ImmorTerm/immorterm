@@ -1934,20 +1934,40 @@ async fn handle_client_connection(
     channel_partner_id: &Option<String>,
     chat_overlay: &mut Option<crate::chat_overlay::ChatOverlay>,
 ) {
-    // Read the request
-    let mut buf = vec![0u8; 65536];
-    let n = match stream.read(&mut buf).await {
-        Ok(n) if n > 0 => n,
-        _ => return,
-    };
-
-    let request: Request = match serde_json::from_slice(&buf[..n]) {
-        Ok(req) => req,
-        Err(e) => {
-            error!("Invalid request: {}", e);
-            let resp = Response::Error(format!("Invalid request: {}", e));
-            send_response(&mut stream, &resp).await;
-            return;
+    // Read the request. A single request is one complete JSON value, but it can
+    // exceed one read (BrowserFrame carries a full-viewport base64 PNG — often
+    // >64KB — and even small requests may fragment across TCP segments). The
+    // client writes the request then blocks on the response without shutting its
+    // write half, so we can't read-to-EOF; instead accumulate and retry parse
+    // until a complete value arrives.
+    let mut acc: Vec<u8> = Vec::with_capacity(65536);
+    let mut chunk = vec![0u8; 65536];
+    let request: Request = loop {
+        let n = match stream.read(&mut chunk).await {
+            Ok(0) => {
+                // Peer closed before a full request arrived.
+                if acc.is_empty() {
+                    return;
+                }
+                error!("Invalid request: connection closed with {} partial bytes", acc.len());
+                return;
+            }
+            Ok(n) => n,
+            Err(_) => return,
+        };
+        acc.extend_from_slice(&chunk[..n]);
+        match serde_json::from_slice::<Request>(&acc) {
+            Ok(req) => break req,
+            // Not a complete JSON value yet — keep reading. serde reports EOF
+            // mid-value; any other parse error will also resolve to "eof" here
+            // because a well-formed client only ever sends valid JSON.
+            Err(e) if e.is_eof() => continue,
+            Err(e) => {
+                error!("Invalid request: {}", e);
+                let resp = Response::Error(format!("Invalid request: {}", e));
+                send_response(&mut stream, &resp).await;
+                return;
+            }
         }
     };
 
