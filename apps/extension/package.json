@@ -2,7 +2,7 @@
   "name": "immorterm-extension",
   "displayName": "ImmorTerm",
   "description": "Immortal terminals that survive VS Code crashes, restarts, and updates. Powered by GNU Screen.",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "publisher": "immorterm",
   "icon": "resources/icon.png",
   "galleryBanner": {

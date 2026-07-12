@@ -92,9 +92,18 @@ jobs:
           vsce package --no-dependencies
 
       - name: Publish to VS Code Marketplace
+        continue-on-error: true  # don't block Open VSX if the Azure VSCE_PAT isn't set yet
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: vsce publish --packagePath *.vsix
+
+      - name: Publish to Open VSX (Cursor / Windsurf / VSCodium)
+        if: ${{ !cancelled() }}
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_TOKEN }}
+        run: |
+          npx --yes ovsx create-namespace immorterm -p "$OVSX_PAT" || true
+          npx --yes ovsx publish *.vsix -p "$OVSX_PAT"
 
   promote-docs:
     name: Promote Docs
