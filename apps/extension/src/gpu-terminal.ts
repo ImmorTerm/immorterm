@@ -1511,6 +1511,23 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         });
         break;
       }
+      case 'resolve-ws-port': {
+        // Re-resolve a session's CURRENT WebSocket port from the live .ws file.
+        // The webview caches wsPort at addSession() time; after a daemon respawn
+        // (e.g. reboot) that port is dead but the daemon is alive on a NEW port.
+        // The webview is sandboxed and can't read SOCKET_DIR, so it asks the host.
+        // Best-effort + non-throwing: reply with wsPort:null if it can't resolve yet.
+        const { sessionName } = msg as { sessionName: string; type: string };
+        let wsPort: number | null = null;
+        try {
+          const daemonPid = findDaemonPidFromWsFile(sessionName);
+          wsPort = daemonPid ? findWsPort(sessionName, daemonPid) : findWsPort(sessionName);
+        } catch {
+          wsPort = null;
+        }
+        this.view?.webview.postMessage({ type: 'ws-port-resolved', sessionName, wsPort });
+        break;
+      }
       case 'resolve-claude-image': {
         // `[Image #N]` paste preview. Resolve N → an image-cache PNG. The
         // webview can't always learn the active session's Claude UUID (the
