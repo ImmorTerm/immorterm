@@ -1,6 +1,6 @@
 {
   "name": "immorterm-terminal",
-  "displayName": "ImmorTerm",
+  "displayName": "ImmorTerm — Persistent Terminals",
   "description": "Immortal terminals that survive VS Code crashes, restarts, and updates. Powered by GNU Screen.",
   "version": "1.0.4",
   "publisher": "immorterm",
