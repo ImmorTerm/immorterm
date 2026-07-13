@@ -10,7 +10,9 @@
 
 import { execFile } from "node:child_process";
 
-const EXTENSION_ID = "immorterm.immorterm-extension";
+// Kept in sync with the source of truth in libs/services/src/versions.ts.
+// This is a dependency-free npm postinstall script, so it can't import it.
+const EXTENSION_ID = "immorterm.immorterm-terminal";
 const VSCODE_BINARIES = ["code", "code-insiders", "cursor"];
 const TIMEOUT = 15000;
 

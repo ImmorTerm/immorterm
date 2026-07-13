@@ -12,7 +12,7 @@ cd "$REPO_ROOT"
 
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$HOME/.cargo/bin:$PATH"
 
-EXT_DIR="$HOME/.vscode/extensions/immorterm.immorterm-extension-1.0.3"
+EXT_DIR="$HOME/.vscode/extensions/immorterm.immorterm-terminal-1.0.4"
 WASM_SRC="apps/immorterm-ai/immorterm-wasm"
 WASM_PKG="$WASM_SRC/pkg"
 WASM_DEST="apps/extension/resources/wasm"

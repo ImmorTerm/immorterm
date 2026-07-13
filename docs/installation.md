@@ -26,7 +26,7 @@ Enable persistent AI memory for Claude Code sessions:
 
 ## What Gets Installed
 
-- VS Code extension (`immorterm.immorterm-extension`)
+- VS Code extension (`immorterm.immorterm-terminal`)
 - `~/.immorterm/` — global config, scripts, and (if enabled) the memory binary
 - Per-project `.immorterm/` directory — session registry, hooks, logs
 

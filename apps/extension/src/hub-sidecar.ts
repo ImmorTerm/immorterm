@@ -102,7 +102,7 @@ function resolveHubBinary(): { path: string; source: string } | null {
   // Bundled binary (marketplace install) — Tauri-style platform sidecar.
   // Extension Marketplace packages ship per-platform binaries under
   // `<ext>/bin/<platform>/immorterm-hub`. Look there first.
-  // __dirname after install is .../immorterm.immorterm-extension-1.0.3/out so go up 1.
+  // __dirname after install is .../immorterm.immorterm-terminal-1.0.4/out so go up 1.
   const extRoot = path.dirname(__dirname);
   const platform = process.platform;
   const arch = process.arch;

@@ -66,7 +66,13 @@ export { installProjectHooks } from "./project-hooks.js";
 
 // Versions
 export type { ComponentVersion } from "./versions.js";
-export { getAllVersions, getCliVersion, checkCliUpdate, compareVersions } from "./versions.js";
+export {
+	EXTENSION_ID,
+	getAllVersions,
+	getCliVersion,
+	checkCliUpdate,
+	compareVersions,
+} from "./versions.js";
 
 // VS Code
 export type { VsCodeBinary, VsCodeDetection, ExtensionInstallResult } from "./vscode.js";

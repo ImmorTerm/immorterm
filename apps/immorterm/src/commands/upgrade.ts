@@ -4,7 +4,7 @@
  * Per-component upgrade strategies:
  *   cli      → npm install -g immorterm@latest
  *   memory   → re-download latest GitHub release asset (daemon stop → replace → restart)
- *   extension → code --install-extension immorterm.immorterm-extension
+ *   extension → code --install-extension immorterm.immorterm-terminal
  *   ai       → no distribution channel yet (local builds only) — see docs/UPDATING.md
  *
  * Without a component argument, upgrades all outdated components.
@@ -17,6 +17,7 @@ import * as fs from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
+	EXTENSION_ID,
 	getAllVersions,
 	checkCliUpdate,
 	getCliVersion,
@@ -94,17 +95,17 @@ export async function upgradeMemory(dryRun: boolean): Promise<boolean> {
 
 async function upgradeExtension(dryRun: boolean): Promise<boolean> {
 	if (dryRun) {
-		consola.info(`  ${pc.dim("Would run:")} code --install-extension immorterm.immorterm-extension`);
+		consola.info(`  ${pc.dim("Would run:")} code --install-extension ${EXTENSION_ID}`);
 		return true;
 	}
 	try {
 		consola.start("Upgrading VS Code extension...");
-		await execFileAsync("code", ["--install-extension", "immorterm.immorterm-extension", "--force"], { timeout: 60000 });
+		await execFileAsync("code", ["--install-extension", EXTENSION_ID, "--force"], { timeout: 60000 });
 		consola.success("Extension upgraded (reload VS Code to activate)");
 		return true;
 	} catch (error) {
 		consola.error(`Extension upgrade failed: ${error}`);
-		consola.info(`  Manual: ${pc.cyan("code --install-extension immorterm.immorterm-extension")}`);
+		consola.info(`  Manual: ${pc.cyan(`code --install-extension ${EXTENSION_ID}`)}`);
 		return false;
 	}
 }

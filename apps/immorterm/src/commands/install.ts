@@ -9,6 +9,7 @@ import { defineCommand } from "citty";
 import consola from "consola";
 import pc from "picocolors";
 import {
+	EXTENSION_ID,
 	detectVsCode,
 	installExtension,
 	isExtensionInstalled,
@@ -74,7 +75,7 @@ const installExtensionCommand = defineCommand({
 			consola.success(`Extension installed! Reload VS Code to activate.`);
 		} else {
 			consola.error(`Installation failed: ${result.error}`);
-			consola.info(`  Manual: ${pc.cyan(`${vscode.binary} --install-extension immorterm.immorterm-extension${preRelease ? " --pre-release" : ""}`)}`);
+			consola.info(`  Manual: ${pc.cyan(`${vscode.binary} --install-extension ${EXTENSION_ID}${preRelease ? " --pre-release" : ""}`)}`);
 		}
 	},
 });
