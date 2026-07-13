@@ -1426,6 +1426,11 @@
     // ws://… (or wss://…) form of HUB_BASE_URL for the control/events sockets.
     const hubWsUrl = (path) => HUB_BASE_URL.replace(/^http/, 'ws') + path;
 
+    // sessionName → current ws_port from the latest hub snapshot. The standalone/
+    // Tauri port source for resolveCurrentWsPort (no VS Code host to ask).
+    // Populated by reconcileFromSnapshot.
+    const latestSnapshotPorts = new Map();
+
     // Remote ImmorTerm host this webview is rendering, populated from
     // the `?remote=NAME` URL param set by Tauri's spawn_project_webview.
     // Module-level so handlers OUTSIDE the standalone adapter (Cmd+V/E
@@ -1458,6 +1463,13 @@
           if (s && s.session_status === 'shelved') return false;
           return pd === myProjectDir;
         });
+        // Record each session's CURRENT ws_port from the hub snapshot. This is
+        // the standalone/Tauri port source for reconnectSession → resolveCurrentWsPort
+        // (there's no VS Code host to ask). ONE reconnect path serves both surfaces;
+        // only the port SOURCE differs (host vs snapshot).
+        for (const s of mine) {
+          if (s && typeof s.ws_port === 'number' && s.ws_port > 0) latestSnapshotPorts.set(s.name, s.ws_port);
+        }
         // Sessions added since last sync.
         for (const s of mine) {
           if (typeof addSession === 'function' && !sessions.has(s.name)) {
@@ -7507,13 +7519,15 @@
       console.log(`[switchSession] save=${(t1-t0).toFixed(1)}ms restore+sync=${(t2-t1).toFixed(1)}ms dom=${(t3-t2).toFixed(1)}ms sidebar=${(t4-t3).toFixed(1)}ms total=${(t4-t0).toFixed(1)}ms`);
     }
 
-    // Ask the extension host for a session's CURRENT ws port (re-read from the
-    // live .ws file). Returns the port, or null if unavailable / timed out.
-    // Only meaningful for local VS Code sessions — standalone (Tauri) and remote
-    // (SSH-tunnelled) sessions have no host to answer, so we short-circuit to null
-    // and reconnectSession falls back to the cached port (current behavior).
+    // Resolve a session's CURRENT ws port before reconnecting. ONE reconnect
+    // path (reconnectSession); only the port SOURCE is surface-specific:
+    //   • standalone / Tauri — latest hub snapshot (latestSnapshotPorts)
+    //   • VS Code — the extension host re-reads the live .ws file
+    //   • remote (SSH-tunnelled) — null; the tunnel/attach path owns re-resolution
+    // Returns the port, or null → reconnectSession falls back to the cached port.
     function resolveCurrentWsPort(sessionName) {
-      if (IS_STANDALONE || _remoteName) return Promise.resolve(null);
+      if (_remoteName) return Promise.resolve(null);
+      if (IS_STANDALONE) return Promise.resolve(latestSnapshotPorts.get(sessionName) || null);
       return new Promise((resolve) => {
         wsPortResolvePending.set(sessionName, resolve);
         try { vscode.postMessage({ type: 'resolve-ws-port', sessionName }); }
