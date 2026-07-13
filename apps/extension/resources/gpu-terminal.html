@@ -6695,6 +6695,7 @@
     function setupWsHandlers(ws, sessionName, session, opts = {}) {
       ws.onopen = () => {
         session.connected = true;
+        session.reconnectDelay = 1000; // reset exponential backoff on success
         dbg('ws.onopen: ' + sessionName + ' active=' + (sessionName === activeSessionName));
         // Probe whether the daemon understands clipboard_check_image (added
         // in the paste-fix WS protocol). Daemons predating it silently
@@ -7023,12 +7024,17 @@
         if (sessionName === activeSessionName) {
           showStatus('Disconnected', 'error');
         }
-        // Reconnect ALL sessions (not just active) after delay
+        // Reconnect ALL sessions (not just active) with exponential backoff.
+        // Reset to 1s on a successful open (see ws.onopen). A daemon may take a
+        // few seconds to respawn after reboot; backoff avoids hammering the port
+        // while still reconnecting indefinitely (we never give up).
+        const delay = session.reconnectDelay || 1000;
+        session.reconnectDelay = Math.min(delay * 2, 30000);
         setTimeout(() => {
           if (sessions.has(sessionName) && !session.connected) {
             reconnectSession(sessionName);
           }
-        }, 2000);
+        }, delay);
       };
 
       ws.onerror = () => {
@@ -7501,9 +7507,38 @@
       console.log(`[switchSession] save=${(t1-t0).toFixed(1)}ms restore+sync=${(t2-t1).toFixed(1)}ms dom=${(t3-t2).toFixed(1)}ms sidebar=${(t4-t3).toFixed(1)}ms total=${(t4-t0).toFixed(1)}ms`);
     }
 
-    function reconnectSession(sessionName) {
+    // Ask the extension host for a session's CURRENT ws port (re-read from the
+    // live .ws file). Returns the port, or null if unavailable / timed out.
+    // Only meaningful for local VS Code sessions — standalone (Tauri) and remote
+    // (SSH-tunnelled) sessions have no host to answer, so we short-circuit to null
+    // and reconnectSession falls back to the cached port (current behavior).
+    function resolveCurrentWsPort(sessionName) {
+      if (IS_STANDALONE || _remoteName) return Promise.resolve(null);
+      return new Promise((resolve) => {
+        wsPortResolvePending.set(sessionName, resolve);
+        try { vscode.postMessage({ type: 'resolve-ws-port', sessionName }); }
+        catch (_) { wsPortResolvePending.delete(sessionName); resolve(null); return; }
+        setTimeout(() => {
+          if (wsPortResolvePending.delete(sessionName)) resolve(null);
+        }, 1500);
+      });
+    }
+
+    async function reconnectSession(sessionName) {
       const session = sessions.get(sessionName);
       if (!session || session.connected) return;
+
+      // Re-resolve the CURRENT port before connecting. A daemon that died and
+      // respawned (e.g. after reboot) is alive on a NEW port; the cached
+      // session.wsPort points at the dead one. Without this, we'd retry the
+      // dead port forever → permanent "Disconnected".
+      const freshPort = await resolveCurrentWsPort(sessionName);
+      // Session may have been closed or reconnected while we awaited.
+      if (!sessions.has(sessionName) || session.connected) return;
+      if (freshPort && freshPort !== session.wsPort) {
+        dbg('reconnectSession: ' + sessionName + ' port ' + session.wsPort + ' → ' + freshPort);
+        session.wsPort = freshPort;
+      }
 
       const ws = new WebSocket('ws://127.0.0.1:' + session.wsPort);
       ws.binaryType = 'arraybuffer';
@@ -11326,6 +11361,7 @@
     const linkExistCache = new Map(); // path → {exists, kind, inWorkspace}
     const linkPendingStats = new Map(); // requestId → path
     const dirListPending = new Map(); // requestId → resolve fn (VS Code list-dir round-trip)
+    const wsPortResolvePending = new Map(); // sessionName → resolve fn (VS Code resolve-ws-port round-trip)
     const filePreviewPending = new Map(); // requestId → resolve fn (VS Code file-preview round-trip)
     const claudeImagePending = new Map(); // requestId → { cacheKey, n } (VS Code [Image #N] resolve)
     let dirListSeq = 0;
@@ -13905,6 +13941,16 @@
           if (resolve) {
             dirListPending.delete(msg.requestId);
             resolve({ entries: msg.entries || [], error: msg.error });
+          }
+          break;
+        }
+        case 'ws-port-resolved': {
+          // Host reply to resolve-ws-port (see reconnectSession). wsPort may be
+          // null if the host couldn't resolve a live port yet.
+          const resolve = wsPortResolvePending.get(msg.sessionName);
+          if (resolve) {
+            wsPortResolvePending.delete(msg.sessionName);
+            resolve(typeof msg.wsPort === 'number' && msg.wsPort > 0 ? msg.wsPort : null);
           }
           break;
         }
