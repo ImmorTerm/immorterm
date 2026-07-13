@@ -15,6 +15,9 @@ import {
   isGatewayEnabled,
   getMCPGatewayState,
 } from '../services/mcp-gateway';
+// Single source of truth for the extension id (libs/services/src/extension-id.ts),
+// consumed here the same way the extension shares hook-installer core.
+import { EXTENSION_ID } from '../../../../libs/services/src/extension-id';
 
 const execAsync = promisify(exec);
 
@@ -69,7 +72,7 @@ export class StatusBar {
    */
   private async fetchVersion(): Promise<void> {
     try {
-      const ext = vscode.extensions.getExtension('immorterm.immorterm-extension');
+      const ext = vscode.extensions.getExtension(EXTENSION_ID);
       if (ext) {
         this.immortermVersion = `ImmorTerm ${ext.packageJSON.version}`;
         logger.info('ImmorTerm extension version:', this.immortermVersion);

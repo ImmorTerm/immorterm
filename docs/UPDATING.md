@@ -12,7 +12,7 @@ GitHub releases / npm / Marketplace / brew state on 2026-07-07.
 | Terminal binary (C) | **RETIRED** (see below) | — | — (command removed) | Nobody — apps/terminal deleted 2026-07 |
 | AI daemon (`immorterm-ai`) | GitHub Releases (`ai-prod-*`) — coded, never published | Install-if-missing only | none (`immorterm upgrade ai` says "not yet distributable") | CI: `promote-immorterm-ai` — never run |
 | Hub (`immorterm-hub`) | Bundled inside the Tauri app | Rides the app updater | none (no independent channel by design) | CI: built as Tauri sidecar in `01-build.yml` |
-| VS Code extension | Marketplace `immorterm.immorterm-extension` (1.0.3 live) | Yes — VS Code built-in auto-update | automatic | CI: `promote-extension` (green since 2026-07-07) |
+| VS Code extension | Marketplace `immorterm.immorterm-terminal` (1.0.3 live) | Yes — VS Code built-in auto-update | automatic | CI: `promote-extension` (green since 2026-07-07) |
 | Tauri desktop app | tauri-plugin-updater ← `latest.json` on GitHub release | Yes (check 2s post-boot, banner → install → relaunch) | none needed | CI: `promote-tauri-app` — never run |
 | MCP Gateway | npm `immorterm-mcp-gateway` (0.1.3 live, Trusted Publishing) | Yes (extension 6h poll); CLI users: manual npm | automatic via extension | CI: `promote-gateway` lane (added 2026-07-08; `files:[dist]` fix) |
 
@@ -67,8 +67,8 @@ channel and none needed — but it inherits the Tauri chain's state (never publi
 
 ### VS Code extension
 
-- **Never published** — Marketplace query for `immorterm.immorterm-extension` returns nothing, so VS Code's built-in auto-update has never been exercised and `code --install-extension immorterm.immorterm-extension --force` fails for real users.
-- **Dev path:** the `deploy-extension` skill copies `out/` + `resources/` into `~/.vscode/extensions/immorterm.immorterm-extension-1.0.3/`. Latent trap: the dir name hardcodes 1.0.0 while `package.json` is 1.0.1.
+- **Never published** — Marketplace query for `immorterm.immorterm-terminal` returns nothing, so VS Code's built-in auto-update has never been exercised and `code --install-extension immorterm.immorterm-terminal --force` fails for real users.
+- **Dev path:** the `deploy-extension` skill copies `out/` + `resources/` into `~/.vscode/extensions/immorterm.immorterm-terminal-1.0.3/`. Latent trap: the dir name hardcodes 1.0.0 while `package.json` is 1.0.1.
 
 ### Tauri desktop app
 

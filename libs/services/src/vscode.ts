@@ -8,10 +8,10 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { Logger } from "./types.js";
+// Single source of truth for the extension id (see versions.ts).
+import { EXTENSION_ID } from "./versions.js";
 
 const execFileAsync = promisify(execFile);
-
-const EXTENSION_ID = "immorterm.immorterm-extension";
 
 /** Possible VS Code CLI binaries, in preference order */
 const VSCODE_BINARIES = ["code", "code-insiders", "cursor"] as const;

@@ -28,9 +28,11 @@ export interface ComponentVersion {
 
 /** CLI package name on npm */
 const CLI_PACKAGE = "immorterm";
-/** Extension publisher.name on VS Code Marketplace — the published id is
- * immorterm-EXTENSION (apps/extension/package.json name), not immorterm. */
-const EXTENSION_ID = "immorterm.immorterm-extension";
+// Extension id: single source of truth lives in ./extension-id.ts. Imported for
+// internal use and re-exported so existing `@immorterm/services` consumers keep
+// importing EXTENSION_ID from here.
+import { EXTENSION_ID } from "./extension-id.js";
+export { EXTENSION_ID };
 /** GitHub repo for releases */
 const GITHUB_REPO = "ImmorTerm/immorterm";
 

@@ -70,7 +70,7 @@ rebuilt with this flag — it now contains zero `/Users/` path strings (verified
 
 ## VS Code Marketplace publisher
 
-The extension publisher id is `immorterm` (marketplace id `immorterm.immorterm-extension`).
+The extension publisher id is `immorterm` (marketplace id `immorterm.immorterm-terminal`).
 Before the extension can be published, the founder must create the `immorterm` VS Code
 Marketplace publisher account and set a `VSCE_PAT` repo secret scoped to it. There is no
 installed base under the old `lonormaly` publisher to migrate.
@@ -86,9 +86,11 @@ this repo.
 
 ## VS Code publisher migration (done in-tree 2026-07-08)
 Publisher re-pointed `lonormaly` → `immorterm`; canonical extension id is now
-`immorterm.immorterm-extension` (both EXTENSION_ID constants — versions.ts and
-vscode.ts — normalized; they were previously inconsistent). Founder cleared
-breaking the old installed base (no live users).
+`immorterm.immorterm-terminal`, exported once from `libs/services/src/versions.ts`
+as `EXTENSION_ID` and imported everywhere (vscode.ts, the CLI install/upgrade
+commands, and the extension status bar) — the previously duplicated constants
+were collapsed into this single source of truth. Founder cleared breaking the
+old installed base (no live users).
 
 **Founder actions before the extension can publish under the new id:**
 - Create the `immorterm` publisher on the VS Code Marketplace (+ Open VSX if used).
