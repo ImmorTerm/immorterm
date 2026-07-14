@@ -12,8 +12,8 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::audio::AudioEngine;
-use crate::browser::{self, BrowserSession};
 use crate::commands;
+use envoyage::BrowserSession;
 use crate::ipc::{Request, Response};
 
 /// The single self-driven browser for this MCP server process (one per Claude
@@ -23,6 +23,13 @@ static BROWSER: OnceLock<Mutex<Option<BrowserSession>>> = OnceLock::new();
 fn browser_slot() -> &'static Mutex<Option<BrowserSession>> {
     BROWSER.get_or_init(|| Mutex::new(None))
 }
+
+/// Id of the last AI-canvas primitive we mirrored the browser screenshot into,
+/// so the next mirror replaces it instead of stacking. Re-homed here (consumer
+/// side) when the browser driver moved to `envoyage` — envoyage's `BrowserSession`
+/// no longer carries this ImmorTerm-only field. Lives parallel to `BROWSER`;
+/// both are process-global (one browser per MCP process).
+static LAST_MIRROR_PRIM_ID: Mutex<Option<u32>> = Mutex::new(None);
 
 /// True once the screencast pump thread has been spawned. The pump lives for
 /// the MCP process lifetime (one browser per process); it idles cheaply when no
@@ -44,9 +51,21 @@ pub fn browser_is_paused() -> bool {
     BROWSER_PAUSED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Interval between screencast pump ticks (~15fps). Frame coalescing means a
-/// slower tick just drops intermediate frames — never buffers unbounded.
-const PUMP_TICK: std::time::Duration = std::time::Duration::from_millis(66);
+/// Set when the human closes (✕) the panel: the pump stops the screencast and
+/// skips frame encoding/push (the expensive part) until any fresh browser
+/// activity — a human input event or a browser tool call — clears it. The
+/// BrowserSession stays alive (minimize/close never kills the tab).
+static BROWSER_CLOSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn browser_reopen() {
+    BROWSER_CLOSED.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Interval between screencast pump ticks (~60fps). Frame coalescing means a
+/// slower tick just drops intermediate frames — never buffers unbounded — so
+/// the real ceiling is how fast CDP produces frames + IPC throughput, not this.
+const PUMP_TICK: std::time::Duration = std::time::Duration::from_millis(16);
 
 /// Start the screencast pump for `session` if it isn't already running. The
 /// pump owns a dedicated single-thread tokio runtime for its IPC round-trips
@@ -54,6 +73,9 @@ const PUMP_TICK: std::time::Duration = std::time::Duration::from_millis(66);
 /// lock only for the brief poll each tick, so tool calls interleave freely.
 fn ensure_browser_pump(session: String) {
     use std::sync::atomic::Ordering;
+    // A browser tool call means the AI is driving — reopen a human-closed panel
+    // so frames resume even when the pump is already running.
+    browser_reopen();
     if BROWSER_PUMP_STARTED.swap(true, Ordering::SeqCst) {
         return; // already running
     }
@@ -83,6 +105,7 @@ fn browser_pump_loop(session: String) {
         // synchronous CDP work (dispatch input, ensure screencast, poll frame)
         // holds the lock, and only briefly.
         let inputs = poll_browser_input(&session, &rt);
+        let mut copied: Option<String> = None;
         let (frame, title, url) = {
             let mut guard = match browser_slot().lock() {
                 Ok(g) => g,
@@ -90,7 +113,15 @@ fn browser_pump_loop(session: String) {
             };
             let Some(b) = guard.as_mut() else { continue };
             for ev in inputs {
-                dispatch_browser_input(b, ev);
+                if let Some(text) = dispatch_browser_input(b, ev) {
+                    copied = Some(text);
+                }
+            }
+            // Panel closed by the human: stop encoding frames (the costly part)
+            // and idle. The tab stays alive; reopens on the next activity.
+            if BROWSER_CLOSED.load(std::sync::atomic::Ordering::Relaxed) {
+                b.stop_screencast();
+                continue;
             }
             if b.ensure_screencast().is_err() {
                 continue;
@@ -111,6 +142,10 @@ fn browser_pump_loop(session: String) {
                 &rt,
             );
         }
+        // Relay a copy result back to the webview (outside the browser mutex).
+        if let Some(text) = copied {
+            let _ = raw_ipc_query(&session, Request::BrowserCopy { text }, &rt);
+        }
     }
 }
 
@@ -127,8 +162,14 @@ fn poll_browser_input(
 
 /// Apply one human input event to the live browser. Errors are swallowed —
 /// the human can retry, and a dead pipe surfaces on the next tool call.
-fn dispatch_browser_input(b: &mut BrowserSession, ev: crate::ipc::BrowserInputEvent) {
+/// Returns copied text (from a `Copy` event) for the pump to relay back.
+fn dispatch_browser_input(b: &mut BrowserSession, ev: crate::ipc::BrowserInputEvent) -> Option<String> {
     use crate::ipc::BrowserInputEvent as E;
+    // Any human input other than an explicit "close" reopens a closed panel so
+    // frames resume streaming.
+    if !matches!(&ev, E::Control { action } if action == "close") {
+        browser_reopen();
+    }
     match ev {
         E::Click { x, y } => {
             let _ = b.click(x, y);
@@ -140,18 +181,36 @@ fn dispatch_browser_input(b: &mut BrowserSession, ev: crate::ipc::BrowserInputEv
                 let _ = b.type_text(&key);
             }
         }
+        E::Paste { text } => {
+            // Insert the clipboard text into the focused field (login fields etc).
+            let _ = b.type_text(&text);
+        }
+        E::Copy => {
+            // Return the page's current selection for the webview to put on the
+            // OS clipboard. String result already unwrapped by `eval`.
+            return b.eval("window.getSelection().toString()").ok().filter(|s| !s.is_empty());
+        }
         E::Scroll { dy } => {
             let _ = b.scroll(dy);
         }
+        E::Resize { width, height } => {
+            // Match the browser viewport to the panel so the page fills it with
+            // no letterbox. Debounced webview-side; cheap no-op if unchanged.
+            let _ = b.set_viewport(width.round() as u32, height.round() as u32);
+        }
         E::Control { action } => apply_browser_control(&action),
     }
+    None
 }
 
-/// Apply a panel pause/continue action to the process-global paused flag.
-/// Any action other than the literal "pause" resumes (matches the panel, which
-/// only ever sends "pause"/"continue").
+/// Apply a panel control action. "pause"/"continue" toggle the paused flag;
+/// "close" stops the screencast (panel ✕) via the pump's BROWSER_CLOSED gate,
+/// leaving the tab alive. Anything else resumes.
 fn apply_browser_control(action: &str) {
-    BROWSER_PAUSED.store(action == "pause", std::sync::atomic::Ordering::Relaxed);
+    match action {
+        "close" => BROWSER_CLOSED.store(true, std::sync::atomic::Ordering::Relaxed),
+        _ => BROWSER_PAUSED.store(action == "pause", std::sync::atomic::Ordering::Relaxed),
+    }
 }
 
 /// Emit a "Mort" cursor move to the panel (fire-and-forget). Coords are PAGE
@@ -536,11 +595,19 @@ fn resolve_session(args: &Value) -> Result<String, String> {
         && !session.is_empty() {
             return Ok(session.to_string());
         }
-    // 2. Environment variable
-    if let Ok(name) = std::env::var("IMMORTERM_SESSION_NAME")
-        && !name.is_empty() {
-            return Ok(name);
-        }
+    // 2. Environment variable. The terminal sets IMMORTERM_SESSION to the full
+    //    daemon session name (e.g. `immorterm-ai-<id>`), which is exactly what
+    //    discover_sessions / the IPC socket lookup expect. IMMORTERM_SESSION_NAME
+    //    was an earlier name that is no longer exported — kept as a fallback.
+    //    (This is why the browser screencast pump never started for the panel:
+    //    the old var was unset, so with many live sessions resolve_session errored
+    //    and ensure_browser_pump was never reached.)
+    for var in ["IMMORTERM_SESSION", "IMMORTERM_SESSION_NAME"] {
+        if let Ok(name) = std::env::var(var)
+            && !name.is_empty() {
+                return Ok(name);
+            }
+    }
     // 3. Auto-discover: use the sole alive session (skip .ws WebSocket bridges)
     let alive: Vec<_> = commands::discover_sessions()
         .into_iter()
@@ -3013,8 +3080,8 @@ fn with_browser<T>(
         let self_pid = std::process::id();
         // Own / AlreadyOwn / stale-takeover all fall through to launch; only a
         // live foreign owner blocks us.
-        if let crate::browser_lock::Decision::RouteTo { owner_pid, .. } =
-            crate::browser_lock::decide(crate::browser_lock::read().as_ref(), self_pid)
+        if let envoyage::browser_lock::Decision::RouteTo { owner_pid, .. } =
+            envoyage::browser_lock::decide(envoyage::browser_lock::read().as_ref(), self_pid)
         {
             return Err(format!(
                 "ImmorTerm's browser is already open and owned by another session \
@@ -3024,8 +3091,8 @@ fn with_browser<T>(
         let url = launch_url.unwrap_or("about:blank");
         let session = BrowserSession::launch(rt, url)?;
         // Claim ownership; re-read the nonce to win the takeover race.
-        if let Ok(nonce) = crate::browser_lock::acquire(self_pid, 0, session.pid())
-            && !crate::browser_lock::confirm_nonce(&nonce)
+        if let Ok(nonce) = envoyage::browser_lock::acquire(self_pid, 0, session.pid())
+            && !envoyage::browser_lock::confirm_nonce(&nonce)
         {
             // Another taker won between our rename and re-read: back off, close
             // the browser WE just spawned (exact pid), and report the race.
@@ -3050,11 +3117,11 @@ fn with_browser<T>(
     {
         *guard = None; // Drop → close() reaps the exact pid (a no-op if already gone).
         // Release the ownership lock only if it's ours (mirror the close path).
-        if crate::browser_lock::read()
+        if envoyage::browser_lock::read()
             .map(|l| l.owner_pid == std::process::id())
             .unwrap_or(false)
         {
-            crate::browser_lock::release();
+            envoyage::browser_lock::release();
         }
         return Err(
             "The browser closed — call immorterm_browser_open to start a fresh one.".to_string(),
@@ -3093,7 +3160,7 @@ fn mirror_to_canvas(
     if let Some(id) = prev_id {
         let _ = simple_ipc_query(&session, Request::RemoveAiPrimitive { id }, rt);
     }
-    let html = browser::mirror_html(png_base64, title, url);
+    let html = crate::browser_mirror::mirror_html(png_base64, title, url);
     let resp = raw_ipc_query(
         &session,
         Request::DrawHtml {
@@ -3228,7 +3295,8 @@ fn handle_browser_shot(
         } else {
             b.screenshot()?
         };
-        Ok((png, title, url, b.last_mirror_prim_id, handoff, cursor, narration))
+        let prev_mirror = LAST_MIRROR_PRIM_ID.lock().ok().and_then(|g| *g);
+        Ok((png, title, url, prev_mirror, handoff, cursor, narration))
     })?;
 
     // Emit the intent balloon + Mort cursor to the panel (fire-and-forget).
@@ -3265,10 +3333,8 @@ fn handle_browser_shot(
 
     // Mirror onto the canvas (best-effort), and remember the new overlay id.
     let new_id = mirror_to_canvas(args, &png, &title, &url, prev_id, rt);
-    if let Ok(mut guard) = browser_slot().lock()
-        && let Some(b) = guard.as_mut()
-    {
-        b.last_mirror_prim_id = new_id.or(prev_id);
+    if let Ok(mut guard) = LAST_MIRROR_PRIM_ID.lock() {
+        *guard = new_id.or(prev_id);
     }
 
     Ok(vec![
@@ -3289,7 +3355,7 @@ fn handle_browser_read_page(args: &Value, rt: &tokio::runtime::Runtime) -> Resul
         .unwrap_or(true);
     with_browser(rt, None, |b| {
         let (title, url, nodes) = b.snapshot(interactive_only)?;
-        Ok(browser::render_ax_listing(&title, &url, &nodes, true))
+        Ok(envoyage::browser::render_ax_listing(&title, &url, &nodes, true))
     })
 }
 
@@ -3306,7 +3372,7 @@ fn handle_browser_find(args: &Value, rt: &tokio::runtime::Runtime) -> Result<Str
         const FIND_CAP: usize = 20;
         let extra = nodes.len().saturating_sub(FIND_CAP);
         nodes.truncate(FIND_CAP);
-        let mut out = browser::render_ax_listing(&title, &url, &nodes, false);
+        let mut out = envoyage::browser::render_ax_listing(&title, &url, &nodes, false);
         if extra > 0 {
             out.push_str(&format!("\n({extra} more — refine your query to narrow it.)"));
         }
@@ -3336,7 +3402,7 @@ fn handle_browser_tabs_switch(args: &Value, rt: &tokio::runtime::Runtime) -> Res
     with_browser(rt, None, |b| {
         b.tabs_switch(index, target_id.as_deref())?;
         let (title, url, nodes) = b.snapshot(true)?;
-        Ok(browser::render_ax_listing(&title, &url, &nodes, true))
+        Ok(envoyage::browser::render_ax_listing(&title, &url, &nodes, true))
     })
 }
 
@@ -3365,11 +3431,11 @@ fn handle_browser_close() -> Result<String, String> {
             BROWSER_PAUSED.store(false, std::sync::atomic::Ordering::Relaxed);
             // Release the ownership lock only if it is ours (don't clobber a
             // lock another live session took over).
-            if crate::browser_lock::read()
+            if envoyage::browser_lock::read()
                 .map(|l| l.owner_pid == std::process::id())
                 .unwrap_or(false)
             {
-                crate::browser_lock::release();
+                envoyage::browser_lock::release();
             }
             Ok(format!("Browser closed (pid {pid})."))
         }
