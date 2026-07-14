@@ -7163,6 +7163,10 @@
         dbg('destroyed background state ' + session.bgStateId + ' for ' + sessionName);
       }
       sessions.delete(sessionName);
+      // Tear down this session's scratch panel (its daemon owns the PTY;
+      // onDestroy unmaps it from scratchControllers).
+      const _sc = scratchControllers.get(sessionName);
+      if (_sc) { try { _sc.destroy(); } catch (_) {} }
       // Clean up title debounce state
       const _titleTimer = _titleDebounceTimers.get(sessionName);
       if (_titleTimer) clearTimeout(_titleTimer);
@@ -7474,6 +7478,12 @@
       // the sidebar list. Workshops live globally in #ai-overlay; without
       // this, switching sessions leaks the previous session's workshop card.
       try { syncWorkshopVisibility(); } catch (_) {}
+
+      // Scratch panels are per-session floating surfaces — minimize any
+      // that belong to other sessions so they don't float over this one.
+      for (const [name, c] of scratchControllers) {
+        if (name !== sessionName && c.isVisible()) { try { c.hide(); } catch (_) {} }
+      }
 
       // Flash the session's memorized title above the status-bar center so
       // the developer sees which session they just switched to. Hover to
@@ -8693,46 +8703,47 @@
     // {type:"scratch_open"} on the active session's WS (idempotent — returns
     // the existing scratch's port if one is alive).
     function handleScratchClick() {
-      if (scratchController) { scratchController.show(); return; }
-      if (scratchOpenPending) return; // reply in flight
+      const existing = scratchControllers.get(activeSessionName);
+      if (existing) { existing.show(); return; }
+      if (scratchOpenPending.has(activeSessionName)) return; // reply in flight
       const ws = getActiveWs();
       if (!ws || !wasmReady || !scratchModuleUrl) return;
-      scratchOpenPending = true;
+      const owner = activeSessionName;
+      scratchOpenPending.add(owner);
       // A pre-scratch daemon (started before this feature deployed) silently
       // drops scratch_open — never leave the pending latch stuck on no-reply.
-      clearTimeout(scratchOpenTimer);
-      scratchOpenTimer = setTimeout(() => { scratchOpenPending = false; }, 4000);
+      setTimeout(() => { scratchOpenPending.delete(owner); }, 4000);
       ws.send(JSON.stringify({ type: 'scratch_open', request_id: 'scratch-' + Date.now() }));
     }
 
     // {type:"scratch_info", ws_port, alive} — reply to scratch_open (and
     // scratch_kill, which reports alive:false and is ignored here).
     async function handleScratchInfo(msg, sessionName) {
-      if (!scratchOpenPending) return; // kill ack / unsolicited
-      scratchOpenPending = false;
-      clearTimeout(scratchOpenTimer);
-      if (!msg.alive || !msg.ws_port || scratchController) return;
+      if (!scratchOpenPending.has(sessionName)) return; // kill ack / unsolicited
+      scratchOpenPending.delete(sessionName);
+      if (!msg.alive || !msg.ws_port || scratchControllers.get(sessionName)) return;
       try {
         if (!scratchModule) scratchModule = await import(scratchModuleUrl);
-        scratchOwnerSession = sessionName;
-        scratchController = await scratchModule.createScratchController({
+        const controller = await scratchModule.createScratchController({
           wasmModule,
           wsPort: msg.ws_port,
           scratchName: 'scratch-' + sessionName,
           fontData, fontName, fontSize, lineHeight, fontWeight,
           applyColors: applyVSCodeTerminalColors,
-          // The scratch PTY is owned by the main session's daemon — route the
+          // The scratch PTY is owned by this session's daemon — route the
           // kill there (fall back to the active WS if the owner disconnected).
           sendKill: () => {
-            const s = sessions.get(scratchOwnerSession);
+            const s = sessions.get(sessionName);
             const target = (s && s.ws && s.ws.readyState === WebSocket.OPEN) ? s.ws : getActiveWs();
             if (target) target.send(JSON.stringify({ type: 'scratch_kill' }));
           },
-          onDestroy: () => { scratchController = null; scratchOwnerSession = null; },
+          onDestroy: () => { scratchControllers.delete(sessionName); },
+          // Blur-minimize hands focus back to the main terminal.
+          onHide: () => window.focusInput && window.focusInput(),
         });
+        scratchControllers.set(sessionName, controller);
       } catch (e) {
-        scratchController = null;
-        scratchOwnerSession = null;
+        scratchControllers.delete(sessionName);
         reportError('scratch-panel', e);
       }
     }
@@ -13715,10 +13726,8 @@
     const browserControllers = new Map(); // owning sessionName → controller (drives its workshop card's shadow DOM)
     let scratchModuleUrl = null; // gpu-terminal-scratch.js URL (derived in wasm-init, imported lazily)
     let scratchModule = null; // gpu-terminal-scratch.js — floating scratch-terminal panel
-    let scratchController = null; // live scratch panel (one per webview)
-    let scratchOpenPending = false; // scratch_open sent, waiting for scratch_info
-    let scratchOpenTimer = null; // no-reply unlatch (old daemons drop scratch_open)
-    let scratchOwnerSession = null; // main session whose daemon owns the scratch PTY
+    const scratchControllers = new Map(); // owning sessionName → live scratch panel controller
+    const scratchOpenPending = new Set(); // sessionNames with scratch_open awaiting scratch_info
     let fileBrowserPanel = null; // createFileBrowser instance
     let fileBrowserRoot = ''; // project root for the file browser (wasm-init projectDir)
     let showTransientPopover = null; // exported from gpu-terminal-tasks.js once loaded
