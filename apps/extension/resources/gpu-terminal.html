@@ -3648,6 +3648,11 @@
     // (b) the user clicks its ✕. Scoping/consume authority lives in the
     // per-terminal queue dir on disk; these are just its visual mirror.
     const shareBadges = new Map(); // itemId → { el, targetSession, kind, label }
+    // itemIds whose write_share_item WS write the daemon has NOT yet acked
+    // (share_item_written). A staged pill here is NOT durably on disk, so it
+    // must NOT be optimistically consumed on submit — the UserPromptSubmit hook
+    // would find an empty queue and the share would be lost. Cleared on ack.
+    const unconfirmedShareWrites = new Set();
     let pendingSessionInfo = null; // { sessionName, windowId } | null — bridges right-click menu to the session-info modal
     function shareBadgeIcon(kind) {
       if (kind === 'task') return '📋 ';
@@ -3716,6 +3721,7 @@
       if (!b) return;
       b.el.remove();
       shareBadges.delete(itemId);
+      unconfirmedShareWrites.delete(itemId);
       layoutShareBadges();
       vscode.postMessage({ type: 'cancel-share-item', targetSession: b.targetSession, itemId });
     }
@@ -3724,6 +3730,7 @@
     function consumeShareBadge(itemId) {
       const b = itemId ? shareBadges.get(itemId) : null;
       if (!b) return; // unknown/no-arg calls are no-ops (reconcile is authoritative)
+      unconfirmedShareWrites.delete(itemId);
       const el = b.el;
       const rect = el.getBoundingClientRect();
       const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
@@ -3771,12 +3778,17 @@
       return false;
     }
     // WS-backed (remote/standalone) pills have no fs.watch to reconcile them,
-    // so consume them optimistically when the prompt is submitted — the host's
-    // hook will drain the queue. VS Code-local pills (not staged) keep their
-    // fs.watch reconcile path untouched.
+    // so consume them when the prompt is submitted — the host's hook drains the
+    // queue. But ONLY consume a pill whose queue file the daemon has acked
+    // (share_item_written): an un-acked write may not be on disk yet, and
+    // consuming it would drop the share before the hook ever sees it. Un-acked
+    // pills stay put and are drained on a later prompt — delayed, never lost.
+    // VS Code-local pills (not staged) keep their fs.watch reconcile path.
     function consumeStagedAttachments() {
       for (const [id, b] of [...shareBadges]) {
-        if (b.staged && b.targetSession === activeSessionName) consumeShareBadge(id);
+        if (b.staged && b.targetSession === activeSessionName && !unconfirmedShareWrites.has(id)) {
+          consumeShareBadge(id);
+        }
       }
     }
     function attachmentsVisibleLine() {
@@ -7000,6 +7012,12 @@
                 clipboardCheckResolvers.delete(msg.request_id);
                 resolver({ path: msg.path || null });
               }
+            } else if (msg.type === 'share_item_written') {
+              // Daemon durably wrote the share/attachment queue file. Only now is
+              // it safe for a submit to consume the pill — the UserPromptSubmit
+              // hook will find the item on disk. A failed write keeps the pill
+              // unconfirmed so it is never silently dropped.
+              if (msg.ok && msg.request_id) unconfirmedShareWrites.delete(msg.request_id);
             } else if (msg.type === 'workshop_event') {
               // Workshops are owned per-session and survive across session
               // switches in the UI. Process the event regardless of which
@@ -11037,8 +11055,12 @@
         const ws = (typeof getActiveWs === 'function') ? getActiveWs() : null;
         if (!windowId || !ws || ws.readyState !== WebSocket.OPEN) return;
         item.id = id; item.timestamp = Date.now();
+        // The queue-file write is an async WS round-trip. Track it as unconfirmed
+        // until the daemon replies share_item_written, so a submit that races the
+        // write doesn't discard the pill before the file exists on disk.
+        unconfirmedShareWrites.add(id);
         ws.send(JSON.stringify({ type: 'write_share_item', request_id: id, window_id: windowId, item }));
-        // staged:true → consumed locally on submit (no fs.watch over a remote queue).
+        // staged:true → consumed on submit, but ONLY once the write is acked.
         showShareBadge({ id, kind: item.kind, label, staged: true }, activeSessionName);
         return;
       }
