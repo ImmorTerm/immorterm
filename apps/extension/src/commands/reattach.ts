@@ -164,7 +164,7 @@ async function doReattach(
   const exists = await screenCommands.sessionExists(screenSession);
   if (!exists) {
     vscode.window.showWarningMessage(
-      `ImmorTerm: Session "${displayName}" is no longer alive (screen session gone)`
+      `ImmorTerm: Session "${displayName}" is no longer alive (session gone)`
     );
     updateSessionStatus(windowId, 'dead');
     return { success: false, windowId, displayName };
