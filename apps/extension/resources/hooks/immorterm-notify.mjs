@@ -26,9 +26,15 @@ const bin = join(homedir(), ".immorterm", "bin", binName);
 
 if (!session || !existsSync(bin)) process.exit(0);
 
+// A status ping must NEVER sit on the prompt's critical path. Detach the child
+// and return immediately — if the daemon/IPC is briefly unreachable the child
+// may stall, but waiting on it would block this UserPromptSubmit hook into a
+// timeout-kill (which discards the WHOLE hook's stdout). Fire-and-forget.
 const child = spawn(bin, ["-S", session, "-X", "notify", state], {
   stdio: "ignore",
   windowsHide: true,
+  detached: true,
 });
-child.on("error", () => process.exit(0));
-child.on("exit", () => process.exit(0));
+child.on("error", () => {});
+child.unref();
+process.exit(0);
