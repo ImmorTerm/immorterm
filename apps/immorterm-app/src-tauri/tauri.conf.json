@@ -37,7 +37,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlDNjE1ODVGODM3MjgxQkEKUldTNmdYS0RYMWhobk5CZjVjSXNjRjhqeE02VHYvNmt1TFlITm9PZEE4UzdpUWlUMXRuUFlacHcK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI1NTJDODA0MkNFNkU0MTYKUldRVzVPWXNCTWhTSmZkcHI4akZaSHp0TU1peThtcmJiMk9QY3dTZU15SFB1eXdsdmE3TTdPR1cK",
       "endpoints": [
         "https://github.com/ImmorTerm/immorterm/releases/latest/download/latest.json"
       ]

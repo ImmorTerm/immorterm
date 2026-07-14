@@ -1,0 +1,301 @@
+# ============================================
+# Release ImmorTerm Desktop (Tauri) + updater feed
+#
+# Cross-platform signed build of the Tauri desktop app, then a
+# GitHub Release on ImmorTerm/immorterm carrying every bundle + its
+# .sig, plus the `latest.json` updater manifest. The app's updater
+# endpoint (tauri.conf.json) reads:
+#   https://github.com/ImmorTerm/immorterm/releases/latest/download/latest.json
+# so publishing this release makes the new version live on all
+# installed clients at their next update check.
+#
+# Signing key flows in via repo secrets:
+#   TAURI_SIGNING_PRIVATE_KEY + TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+# Without them, `cargo tauri build` still builds but emits no .sig,
+# and the release job refuses to publish an un-installable update.
+# ============================================
+name: Release Tauri App
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (default: app-v<version> from tauri.conf.json)'
+        required: false
+        type: string
+  push:
+    tags:
+      - 'app-v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUST_BACKTRACE: 1
+
+jobs:
+  # --------------------------------------------
+  # Build + sign: one signed bundle set per platform.
+  # --------------------------------------------
+  build-tauri-app:
+    name: Build Tauri App (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            bundles: app,dmg
+            artifact_prefix: ImmorTerm-macos-aarch64
+            updater_platform: darwin-aarch64
+          - target: x86_64-apple-darwin
+            os: macos-13
+            bundles: app,dmg
+            artifact_prefix: ImmorTerm-macos-x86_64
+            updater_platform: darwin-x86_64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            bundles: appimage,deb
+            artifact_prefix: ImmorTerm-linux-x86_64
+            updater_platform: linux-x86_64
+          # Windows disabled: the hub sidecar is unix-only today (libc::kill,
+          # pid_t, Command::pre_exec in session_manager.rs/registry.rs). Re-enable
+          # with the Windows-port task.
+          # - target: x86_64-pc-windows-msvc
+          #   os: windows-latest
+          #   bundles: nsis,msi
+          #   artifact_prefix: ImmorTerm-windows-x86_64
+          #   updater_platform: windows-x86_64
+      fail-fast: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-${{ matrix.target }}-tauri-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-tauri-cargo-
+
+      - name: Install Tauri CLI
+        # --force: cargo-tauri may already exist via the cargo cache restore
+        run: cargo install tauri-cli --version "^2" --locked --force
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev
+
+      - name: Build menu-data lib
+        # dist/ is gitignored — build-menu-data.mjs requires the compiled lib.
+        run: cd libs/menu-data && bun install --frozen-lockfile && bun run build
+
+      - name: Regenerate menu-data.json
+        # tauri's beforeBuildCommand also runs this, but we hit it explicitly
+        # so a failure surfaces as its own step instead of buried in build output.
+        run: node scripts/build-menu-data.mjs
+
+      - name: Stage hub sidecar for target
+        # tauri externalBin resolves binaries/<name>-<target> at bundle time,
+        # so the hub must be compiled for this exact triple and placed alongside
+        # src-tauri/binaries/ before `cargo tauri build`.
+        shell: bash
+        env:
+          TARGET_TRIPLE: ${{ matrix.target }}
+        run: node scripts/build-hub-sidecar.mjs --target "$TARGET_TRIPLE"
+
+      - name: Build Tauri app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          BUNDLES: ${{ matrix.bundles }}
+          TARGET_TRIPLE: ${{ matrix.target }}
+        working-directory: apps/immorterm-app
+        shell: bash
+        run: cargo tauri build --bundles "$BUNDLES" --target "$TARGET_TRIPLE"
+
+      - name: Collect artifacts
+        # Tauri scatters outputs across target/<triple>/release/bundle/{macos,dmg,appimage,deb}.
+        # Flatten everything into one dist/ directory for upload.
+        shell: bash
+        env:
+          TARGET_TRIPLE: ${{ matrix.target }}
+        run: |
+          set -e
+          BUNDLE_ROOT="apps/immorterm-app/src-tauri/target/${TARGET_TRIPLE}/release/bundle"
+          DEST="dist"
+          mkdir -p "$DEST"
+          if [ -d "$BUNDLE_ROOT" ]; then
+            find "$BUNDLE_ROOT" -maxdepth 3 -type f \
+              \( -name "*.dmg" -o -name "*.app.tar.gz" -o -name "*.app.tar.gz.sig" \
+                 -o -name "*.AppImage" -o -name "*.AppImage.tar.gz" -o -name "*.AppImage.tar.gz.sig" \
+                 -o -name "*.deb" \
+              \) -print -exec cp {} "$DEST/" \;
+          fi
+          ls -lh "$DEST" || true
+          if [ -z "$(ls -A "$DEST" 2>/dev/null)" ]; then
+            echo "::error ::No Tauri bundles produced for $TARGET_TRIPLE"
+            exit 1
+          fi
+
+      - name: Upload artifact bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_prefix }}
+          path: dist/
+          retention-days: 30
+
+  # --------------------------------------------
+  # Release: gather every platform's bundles, build latest.json, publish.
+  # --------------------------------------------
+  release-tauri-app:
+    name: Publish GitHub Release + updater feed
+    needs: [build-tauri-app]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dl
+
+      - name: Flatten artifacts into release/
+        shell: bash
+        run: |
+          set -e
+          mkdir -p release
+          # actions/download-artifact@v4 with no `name` drops each artifact
+          # into dl/<artifact_name>/. Flatten all of them into one release/ dir.
+          if [ -d dl ]; then
+            find dl -type f -exec cp -a {} release/ \;
+          fi
+          ls -la release/
+          ASSET_COUNT=$(find release -maxdepth 1 -type f | wc -l | tr -d ' ')
+          if [ "$ASSET_COUNT" -eq 0 ]; then
+            echo "::error::No desktop release assets found"
+            exit 1
+          fi
+          echo "Collected $ASSET_COUNT desktop release assets"
+
+      - name: Verify required signatures are present
+        # A release without signatures is an un-installable update — refuse to
+        # publish. Each updater-enabled platform emits a <name>.sig alongside it.
+        shell: bash
+        run: |
+          MISSING=0
+          for tarball in release/*.app.tar.gz release/*.AppImage.tar.gz; do
+            [ -f "$tarball" ] || continue
+            if [ ! -f "${tarball}.sig" ]; then
+              echo "::warning::missing signature for ${tarball}"
+              MISSING=$((MISSING + 1))
+            fi
+          done
+          if [ "$MISSING" -gt 0 ]; then
+            echo "::error::$MISSING signed artifact(s) missing .sig file — did TAURI_SIGNING_PRIVATE_KEY land in CI?"
+            exit 1
+          fi
+
+      - name: Read app version
+        id: ver
+        shell: bash
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
+        run: |
+          VERSION=$(jq -r '.version' apps/immorterm-app/src-tauri/tauri.conf.json)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ -n "$TAG_INPUT" ]; then
+            TAG="$TAG_INPUT"
+          elif [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="app-v${VERSION}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Generate latest.json (updater feed)
+        # One entry per (os, arch) pair. Tauri's updater keys look like
+        # darwin-aarch64, darwin-x86_64, linux-x86_64. Each entry carries the
+        # full .sig file contents + an absolute URL pointing at the release asset.
+        shell: bash
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          PLATFORMS_JSON="{}"
+          add_platform() {
+            local key="$1" tarball="$2"
+            if [ ! -f "release/${tarball}" ] || [ ! -f "release/${tarball}.sig" ]; then
+              echo "  [-] ${key}: missing ${tarball} or .sig"
+              return
+            fi
+            local sig
+            sig="$(cat "release/${tarball}.sig")"
+            local url="https://github.com/${REPO}/releases/download/${TAG}/${tarball}"
+            PLATFORMS_JSON=$(jq --arg key "$key" --arg sig "$sig" --arg url "$url" \
+              '. + {($key): {signature: $sig, url: $url}}' <<<"$PLATFORMS_JSON")
+            echo "  [+] ${key}: ${tarball}"
+          }
+          # Tauri's naming varies slightly per platform; probe for the file whose
+          # suffix matches the platform's updater artifact.
+          add_platform "darwin-aarch64" "$(ls release/ | grep -E '_aarch64\.app\.tar\.gz$' | head -1)"
+          add_platform "darwin-x86_64"  "$(ls release/ | grep -E '_x64\.app\.tar\.gz$|_x86_64\.app\.tar\.gz$' | head -1)"
+          add_platform "linux-x86_64"   "$(ls release/ | grep -E '\.AppImage\.tar\.gz$' | head -1)"
+
+          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          NOTES="ImmorTerm Desktop ${VERSION} — see release notes at https://github.com/${REPO}/releases/tag/${TAG}"
+          jq -n \
+            --arg version "$VERSION" \
+            --arg notes "$NOTES" \
+            --arg pub_date "$PUB_DATE" \
+            --argjson platforms "$PLATFORMS_JSON" \
+            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: $platforms}' \
+            > release/latest.json
+          cat release/latest.json
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        shell: bash
+        run: |
+          # If the tag already exists (e.g. re-run of a failed release), upload
+          # assets onto the existing release instead of erroring.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists — uploading new assets with --clobber"
+            gh release upload "$TAG" release/* --clobber
+          else
+            gh release create "$TAG" release/* \
+              --title "ImmorTerm Desktop v${VERSION}" \
+              --notes "Signed desktop app for macOS (aarch64 + x86_64) and Linux (x86_64). Installed clients auto-update via the latest.json feed."
+          fi
