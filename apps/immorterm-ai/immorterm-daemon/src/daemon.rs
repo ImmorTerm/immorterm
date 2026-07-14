@@ -389,6 +389,136 @@ fn write_death_event(dir: &Path, reason: &str, session_name: &str) {
     }
 }
 
+// ─── Scratch sibling terminal ────────────────────────────────────────
+//
+// A second `immorterm-ai -dmS scratch-<session>` daemon spawned on demand
+// (WS scratch_open) for throwaway shell work next to the main session. It
+// runs with IMMORTERM_SKIP_REGISTRY=1 and scrubbed window/session ids so it
+// can never hijack the host's registry row (see the skip-registry comment
+// in run_daemon). At most one scratch per daemon; the graceful exit paths
+// kill it, a daemon crash orphans it — acceptable for v1.
+
+/// `(session_name, shell)` captured at boot so scratch_open spawns the
+/// sibling with the same shell as this daemon.
+static SCRATCH_SPAWN_ARGS: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+
+/// Live scratch child, if any. tokio Mutex — held across the spawn's port
+/// file poll so concurrent scratch_open calls can't double-spawn, and the
+/// async shutdown paths can lock it.
+static SCRATCH: tokio::sync::Mutex<Option<ScratchInfo>> = tokio::sync::Mutex::const_new(None);
+
+struct ScratchInfo {
+    pid: u32,
+    ws_port: u16,
+}
+
+/// Open (or reuse) the scratch sibling. Returns `(ws_port, alive)` for the
+/// scratch_info reply. Runs in the WS connection task, never the daemon
+/// main loop — the port-file poll below blocks for up to ~5s.
+pub async fn scratch_open() -> (Option<u16>, bool) {
+    let mut guard = SCRATCH.lock().await;
+
+    // Idempotent: a live scratch just gets re-reported.
+    if let Some(info) = guard.as_ref() {
+        if signal::kill(Pid::from_raw(info.pid as i32), None).is_ok() {
+            return (Some(info.ws_port), true);
+        }
+        // Died behind our back — clear the stale state and respawn.
+        *guard = None;
+    }
+
+    let (session, shell) = match SCRATCH_SPAWN_ARGS.get() {
+        Some((s, sh)) => (s.clone(), sh.clone()),
+        // Set at boot in run_daemon; defensive fallback only.
+        None => (
+            std::env::var("IMMORTERM_SESSION").unwrap_or_default(),
+            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
+        ),
+    };
+    let scratch_name = format!("scratch-{}", session);
+
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            error!("scratch: current_exe failed: {}", e);
+            return (None, false);
+        }
+    };
+
+    // Same env scrub as the immorterm-p wrapper: skip the registry and drop
+    // the inherited identifiers whose leakage caused the registry-hijack
+    // incident (see the skip-registry comment in run_daemon). No -L logfile.
+    let spawned = std::process::Command::new(&exe)
+        .args(["-dmS", &scratch_name, "-s", &shell])
+        .env("IMMORTERM_SKIP_REGISTRY", "1")
+        .env_remove("IMMORTERM_WINDOW_ID")
+        .env_remove("SCREEN_WINDOW_ID")
+        .env_remove("IMMORTERM_CLAUDE_SESSION_ID")
+        .spawn();
+    match spawned {
+        Ok(mut child) => {
+            // The front process exits right after the first fork. Its status
+            // may already be gone to the main loop's SIGCHLD drain — ignore.
+            let _ = child.wait();
+        }
+        Err(e) => {
+            error!("scratch: spawn failed: {}", e);
+            return (None, false);
+        }
+    }
+
+    // The real daemon is the double-fork grandchild, so its pid is unknown
+    // here. Discover it by polling for its port file
+    // (`<daemon_pid>.scratch-<session>.ws`) for up to ~5s.
+    let suffix = format!(".{}.ws", scratch_name);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(entries) = fs::read_dir(socket_dir()) {
+            for entry in entries.flatten() {
+                let fname = entry.file_name();
+                let Some(pid_str) = fname.to_string_lossy().strip_suffix(&suffix).map(str::to_owned) else {
+                    continue;
+                };
+                let Ok(pid) = pid_str.parse::<u32>() else { continue };
+                // A crashed earlier scratch can leave a stale port file —
+                // only trust one whose pid is alive.
+                if signal::kill(Pid::from_raw(pid as i32), None).is_err() {
+                    fs::remove_file(entry.path()).ok();
+                    continue;
+                }
+                if let Some(port) = fs::read_to_string(entry.path())
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u16>().ok())
+                {
+                    info!("scratch: up — pid {} ws_port {}", pid, port);
+                    *guard = Some(ScratchInfo { pid, ws_port: port });
+                    return (Some(port), true);
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            error!("scratch: daemon did not write a port file within 5s");
+            return (None, false);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Kill the scratch sibling, if any. SIGTERMs the EXACT stored pid — never
+/// a name pattern — and removes its port file. Already-dead is fine (the
+/// kill just fails and we still clear state). Called from scratch_kill WS
+/// handling and from every graceful daemon exit path.
+pub async fn scratch_kill() {
+    let Some(info) = SCRATCH.lock().await.take() else { return };
+    let _ = signal::kill(Pid::from_raw(info.pid as i32), signal::Signal::SIGTERM);
+    // The scratch's own SIGTERM handler removes this too; covering the
+    // already-dead case here keeps the sockets dir clean.
+    if let Some((session, _)) = SCRATCH_SPAWN_ARGS.get() {
+        let port_file = socket_dir().join(format!("{}.scratch-{}.ws", info.pid, session));
+        fs::remove_file(port_file).ok();
+    }
+}
+
 /// Create a new detached session via double-fork.
 pub fn create_session(
     name: &str,
@@ -447,6 +577,9 @@ fn run_daemon(
     if let Err(e) = crate::commands::ensure_shell_integration() {
         error!("Failed to set up shell integration: {}", e);
     }
+
+    // Capture (name, shell) for scratch sibling spawns (WS scratch_open).
+    SCRATCH_SPAWN_ARGS.set((name.to_string(), shell.to_string())).ok();
 
     // Set environment variables for the PTY child process.
     // These are inherited by PtySession::spawn() which copies all env vars.
@@ -1850,6 +1983,8 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                     fs::remove_file(&socket_path).ok();
                     let ws_file = socket_dir().join(format!("{}.{}.ws", std::process::id(), session_name));
                     fs::remove_file(&ws_file).ok();
+                    // Take the scratch sibling down with us (exact pid).
+                    scratch_kill().await;
                     std::process::exit(0);
                 }
             }
@@ -1880,6 +2015,8 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                     Pid::from_raw(pty_child as i32),
                     Some(nix::sys::wait::WaitPidFlag::WNOHANG),
                 );
+                // Take the scratch sibling down with us (exact pid).
+                scratch_kill().await;
                 std::process::exit(0);
             }
         }
@@ -2166,6 +2303,8 @@ async fn handle_client_connection(
                 state.name,
             ));
             fs::remove_file(&ws_file).ok();
+            // Take the scratch sibling down with us (exact pid).
+            scratch_kill().await;
             std::process::exit(0);
         }
         Request::ReadScreen => {

@@ -1798,6 +1798,11 @@ impl TerminalRenderer {
                         && col >= data.theme_area_start_col
                         && col < data.theme_area_end_col
                 }
+                StatusBarTarget::Scratch => {
+                    data.scratch_end_col > data.scratch_start_col
+                        && col >= data.scratch_start_col
+                        && col < data.scratch_end_col
+                }
                 StatusBarTarget::Title => {
                     data.title_end_col > data.title_start_col
                         && col >= data.title_start_col

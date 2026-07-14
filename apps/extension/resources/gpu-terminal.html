@@ -3505,6 +3505,7 @@
     let activeSessionName = null;
     let pendingFocusSession = null; // Queued focus-session that arrived before addSession
     let terminal = null;
+    let wasmModule = null; // loaded wasm module — kept for second instances (scratch panel)
     let wasmReady = false;
     let wasmInitPromise = null; // mutex: only one initWasm() runs at a time
     let pendingAddSessions = []; // sessions deferred because panel was hidden during WASM init
@@ -7031,6 +7032,9 @@
               // Page selection copied (human Cmd/Ctrl+C) → OS clipboard.
               const c = browserControllers.get(sessionName);
               if (c) c.applyCopy(msg);
+            } else if (msg.type === 'scratch_info') {
+              // Reply to scratch_open/scratch_kill — builds the scratch panel.
+              handleScratchInfo(msg, sessionName);
             } else {
               // Track AI primitive count for non-active sessions too
               if (msg.type === 'ai_layer_update' && msg.data) {
@@ -7707,6 +7711,7 @@
       const mod = await import(wasmJsUri);
       await mod.default(wasmBgUri);
       dbg('initWasm: WASM loaded OK');
+      wasmModule = mod; // scratch panel constructs its own WasmTerminal from this
 
       terminal = new mod.WasmTerminal(80, 24);
       // Expose the WASM terminal to non-module scripts (cwd upgrade
@@ -8679,6 +8684,52 @@
       _activeWorkshopName = browserModule.BROWSER_WORKSHOP_NAME;
       syncWorkshopVisibility();
       return controller;
+    }
+
+    // ── Scratch terminal panel ──────────────────────────────────
+    // Status-bar " >_ " icon → floating disposable terminal (second
+    // WasmTerminal instance in a light-DOM panel — see gpu-terminal-scratch.js).
+    // Click while live = reveal/refocus; the daemon-side PTY is obtained via
+    // {type:"scratch_open"} on the active session's WS (idempotent — returns
+    // the existing scratch's port if one is alive).
+    function handleScratchClick() {
+      if (scratchController) { scratchController.show(); return; }
+      if (scratchOpenPending) return; // reply in flight
+      const ws = getActiveWs();
+      if (!ws || !wasmReady || !scratchModuleUrl) return;
+      scratchOpenPending = true;
+      ws.send(JSON.stringify({ type: 'scratch_open', request_id: 'scratch-' + Date.now() }));
+    }
+
+    // {type:"scratch_info", ws_port, alive} — reply to scratch_open (and
+    // scratch_kill, which reports alive:false and is ignored here).
+    async function handleScratchInfo(msg, sessionName) {
+      if (!scratchOpenPending) return; // kill ack / unsolicited
+      scratchOpenPending = false;
+      if (!msg.alive || !msg.ws_port || scratchController) return;
+      try {
+        if (!scratchModule) scratchModule = await import(scratchModuleUrl);
+        scratchOwnerSession = sessionName;
+        scratchController = await scratchModule.createScratchController({
+          wasmModule,
+          wsPort: msg.ws_port,
+          scratchName: 'scratch-' + sessionName,
+          fontData, fontName, fontSize, lineHeight, fontWeight,
+          applyColors: applyVSCodeTerminalColors,
+          // The scratch PTY is owned by the main session's daemon — route the
+          // kill there (fall back to the active WS if the owner disconnected).
+          sendKill: () => {
+            const s = sessions.get(scratchOwnerSession);
+            const target = (s && s.ws && s.ws.readyState === WebSocket.OPEN) ? s.ws : getActiveWs();
+            if (target) target.send(JSON.stringify({ type: 'scratch_kill' }));
+          },
+          onDestroy: () => { scratchController = null; scratchOwnerSession = null; },
+        });
+      } catch (e) {
+        scratchController = null;
+        scratchOwnerSession = null;
+        reportError('scratch-panel', e);
+      }
     }
 
     // Tiny indirection so the security-warning grep doesn't flag the
@@ -13169,6 +13220,10 @@
           modals.showModal('session-summary');
           vscode.postMessage({ type: 'get-session-summary', sessionName: activeSessionName });
         }
+      } else if (target === 'scratch') {
+        // Scratch terminal: reveal/refocus if live, else request one from the
+        // active session's daemon (panel is built on the scratch_info reply).
+        handleScratchClick();
       } else if (target === 'ai_stats') {
         // Toggle AI stats mode on click
         aiStatsMode = (aiStatsMode + 1) % 2;
@@ -13653,6 +13708,11 @@
     let browserModule = null; // gpu-terminal-browser.js — workshop surface + controller factory
     let browserMortAvatarUrl = null; // resolved URL for the Mort sticker PNG
     const browserControllers = new Map(); // owning sessionName → controller (drives its workshop card's shadow DOM)
+    let scratchModuleUrl = null; // gpu-terminal-scratch.js URL (derived in wasm-init, imported lazily)
+    let scratchModule = null; // gpu-terminal-scratch.js — floating scratch-terminal panel
+    let scratchController = null; // live scratch panel (one per webview)
+    let scratchOpenPending = false; // scratch_open sent, waiting for scratch_info
+    let scratchOwnerSession = null; // main session whose daemon owns the scratch PTY
     let fileBrowserPanel = null; // createFileBrowser instance
     let fileBrowserRoot = ''; // project root for the file browser (wasm-init projectDir)
     let showTransientPopover = null; // exported from gpu-terminal-tasks.js once loaded
@@ -14502,6 +14562,15 @@
             } catch (e) {
               reportError('gpu-terminal-browser', e);
             }
+          }
+          // Scratch panel module URL — same static dir as the browser module
+          // in BOTH hosts (VS Code asWebviewUri and standalone relative path),
+          // so derive it by swapping the filename. Imported lazily on the
+          // first status-bar " >_ " click, not here.
+          if (msg.scratchUri) {
+            scratchModuleUrl = msg.scratchUri;
+          } else if (msg.browserUri) {
+            scratchModuleUrl = msg.browserUri.replace(/[^/]+$/, 'gpu-terminal-scratch.js');
           }
           // Kick off actual WASM compilation NOW, regardless of session
           // count. Previously this only fired inside `case 'add-session':`

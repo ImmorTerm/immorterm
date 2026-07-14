@@ -3492,3 +3492,58 @@ body.with-tab-bar #container {
   opacity: 0.45; cursor: default;
 }
 .fb-drop-chooser .fb-context-item:disabled:hover { background: none; color: var(--sidebar-text, #cdd6f4); }
+
+/* ── Scratch Terminal Panel ── */
+/* Floating disposable terminal (gpu-terminal-scratch.js). Light DOM —
+   the WASM renderer's init_gpu does a getElementById on the canvas, which
+   shadow roots would break. z-index sits above the terminal chrome but
+   below the modal backdrop (290)/container (300). */
+.scratch-panel {
+  position: fixed; z-index: 250;
+  top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: 65vw; height: 50vh;
+  min-width: 320px; min-height: 180px;
+  resize: both; overflow: hidden;
+  display: flex; flex-direction: column;
+  background: var(--sb-popup-bg, #1e1e2e);
+  border: 1px solid var(--sidebar-accent, #b482ff);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 12px var(--badge-glow-soft, rgba(180, 130, 255, 0.15));
+}
+.scratch-header {
+  display: flex; align-items: center; gap: 6px;
+  flex-shrink: 0;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--sidebar-border, #313244);
+  background: var(--sidebar-bg, #181825);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+}
+.scratch-title {
+  font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+  color: var(--sidebar-accent, #b482ff);
+}
+.scratch-spacer { flex: 1; }
+.scratch-header button {
+  background: none; border: none; cursor: pointer;
+  color: var(--sidebar-text, #cdd6f4);
+  font-size: 12px; line-height: 1;
+  padding: 3px 6px; border-radius: 4px;
+  opacity: 0.6; transition: opacity 0.15s, background 0.15s;
+}
+.scratch-header button:hover { opacity: 1; background: var(--sb-popup-hover, rgba(255,255,255,0.06)); }
+.scratch-body {
+  flex: 1; min-height: 0;
+  position: relative;
+}
+.scratch-body canvas {
+  width: 100%; height: 100%; display: block;
+}
+/* Transparent keyboard capture over the canvas — same trick as the main
+   terminal's hidden kb-input / the browser panel's bw-capture. */
+.scratch-capture {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  margin: 0; padding: 0; border: 0; resize: none;
+  background: transparent; color: transparent; caret-color: transparent;
+  outline: none; overflow: hidden; white-space: pre; cursor: text;
+}
