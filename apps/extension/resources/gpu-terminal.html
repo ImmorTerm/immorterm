@@ -8698,6 +8698,10 @@
       const ws = getActiveWs();
       if (!ws || !wasmReady || !scratchModuleUrl) return;
       scratchOpenPending = true;
+      // A pre-scratch daemon (started before this feature deployed) silently
+      // drops scratch_open — never leave the pending latch stuck on no-reply.
+      clearTimeout(scratchOpenTimer);
+      scratchOpenTimer = setTimeout(() => { scratchOpenPending = false; }, 4000);
       ws.send(JSON.stringify({ type: 'scratch_open', request_id: 'scratch-' + Date.now() }));
     }
 
@@ -8706,6 +8710,7 @@
     async function handleScratchInfo(msg, sessionName) {
       if (!scratchOpenPending) return; // kill ack / unsolicited
       scratchOpenPending = false;
+      clearTimeout(scratchOpenTimer);
       if (!msg.alive || !msg.ws_port || scratchController) return;
       try {
         if (!scratchModule) scratchModule = await import(scratchModuleUrl);
@@ -13712,6 +13717,7 @@
     let scratchModule = null; // gpu-terminal-scratch.js — floating scratch-terminal panel
     let scratchController = null; // live scratch panel (one per webview)
     let scratchOpenPending = false; // scratch_open sent, waiting for scratch_info
+    let scratchOpenTimer = null; // no-reply unlatch (old daemons drop scratch_open)
     let scratchOwnerSession = null; // main session whose daemon owns the scratch PTY
     let fileBrowserPanel = null; // createFileBrowser instance
     let fileBrowserRoot = ''; // project root for the file browser (wasm-init projectDir)
