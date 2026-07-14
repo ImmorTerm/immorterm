@@ -24,7 +24,7 @@
 // as the main terminal (see gpu-terminal-input.js). Resolved relative to
 // this module's own URL so it works from both the VS Code webview
 // (asWebviewUri) and the standalone relative path.
-import { createTerminalInput } from './gpu-terminal-input.js';
+import { createTerminalInput, handleClipboardImageReply } from './gpu-terminal-input.js';
 
 // ── Panel HTML (light DOM — canvas must be reachable by getElementById) ──
 // canvasId is per-controller: with one scratch per session, several panels
@@ -81,6 +81,11 @@ function waitForDims(canvas, maxMs = 10000) {
 // @param fontData/fontName/fontSize/lineHeight/fontWeight — same values the
 //                    host fed the main terminal (wasm-init message)
 // @param applyColors (term)=>void — host's applyVSCodeTerminalColors
+// @param themeName   current status-bar theme name — MUST be applied to this
+//                    instance too: the renderer paints ALL selections with
+//                    the theme's accent-derived pseudo_selection, so a
+//                    scratch without set_theme() keeps the default dark
+//                    purple regardless of the parent terminal's theme
 // @param sendKill    ()=>void — sends {type:"scratch_kill"} on the main
 //                    session's WS (the scratch daemon is owned by it)
 // @param onDestroy   ()=>void — host clears its controller reference
@@ -91,7 +96,7 @@ function waitForDims(canvas, maxMs = 10000) {
 export async function createScratchController({
   wasmModule, wsPort, scratchName,
   fontData, fontName, fontSize, lineHeight, fontWeight,
-  applyColors, sendKill, onDestroy, onHide, openLink,
+  applyColors, themeName, sendKill, onDestroy, onHide, openLink,
 }) {
   // ── Panel DOM ─────────────────────────────────────────────────
   // Canvas id must be unique per controller — scratchName is
@@ -146,6 +151,9 @@ export async function createScratchController({
     const padDpr = window.devicePixelRatio || 1;
     term.set_content_padding(2 * padDpr, 0, 0, 10 * padDpr);
     if (applyColors) applyColors(term);
+    // Match the parent terminal's status-bar theme — the accent drives the
+    // selection highlight (see @param themeName above).
+    if (themeName) { try { term.set_theme(themeName); } catch (_) { /* unknown preset */ } }
 
     const rect = await waitForDims(canvas);
     if (!rect) throw new Error('scratch canvas has 0×0 dimensions after 10s');
@@ -201,6 +209,13 @@ export async function createScratchController({
   }
   reconfigureSurface();
 
+  // ── Clipboard-image RPC state ─────────────────────────────────
+  // The scratch daemon speaks the same clipboard RPCs as any daemon
+  // (websocket.rs). Own resolver map + request-id sequence — never the
+  // host's clipboardCheckResolvers (different socket, different daemon).
+  const clipboardResolvers = new Map();
+  let clipboardSeq = 0;
+
   // ── Own WebSocket to the scratch daemon ───────────────────────
   function sendWs(msg) {
     try {
@@ -237,6 +252,10 @@ export async function createScratchController({
         } else if (msg.type === 'resize') {
           term.resize(canvas.width, canvas.height);
           dirty = true;
+        } else if (msg.type === 'clipboard_image_presence' || msg.type === 'clipboard_image_saved') {
+          // Image-paste RPC replies (Cmd+V probe / Cmd+Opt+V save) —
+          // resolve the pending request via the shared plumbing.
+          handleClipboardImageReply(clipboardResolvers, msg);
         }
         // ponytail: everything else (control events, ai layers) is main-terminal
         // machinery — a scratch shell doesn't need it.
@@ -283,9 +302,11 @@ export async function createScratchController({
   // wheel, click-to-cursor teleport, Cmd+hover/Cmd+click links, context
   // menu suppression. Pointer/mouse listeners land on `body` because the
   // transparent capture textarea overlays the canvas; coordinates are
-  // computed against the canvas rect (same area).
+  // computed against the canvas rect (same area). Image paste (Cmd+V
+  // detection + Cmd+Opt+V paste-as-path) comes from the module's built-in
+  // clipboardImage machinery over THIS panel's ws + resolver map.
   // No host hooks: bullets/comments/pills wizards, paste-undo, AI buttons,
-  // image paste, and daemon scrollback fetch are main-terminal-only.
+  // and daemon scrollback fetch are main-terminal-only.
   const phantomEl = panel.querySelector('.scratch-phantom-cursor');
   const maskEl = panel.querySelector('.scratch-cursor-mask');
   const input = createTerminalInput({
@@ -306,6 +327,10 @@ export async function createScratchController({
     openLink, // host postMessage transport — same mechanism as main
     phantomEl, maskEl,
     scrollProximity: true,
+    clipboardImage: {
+      resolvers: clipboardResolvers,
+      makeRequestId: (prefix) => prefix + (++clipboardSeq),
+    },
     hooks: {
       // Cursor feedback on the capture textarea (it overlays the canvas,
       // so the canvas cursor style would never be visible).
@@ -410,5 +435,11 @@ export async function createScratchController({
   return {
     show, hide, destroy,
     isVisible: () => panel.style.display !== 'none',
+    // Theme fan-out: the host calls this whenever the main terminal's
+    // theme changes so the selection accent stays in sync (see themeName).
+    setTheme: (name) => {
+      if (destroyed || !name) return;
+      try { term.set_theme(name); dirty = true; } catch (_) { /* best effort */ }
+    },
   };
 }

@@ -9,9 +9,12 @@
 // Cmd+click link opening, and context-menu suppression.
 //
 // HOST-SPECIFIC behavior (bullets/comments/pills wizards, paste-undo,
-// AI buttons, session switching, link tooltips, image paste, daemon
-// clipboard RPC, voice-burst cosmetics) is spliced in through the
-// `hooks` interceptor chain — the module never touches host globals.
+// AI buttons, session switching, link tooltips, remote-tab image paste,
+// voice-burst cosmetics) is spliced in through the `hooks` interceptor
+// chain — the module never touches host globals. The GENERIC local-daemon
+// clipboard-image legs (Cmd+V image detection, Cmd+Opt+V paste-as-path,
+// presence probe) live here in createClipboardImageRpc, parameterized
+// over each consumer's ws + request_id resolver map.
 //
 // Selection anchoring rules preserved from the original handlers:
 //   • KEYBOARD selection (Shift+Arrow) anchors from the terminal cursor —
@@ -26,6 +29,125 @@
 // replaceSelection() must wait at least one tick so Ink fully drains
 // the delete chunk before the next write lands.
 export const INK_SETTLE_MS = 20;
+
+// ── Shared clipboard-image machinery (daemon WS RPC) ─────────────
+// Every daemon speaks the same clipboard RPCs (websocket.rs):
+//   clipboard_check_image      → clipboard_image_presence {has_image, file_url}
+//   clipboard_save_image       → clipboard_image_saved    {path}
+//   clipboard_save_image_bytes → clipboard_image_saved    {path}
+// All replies echo request_id. Consumers keep a request_id → resolver map
+// and route the two reply types from their own WS onmessage dispatch
+// through handleClipboardImageReply() (the main terminal keeps its inline
+// equivalent — its dispatch can run before this module is imported).
+
+/** Resolve a pending clipboard RPC from a WS JSON message. Returns true
+ *  when the message type was a clipboard reply (even if no resolver was
+ *  waiting — timed-out requests delete theirs). */
+export function handleClipboardImageReply(resolvers, msg) {
+  if (msg.type === 'clipboard_image_presence') {
+    const resolver = resolvers.get(msg.request_id);
+    if (resolver) {
+      resolvers.delete(msg.request_id);
+      resolver({ hasImage: !!msg.has_image, fileUrl: msg.file_url || null });
+    }
+    return true;
+  }
+  if (msg.type === 'clipboard_image_saved') {
+    const resolver = resolvers.get(msg.request_id);
+    if (resolver) {
+      resolvers.delete(msg.request_id);
+      resolver({ path: msg.path || null });
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Generic legs of the image-paste flow, parameterized over the consumer's
+ * ws + resolver map: presence probe (askDaemon), Cmd+V empty-bracketed-paste
+ * dispatch, and Cmd+Opt+V paste-image-as-path. The main terminal delegates
+ * its local-daemon hooks here (keeping its remote-tab variants host-side);
+ * the scratch panel gets it built-in via createTerminalInput's
+ * `clipboardImage` dep.
+ *
+ * @param {Function} opts.getWs           () => ws-like | null
+ * @param {Function} opts.getTerm         () => WasmTerminal | null
+ * @param {Function} opts.replaceSelection (ws, afterFn) => void
+ * @param {Map}      opts.resolvers       request_id → resolver (shared with
+ *                                        the consumer's WS reply dispatch)
+ * @param {Function} opts.makeRequestId   (prefix) => unique request id
+ * @param {Function} [opts.isRpcStale]    () => bool — skip the daemon probe
+ *                                        (pre-RPC daemons never reply)
+ * @param {Function} [opts.armPasteUndo]  (kind) => void
+ */
+export function createClipboardImageRpc({
+  getWs, getTerm, replaceSelection, resolvers, makeRequestId,
+  isRpcStale = () => false, armPasteUndo = null,
+}) {
+  // Empty bracketed-paste markers — Claude Code's TUI sees the paste event
+  // and reads the OS clipboard itself, producing its native [Image #N]
+  // marker for image bytes (PNG, JPEG, TIFF, file copies).
+  const sendEmptyPaste = () => {
+    const ws = getWs();
+    if (!ws) return;
+    if (armPasteUndo) armPasteUndo('image');
+    ws.send(JSON.stringify({ type: 'input_raw', data: btoa('\x1b[200~\x1b[201~') }));
+  };
+
+  // Cmd+V image leg (local daemon). With an active selection, first erase
+  // it (editor-style replace) before dispatching the paste event.
+  const dispatchImagePaste = () => {
+    const term = getTerm();
+    if (term && term.has_selection()) {
+      const ws = getWs();
+      if (ws) replaceSelection(ws, () => setTimeout(sendEmptyPaste, INK_SETTLE_MS));
+      else sendEmptyPaste();
+    } else {
+      sendEmptyPaste();
+    }
+  };
+
+  // Cmd+Opt+V — write the clipboard image to a temp PNG on the daemon
+  // (arboard, zero-copy) and type the returned path so Claude Code reads
+  // it lazily via Read instead of inlining it into the conversation.
+  // Bypasses the many-image 2000px dimension cap that the default
+  // [Image #N] flow can hit on big screenshots.
+  const pasteImageAsPath = () => {
+    const ws = getWs();
+    if (!ws) return;
+    const requestId = makeRequestId('cb-save-');
+    resolvers.set(requestId, (reply) => {
+      if (reply && reply.path) {
+        const ws2 = getWs();
+        if (ws2) {
+          if (armPasteUndo) armPasteUndo('text');
+          ws2.send(JSON.stringify({ type: 'input', data: reply.path }));
+        }
+      }
+    });
+    ws.send(JSON.stringify({ type: 'clipboard_save_image', request_id: requestId }));
+    setTimeout(() => { resolvers.delete(requestId); }, 5000);
+  };
+
+  // Daemon clipboard probe for the Cmd+V resolver chain — fills the web
+  // API's blind spots (JPEG/TIFF images and Finder file URLs). 200ms
+  // covers the daemon's microsecond reply with margin.
+  const askDaemon = () => new Promise((resolve) => {
+    const ws = getWs();
+    const empty = { hasImage: false, fileUrl: null };
+    if (!ws) { resolve(empty); return; }
+    if (isRpcStale()) { resolve(empty); return; }
+    const requestId = makeRequestId('cb-');
+    resolvers.set(requestId, resolve);
+    ws.send(JSON.stringify({ type: 'clipboard_check_image', request_id: requestId }));
+    setTimeout(() => {
+      if (resolvers.delete(requestId)) resolve(empty);
+    }, 200);
+  });
+
+  return { askDaemon, dispatchImagePaste, pasteImageAsPath };
+}
 
 /**
  * Wire the full input pipeline for one terminal instance.
@@ -48,8 +170,12 @@ export const INK_SETTLE_MS = 20;
  * @param {number}   [deps.padTop=2]    content padding CSS px (must match set_content_padding)
  * @param {number}   [deps.padLeft=10]
  * @param {boolean}  [deps.scrollProximity=false] drive set_scroll_indicator_proximity
- *                   from mousemove/mouseleave (main does this in its own
+ *                   from pointermove/mouseleave (main does this in its own
  *                   status-bar hover handler; scratch enables it here)
+ * @param {object}   [deps.clipboardImage] enable the built-in clipboard-image
+ *                   RPC legs (createClipboardImageRpc): {resolvers, makeRequestId}.
+ *                   Hosts that wire hooks.dispatchImagePaste/askClipboardDaemon
+ *                   (the main terminal — remote-aware variants) skip this.
  * @param {object}   [deps.hooks]       host interceptors — all optional:
  *   guard(e) -> bool            swallow keydown entirely (modals / task wizard)
  *   preKey(e) -> bool           after ws guard, before multi-cursor (paste-undo
@@ -161,6 +287,23 @@ export function createTerminalInput(deps) {
   function linkHoverEndDefault() { canvas.style.cursor = ''; }
   const linkHover = hooks.linkHover || linkHoverDefault;
   const linkHoverEnd = hooks.linkHoverEnd || linkHoverEndDefault;
+
+  // ── Clipboard-image legs ────────────────────────────────────────
+  // Hosts either wire their own hooks (main terminal: remote-aware variants
+  // + paste-undo) or pass `clipboardImage` to get the built-in daemon-RPC
+  // legs over this instance's ws + replaceSelection (scratch panel).
+  const clipboardRpc = deps.clipboardImage
+    ? createClipboardImageRpc({
+        getWs, getTerm, replaceSelection,
+        resolvers: deps.clipboardImage.resolvers,
+        makeRequestId: deps.clipboardImage.makeRequestId,
+        armPasteUndo: hooks.armPasteUndo,
+      })
+    : null;
+  const dispatchImagePaste = hooks.dispatchImagePaste
+    || (clipboardRpc ? clipboardRpc.dispatchImagePaste : null);
+  const askClipboardDaemon = hooks.askClipboardDaemon
+    || (clipboardRpc ? clipboardRpc.askDaemon : null);
 
   // ── IME / Dictation composition (hidden textarea) ───────────────
   // Keystrokes do NOT trigger composition events, so there is no
@@ -303,6 +446,18 @@ export function createTerminalInput(deps) {
     // Cmd+Z / Ctrl+Z paste undo).
     if (hooks.clipboardKey && hooks.clipboardKey(e)) return;
 
+    // Cmd+Opt+V / Ctrl+Alt+V — paste clipboard image as a file path.
+    // Built-in leg for hosts on the shared clipboard machinery (scratch);
+    // the main terminal intercepts this chord in clipboardKey above with
+    // its remote-aware version. `'√'` covers macOS layouts where Option
+    // mangles e.key.
+    if (clipboardRpc && (e.metaKey || e.ctrlKey) && e.altKey
+        && (e.key === 'v' || e.key === '√' || e.code === 'KeyV')) {
+      clipboardRpc.pasteImageAsPath();
+      e.preventDefault();
+      return;
+    }
+
     // Cmd+V / Ctrl+V = paste (text or image). With an active selection,
     // first erase the selection (editor-style replace) before inserting.
     if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key === 'v') {
@@ -331,14 +486,14 @@ export function createTerminalInput(deps) {
         //      navigator.clipboard often silently fails.
         //   2. navigator.clipboard.read() — VS Code webview + Chrome path.
         //   3. host daemon RPC for fileUrl + JPEG/TIFF detection.
-        // Image legs only exist when the host provides dispatchImagePaste
-        // (the scratch panel is text-only for now).
+        // Image legs come from the host's hooks (main terminal) or the
+        // built-in clipboardImage machinery (scratch panel).
         const tcb = window.__TAURI__ && window.__TAURI__.clipboardManager;
 
-        if (hooks.dispatchImagePaste && tcb && typeof tcb.readImage === 'function') {
+        if (dispatchImagePaste && tcb && typeof tcb.readImage === 'function') {
           try {
             const img = await tcb.readImage();
-            if (img) { hooks.dispatchImagePaste(); return; }
+            if (img) { dispatchImagePaste(); return; }
           } catch (_) { /* not an image, try text */ }
         }
         if (tcb && typeof tcb.readText === 'function') {
@@ -351,21 +506,21 @@ export function createTerminalInput(deps) {
         }
 
         // Fall back to browser clipboard API.
-        if (hooks.dispatchImagePaste) {
+        if (dispatchImagePaste) {
           try {
             const items = await navigator.clipboard.read();
             for (const item of items) {
               if (item.types.find(t => t.startsWith('image/'))) {
-                hooks.dispatchImagePaste();
+                dispatchImagePaste();
                 return;
               }
             }
           } catch (_) { /* fall through to daemon RPC */ }
         }
-        if (hooks.askClipboardDaemon) {
-          const result = await hooks.askClipboardDaemon();
+        if (askClipboardDaemon) {
+          const result = await askClipboardDaemon();
           if (result.fileUrl) { pasteText(result.fileUrl); return; }
-          if (result.hasImage) { hooks.dispatchImagePaste(); return; }
+          if (result.hasImage) { dispatchImagePaste(); return; }
         }
         try {
           pasteText(await navigator.clipboard.readText());
@@ -858,9 +1013,14 @@ export function createTerminalInput(deps) {
   window.addEventListener('pointerup', onPointerUp);
   pointerTarget.addEventListener('contextmenu', onContextMenu);
   pointerTarget.addEventListener('wheel', onWheel, { passive: false });
-  pointerTarget.addEventListener('mousemove', onHoverMove);
+  // Hover feedback rides POINTERMOVE, not mousemove: the scratch panel's
+  // capture <textarea> overlays its canvas, and WKWebView doesn't reliably
+  // deliver compat mousemove over a focused textarea — pointer events are,
+  // and selection drag (onPointerMove above) already proves that stream
+  // works. Coordinates stay canvas-rect-relative either way.
+  pointerTarget.addEventListener('pointermove', onHoverMove);
   window.addEventListener('keyup', onKeyUp);
-  if (scrollProximity) pointerTarget.addEventListener('mousemove', onProximityMove);
+  if (scrollProximity) pointerTarget.addEventListener('pointermove', onProximityMove);
   pointerTarget.addEventListener('mouseleave', onMouseLeave);
 
   function dispose() {

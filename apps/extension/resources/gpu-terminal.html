@@ -7081,7 +7081,7 @@
         const themeObj = THEMES.find(t => t.name === theme);
         if (themeObj) updatePopupTheme(themeObj);
         try {
-          if (terminal) terminal.set_theme(theme);
+          setTerminalThemeEverywhere(theme);
         } catch (e) {
           reportError('set_theme', e);
         }
@@ -8732,6 +8732,8 @@
           scratchName: 'scratch-' + sessionName,
           fontData, fontName, fontSize, lineHeight, fontWeight,
           applyColors: applyVSCodeTerminalColors,
+          // Selection highlight = theme accent (see setTerminalThemeEverywhere).
+          themeName: activeThemeName,
           // The scratch PTY is owned by this session's daemon — route the
           // kill there (fall back to the active WS if the owner disconnected).
           sendKill: () => {
@@ -10132,23 +10134,23 @@
       if ((e.metaKey || e.ctrlKey) && e.altKey && (e.key === 'v' || e.key === '√' || e.code === 'KeyV')) {
         const aws = getActiveWs();
         if (aws) {
-          const requestId = 'cb-save-' + (++clipboardCheckSeq);
-          clipboardCheckResolvers.set(requestId, (reply) => {
-            if (reply && reply.path) {
-              const aws2 = getActiveWs();
-              if (aws2) {
-                pasteUndoArm('text');
-                aws2.send(JSON.stringify({ type: 'input', data: reply.path }));
-              }
-            }
-          });
           // For remote-bound tabs the daemon has no clipboard access
           // (Linux container, no X11). Upload the bytes from the local
           // webview instead — daemon writes them to its filesystem +
-          // returns the path. For local tabs we keep the legacy
-          // arboard-on-daemon path because it's zero-copy (no base64
-          // round-trip).
+          // returns the path. For local tabs the shared machinery keeps
+          // the legacy arboard-on-daemon path because it's zero-copy (no
+          // base64 round-trip).
           if (_remoteName) {
+            const requestId = 'cb-save-' + (++clipboardCheckSeq);
+            clipboardCheckResolvers.set(requestId, (reply) => {
+              if (reply && reply.path) {
+                const aws2 = getActiveWs();
+                if (aws2) {
+                  pasteUndoArm('text');
+                  aws2.send(JSON.stringify({ type: 'input', data: reply.path }));
+                }
+              }
+            });
             (async () => {
               try {
                 const bytes = await readClipboardPngBytes();
@@ -10167,11 +10169,11 @@
                 clipboardCheckResolvers.delete(requestId);
               }
             })();
-          } else {
-            // Local daemon — original arboard path.
-            aws.send(JSON.stringify({ type: 'clipboard_save_image', request_id: requestId }));
+            setTimeout(() => { clipboardCheckResolvers.delete(requestId); }, 5000);
+          } else if (clipboardImageRpc) {
+            // Local daemon — original arboard path via the shared machinery.
+            clipboardImageRpc.pasteImageAsPath();
           }
-          setTimeout(() => { clipboardCheckResolvers.delete(requestId); }, 5000);
         }
         e.preventDefault();
         return true;
@@ -10229,15 +10231,12 @@
     // ── Image-paste legs + daemon clipboard RPC ──
     // Host side of the module's Cmd+V resolver chain (the text leg lives in
     // gpu-terminal-input.js; these cover images + Finder file URLs).
-    // Empty bracketed-paste markers — Claude Code's TUI sees the paste
-    // event and reads the OS clipboard itself, producing its native
-    // [Image #N] marker for image bytes (PNG, JPEG, TIFF, file copies).
-    const sendEmptyPaste = () => {
-          const aws = getActiveWs();
-          if (!aws) return;
-          pasteUndoArm('image');
-          aws.send(JSON.stringify({ type: 'input_raw', data: btoa('\x1b[200~\x1b[201~') }));
-        };
+    // The GENERIC local-daemon legs (empty bracketed paste, presence probe,
+    // Cmd+Opt+V save-as-path) live in the shared createClipboardImageRpc
+    // machinery (gpu-terminal-input.js), instantiated in initTerminalInput
+    // over the SAME clipboardCheckResolvers map + getActiveWs the remote
+    // flows below use. Only the remote-tab variants stay host-side.
+    let clipboardImageRpc = null;
         // On a REMOTE tab the daemon runs in a headless container with no OS
         // clipboard, so an empty bracketed paste leaves Claude reading nothing.
         // Instead: read the bytes from the webview's clipboard, ship them
@@ -10320,13 +10319,8 @@
             });
             return;
           }
-          if (terminal.has_selection()) {
-            const aws = getActiveWs();
-            if (aws) replaceSelection(aws, () => setTimeout(sendEmptyPaste, INK_SETTLE_MS));
-            else sendEmptyPaste();
-          } else {
-            sendEmptyPaste();
-          }
+          // Local tab — shared empty-bracketed-paste leg (selection-aware).
+          if (clipboardImageRpc) clipboardImageRpc.dispatchImagePaste();
         };
         // Fast path: web API exposes image/png (= macOS screenshots) and
         // catches it without involving the daemon, so screenshot paste is
@@ -10335,22 +10329,11 @@
         // — but only when the live daemon supports it (probed at WS open).
         // Stale daemons skip the RPC entirely so plain text paste is zero
         // delay; the cost is PDFs/docs from Finder paste as filename only.
-        const askDaemon = () => new Promise((resolve) => {
-          const aws = getActiveWs();
-          const empty = { hasImage: false, fileUrl: null };
-          if (!aws) { resolve(empty); return; }
-          const sess = sessions.get(activeSessionName);
-          if (sess && sess.clipboardRpc === 'stale') { resolve(empty); return; }
-          const requestId = 'cb-' + (++clipboardCheckSeq);
-          clipboardCheckResolvers.set(requestId, resolve);
-          aws.send(JSON.stringify({ type: 'clipboard_check_image', request_id: requestId }));
-          // 200ms covers the new daemon's microsecond reply with margin.
-          // If a session is still 'unknown' (probe in flight) we may bail
-          // early on first paste — acceptable, only fileUrl detection lost.
-          setTimeout(() => {
-            if (clipboardCheckResolvers.delete(requestId)) resolve(empty);
-          }, 200);
-        });
+        // If a session is still 'unknown' (probe in flight) we may bail
+        // early on first paste — acceptable, only fileUrl detection lost.
+        const askDaemon = () => clipboardImageRpc
+          ? clipboardImageRpc.askDaemon()
+          : Promise.resolve({ hasImage: false, fileUrl: null });
     // (Keyboard selection, Delete/Backspace-with-selection, type-to-replace,
     // clear-selection rule, Cmd+Arrow Home/End, Ctrl+Shift+B, Cmd
     // passthrough, and the default handle_key path all live in
@@ -10921,6 +10904,21 @@
       try {
         const inputModule = await import(moduleUrl);
         INK_SETTLE_MS = inputModule.INK_SETTLE_MS;
+        // Shared local-daemon clipboard-image legs over the SAME resolver
+        // map + request-id sequence the remote flows use. The WS dispatch's
+        // clipboard_image_presence/saved cases resolve for both.
+        clipboardImageRpc = inputModule.createClipboardImageRpc({
+          getWs: getActiveWs,
+          getTerm: () => terminal,
+          replaceSelection,
+          resolvers: clipboardCheckResolvers,
+          makeRequestId: (prefix) => prefix + (++clipboardCheckSeq),
+          isRpcStale: () => {
+            const sess = sessions.get(activeSessionName);
+            return !!(sess && sess.clipboardRpc === 'stale');
+          },
+          armPasteUndo: pasteUndoArm,
+        });
         termInput = inputModule.createTerminalInput({
           getTerm: () => terminal,
           canvas,
@@ -10974,8 +10972,9 @@
         });
         // Same-target listeners that must run AFTER the module's, keeping
         // the original inline registration order on the canvas:
-        // pointerdown (selection) → pointerdown (right-click), and
-        // mousemove (link hover) → mousemove (status-bar hover).
+        // pointerdown (selection) → pointerdown (right-click). Link hover
+        // rides pointermove in the module (fires before compat mousemove),
+        // so it still precedes the status-bar hover below.
         canvas.addEventListener('pointerdown', handleRightClick);
         canvas.addEventListener('mousemove', onStatusBarHoverMove);
       } catch (e) {
@@ -12981,7 +12980,7 @@
         cancelBtn.addEventListener('click', (e) => {
           e.stopPropagation();
           // Revert to original
-          if (originalThemeName && terminal) terminal.set_theme(originalThemeName);
+          if (originalThemeName) setTerminalThemeEverywhere(originalThemeName);
           previewThemeName = null;
           originalThemeName = null;
           dismissPopup();
@@ -12994,7 +12993,7 @@
           addThemeItem(theme, isActive, () => {
             // Preview: apply visually without persisting
             previewThemeName = theme.name;
-            if (terminal) terminal.set_theme(theme.name);
+            setTerminalThemeEverywhere(theme.name);
             updatePopupTheme(theme);
             subtitle.textContent = 'Preview: ' + theme.name;
             footer.style.display = 'flex';
@@ -13157,8 +13156,8 @@
 
     function dismissPopup() {
       // If theme preview was active, revert to original
-      if (previewThemeName && originalThemeName && terminal) {
-        terminal.set_theme(originalThemeName);
+      if (previewThemeName && originalThemeName) {
+        setTerminalThemeEverywhere(originalThemeName);
       }
       previewThemeName = null;
       originalThemeName = null;
@@ -13187,6 +13186,16 @@
     let scratchModule = null; // gpu-terminal-scratch.js — floating scratch-terminal panel
     const scratchControllers = new Map(); // owning sessionName → live scratch panel controller
     const scratchOpenPending = new Set(); // sessionNames with scratch_open awaiting scratch_info
+    // Status-bar theme fan-out: apply to the main terminal AND every live
+    // scratch panel. The theme's accent drives the selection highlight
+    // (renderer paints ALL selections with pseudo_selection) — a scratch
+    // left out would keep the default dark-purple selection forever.
+    function setTerminalThemeEverywhere(name) {
+      if (terminal) terminal.set_theme(name);
+      for (const c of scratchControllers.values()) {
+        try { c.setTheme(name); } catch (_) { /* best effort */ }
+      }
+    }
     let fileBrowserPanel = null; // createFileBrowser instance
     let fileBrowserRoot = ''; // project root for the file browser (wasm-init projectDir)
     let showTransientPopover = null; // exported from gpu-terminal-tasks.js once loaded
@@ -14185,7 +14194,7 @@
             activeThemeName = msg.themeName;
             const themeObj = THEMES.find(t => t.name === msg.themeName);
             if (themeObj) updatePopupTheme(themeObj);
-            if (terminal) terminal.set_theme(msg.themeName);
+            setTerminalThemeEverywhere(msg.themeName);
           }
           break;
         }
