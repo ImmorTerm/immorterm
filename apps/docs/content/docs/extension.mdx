@@ -1,0 +1,179 @@
+---
+title: Editor Extension
+description: The ImmorTerm extension for VS Code, Cursor, Windsurf, and VSCodium — install, enable per project, settings, and the memory toggle.
+---
+
+## What it is
+
+The ImmorTerm extension puts persistent terminals inside your editor. When the
+editor crashes, reloads, or restarts, the terminal sessions you had open come
+back, and Claude Code sessions running in them can resume where they left off.
+
+It runs in any VS Code-family editor: **VS Code**, **Cursor**, **Windsurf**,
+and **VSCodium**. The same extension build works in all of them.
+
+The extension owns the editor-side pieces: the persistent terminal lifecycle,
+the status bar, Claude session tracking, and — when you turn it on — the local
+memory service. The terminal engine and the memory binary ship separately; the
+extension installs and manages them for you.
+
+If you want the terminal without an editor, there is a standalone desktop app
+and a `npx immorterm` CLI. This page is only about the editor extension.
+
+## Install
+
+Two steps: install the extension, then run the setup wizard once.
+
+### 1. Install the extension
+
+**VS Code** — from the [Visual Studio
+Marketplace](https://marketplace.visualstudio.com/), search for "ImmorTerm", or
+install by ID:
+
+```bash
+code --install-extension lonormaly.immorterm-extension
+```
+
+**Cursor, Windsurf, VSCodium** — these editors use the [Open VSX
+Registry](https://open-vsx.org/). Search for "ImmorTerm" in the extensions
+panel and install from there.
+
+You can also let the CLI do it for you (requires the editor's `code` command on
+your `PATH`):
+
+```bash
+npm install -g immorterm
+immorterm install extension          # stable
+immorterm install extension --pre    # pre-release
+```
+
+### 2. Run setup once
+
+```bash
+npx immorterm init
+```
+
+`init` configures the terminal backend, theme, services, and license, and
+writes `~/.immorterm/config.json`. It also installs the memory binary if you
+enabled memory but the binary is missing. See the [CLI reference](/docs/cli)
+for every flag.
+
+## Enable for a project
+
+The extension is off in a workspace until you turn it on. This is deliberate —
+it means opening an unfamiliar repo does not start persisting terminals you did
+not ask for.
+
+To enable it, open the Command Palette and run **ImmorTerm: Enable for This
+Project**. That sets `immorterm.enabled` to `true` in the workspace settings.
+To turn it back off, run **ImmorTerm: Disable for This Project**.
+
+You can also set it by hand in your workspace `settings.json`:
+
+```json
+{
+  "immorterm.enabled": true
+}
+```
+
+`immorterm.enabled`, `immorterm.terminalMode`, `immorterm.closeAction`, and
+`immorterm.softShelveEnabled` are resource-scoped, so you can set them per
+workspace (or per folder in a multi-root workspace) rather than globally.
+
+New terminals come from **ImmorTerm: New Terminal**. The full list of commands
+and their default keyboard shortcuts lives on the
+[Commands](/docs/commands) and [Shortcuts](/docs/shortcuts) pages.
+
+## Turn on memory
+
+Persistent memory for Claude Code is a separate, opt-in service. It is a local
+binary — a SQLite database plus on-device embeddings — and nothing leaves your
+machine.
+
+Run **ImmorTerm: Configure Memory Services** from the Command Palette. Enabling
+memory validates prerequisites, computes a stable project ID, and installs the
+per-project Claude Code hooks that capture facts and decisions as you work.
+Disabling everything removes those hooks again.
+
+The underlying settings are:
+
+| Key | Default | Description |
+|---|---|---|
+| `immorterm.services.memory.enabled` | `false` | Enable persistent memory for Claude Code |
+| `immorterm.services.mcpGateway.enabled` | `false` | Enable MCP Gateway to reduce memory usage by ~90% |
+| `immorterm.services.graph.enabled` | `false` | Enable relationship tracking for Claude Code |
+
+If memory is not behaving, run **ImmorTerm: Run Memory Doctor (Diagnostics)**.
+It checks service health, writes a report to the Output channel, and offers a
+one-click auto-fix and an "Open Web UI" action.
+
+For what memory does and how to use it, read [Memory (standalone)](/docs/memory-standalone)
+and [Claude Code integration](/docs/claude-code). The CLI has the same controls
+without an editor: `immorterm memory install`, `immorterm memory up`.
+
+## Settings
+
+Every setting the extension contributes, grouped by area. Change them in the
+editor's Settings UI (search "immorterm") or in `settings.json`.
+
+### Project
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `immorterm.enabled` | boolean | _(unset)_ | Enable ImmorTerm for this project |
+| `immorterm.terminalMode` | string | `regular` | Which terminal sessions to auto-restore on startup. One of `regular`, `ai`, `both` |
+| `immorterm.statusBarEnabled` | boolean | `true` | Show ImmorTerm status in the status bar |
+| `immorterm.statusBarTheme` | string | `Purple Haze` | Color theme for the terminal status bar (21 themes, e.g. `Purple Haze`, `Ocean Depths`, `Dracula`, `Matrix`). Pick one with **ImmorTerm: Set Theme for This Project** |
+
+### Terminal behavior
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `immorterm.scrollbackBuffer` | number | `50000` | Number of lines to keep in the Screen scrollback buffer |
+| `immorterm.historyOnAttach` | number | `20000` | Number of lines to display when reattaching to a Screen session |
+| `immorterm.namingPattern` | string | `immorterm-${n}` | Pattern for auto-naming terminals |
+| `immorterm.screenBinary` | string | `immorterm` | Path to the GNU Screen binary |
+
+### Restore on startup
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `immorterm.restoreOnStartup` | boolean | `true` | Automatically restore terminals when the editor opens |
+| `immorterm.terminalRestoreDelay` | number | `200` | Delay in milliseconds between terminal restorations |
+| `immorterm.closeExistingOnRestore` | boolean | `true` | Close existing terminals before restoring saved terminals |
+| `immorterm.autoCleanupStale` | boolean | `true` | Automatically clean up orphaned Screen sessions on startup |
+| `immorterm.closeGracePeriod` | number | `60000` | Grace period in milliseconds before cleaning up a closed terminal |
+
+### Closing and shelving
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `immorterm.closeAction` | string | `shelve` | What happens when a terminal tab is closed. One of `shelve`, `kill` |
+| `immorterm.shelvedSessionTtl` | number | `24` | Hours before shelved sessions are automatically reaped |
+| `immorterm.softShelveEnabled` | boolean | `false` | Keep AI daemons alive briefly after closing a tab for instant reattach |
+| `immorterm.softShelveTtlMinutes` | number | `120` | Minutes a soft-shelved daemon stays alive before falling through to regular shelve |
+
+### Claude sessions
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `immorterm.claudeAutoResume` | boolean | `true` | Automatically resume Claude Code sessions after restart |
+| `immorterm.claudeSyncInterval` | number | `30000` | Claude session sync interval in milliseconds |
+| `immorterm.claudeIdleTimeout` | number | `48` | _(Reserved)_ Kill idle Claude sessions after this many hours (`0` = never) |
+| `immorterm.claudeChannelsEnabled` | boolean | `true` | Enable interactive session sharing via Claude Code channels |
+
+### Logging
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `immorterm.enableDebugLog` | boolean | `false` | Enable verbose debug logging |
+| `immorterm.maxLogSizeMb` | number | `300` | Maximum total size of log files in megabytes |
+| `immorterm.logRetainLines` | number | `50000` | _(Reserved)_ Number of lines to retain when truncating log files |
+
+### Services
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `immorterm.services.memory.enabled` | boolean | `false` | Enable persistent memory for Claude Code |
+| `immorterm.services.mcpGateway.enabled` | boolean | `false` | Enable MCP Gateway to reduce memory usage by ~90% |
+| `immorterm.services.graph.enabled` | boolean | `false` | Enable relationship tracking for Claude Code |

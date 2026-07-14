@@ -1,0 +1,693 @@
+---
+title: Features
+description: The full tour — every capability ImmorTerm ships, grouped by product area, with what it does and how to use it.
+---
+
+This is the complete map of what ImmorTerm does. It is organized by product
+area. Each entry says what the feature is and how you reach it. If you want the
+five-command install instead, start on [Getting Started](/docs).
+
+Most of what follows is automatic — persistence, rendering, memory capture,
+scrollback. The parts you drive by hand (keyboard shortcuts, MCP tools, CLI
+commands, menu items) are called out in each entry.
+
+---
+
+## Persistent sessions
+
+The core promise: your terminal outlives your editor.
+
+### Persistent multiplexed sessions
+
+Terminal sessions survive a VS Code crash or restart and reconnect on their
+own. This began as a C "screen fork" binary and is now the native
+`immorterm-ai` daemon — a custom wgpu runtime, not GNU screen.
+
+How to use: open an ImmorTerm terminal. Sessions persist with no action from
+you.
+
+### Session registry with multi-layer protection
+
+`registry.json` tracks every session, with self-healing, backup-on-write,
+session snapshots, dated backup folders, a sweep for stub zombies (pid 0 or
+empty name), and a separate `registry-shelved.json` for parked sessions.
+
+How to use: automatic. Sessions restore on relaunch; corrupt entries repair
+themselves.
+
+### Restore active terminal focus
+
+The terminal that had focus before a restart gets it back afterward.
+
+How to use: automatic on reload.
+
+### Shelve and reattach AI sessions
+
+Park an AI session and reattach it later.
+
+How to use: right-click a session, or use the per-item actions in the sidebar,
+to shelve or reattach.
+
+### On-demand scrollback and PTY history replay
+
+A bounded byte ring buffer replays your backlog when you reconnect. History
+replay is column-aware: it re-processes the bytes at their original width and
+applies resize events, so scrollback does not corrupt after you resize the
+window.
+
+How to use: automatic on resize and reconnect. To force a full re-render, press
+`Ctrl+Shift+R` on Mac (`Cmd+Shift+R` elsewhere).
+
+### Parallel session restore
+
+Multiple sessions restore in parallel at boot, with a compact CTX progress bar
+and render optimizations for a faster start.
+
+How to use: automatic at launch.
+
+---
+
+## GPU rendering
+
+The on-screen grid is drawn on the GPU. This section covers what that buys you.
+
+### GPU-accelerated rendering (WebGPU / wgpu)
+
+A Rust and WASM renderer draws the terminal grid with WebGPU/wgpu, backed by a
+native wgpu daemon runtime.
+
+How to use: on by default in ImmorTerm AI terminals.
+
+### Pixel-perfect line spacing
+
+Line spacing is aligned to the browser's actual font metrics by measuring DOM
+character height, so GPU text sits exactly where it should.
+
+How to use: automatic.
+
+### Synchronized output (CSI ?2026)
+
+Supports the CSI ?2026 synchronized-output mode, so streaming updates render
+without flicker.
+
+How to use: automatic for any app that emits the sequence.
+
+### Emoji and flag rendering
+
+Emoji codepoints and country-flag sequences route to a DOM overlay for native
+Apple emoji rendering, including emoji keycap and circled-number keycap
+sequences.
+
+How to use: automatic when emoji appear in output.
+
+### Hebrew and bidirectional text
+
+Renders Hebrew and mirrors brackets for right-to-left text.
+
+How to use: automatic for RTL content.
+
+### Soft-wrap detection for clean copy-paste
+
+Detects app-level soft-wrapping (Ink and the Claude Code TUI) by a fill-ratio
+heuristic, so copied text is not broken up by hard newlines that were never
+really there.
+
+How to use: automatic on copy.
+
+### xterm / kitty CSI extensions
+
+Implements xterm and kitty CSI extension sequences.
+
+How to use: automatic for compatible apps.
+
+---
+
+## Themes
+
+### 23 color themes
+
+Themes are seven-slot palettes (`--theme-1` through `--theme-7`); the status
+bar shows three at once for its border, brand, and glyph. Twenty-three ship in
+the menu, including Hot Pink, Delulus Club, Cyberpunk, and Synthwave.
+
+How to use: pick from the theme menu. A theme change refreshes every open tab
+live.
+
+### Theme-aware cursor and live push
+
+The cursor takes the active theme's color. Theme changes push live through the
+daemon watcher to every webview, including remote tabs.
+
+How to use: automatic on theme change.
+
+---
+
+## AI and Claude memory
+
+A local memory service captures what you and your AI decided, and recalls it
+before you ask.
+
+### Persistent memory service
+
+A native Rust binary (SQLite plus ONNX embeddings, served over MCP Streamable
+HTTP) stores and retrieves session memories across restarts.
+
+How to use: `immorterm-memory serve --port 8765 --daemon`. Search from your AI
+with the `search_memory()` MCP tool.
+
+### Tiered search with classifier routing
+
+A BERT-tiny ONNX query classifier routes each search. Cross-encoder reranking,
+a spreading-activation topic graph, an adaptive semantic limit, temporal sort
+with decay weights, and value scoring tune what comes back.
+
+How to use: automatic inside `search_memory`. Retrain the classifier with
+`/immorterm:train-classifier`.
+
+### Ambient memory injection gate
+
+A BERT-tiny gate does an ambient pre-pass to decide whether surfacing a memory
+is worth it, staying silent when confidence is low so you are not flooded with
+noise.
+
+How to use: automatic in the intelligence endpoint.
+
+### Three-dimensional memory identity
+
+Every memory row carries `user_id` (who — the human), `project_id` (what — a
+committed UUID in `.immorterm/project.json`), and `host_id` (which machine).
+An identity warn-guard checks the write path.
+
+How to use: sourced from the canonical files automatically.
+
+### Supersession and obsolescence chains
+
+Memories stay current through a `supersede_memory` tool, a bidirectional
+supersession-chain endpoint, a proactive obsolescence sweep, a digester
+self-check, and branch-aware capture.
+
+How to use: the `supersede_memory` MCP tool, plus automatic audit passes in the
+hooks.
+
+### Named entity recognition
+
+Insert-side NER (Rust ONNX), gated to high-value memory types, plus graph
+canonicalization and type-boost rows, improve recall.
+
+How to use: automatic on memory insert.
+
+### Session recall — ask a session
+
+Bring back a past Claude session's full context — summary, facts, decisions,
+code changes, tasks, and plan — or chat with it from its own perspective.
+
+How to use: `/immorterm:recall <n|id|last>` or `immorterm recall` from the CLI.
+Use `/immorterm:ask` to chat with a session.
+
+### Session context modal
+
+A structured modal for any session: title, at-a-glance summary, collapsible
+sections, a timeline badge, bullet counts, and a tasks section with timestamps.
+
+How to use: open a session's context modal from the sidebar.
+
+### Conversation turns retrieval
+
+Retrieve a session's conversation turns — the recovery path when a session is
+bricked by an AUP block — with corrected AI turn splitting.
+
+How to use: the `get_conversation_turns` MCP tool.
+
+### Retrieval eval harness
+
+A benchmark harness with LongMemEval-S and topic-graph categories, reporting
+nDCG, MRR, and per-class accuracy, so search and classifier quality are
+measurable.
+
+How to use: `/immorterm:eval-search`.
+
+---
+
+## MCP tools
+
+ImmorTerm exposes a large MCP surface to the AI running inside a terminal.
+
+### ImmorTerm MCP server
+
+Around ninety tools: canvas drawing (`draw_html`, `draw_rect`, `draw_text`,
+`draw_button`, `draw_line`), annotate, highlight, arrow, bracket, task
+create/update/delete/list, sessions, workshops, browser control, app control,
+`read_screen` / scrollback, `execute`, and more.
+
+How to use: called by the AI agent inside an ImmorTerm terminal. Tools are
+prefixed `immorterm_`.
+
+### MCP Gateway
+
+An HTTP-to-stdio routing proxy for shared MCP servers, kept as a singleton by a
+PID lock file, with a Restart control.
+
+How to use: runs as `services/mcp-gateway`. Restart with
+`kill $(jq -r .pid ...state.json)` then start, or use the Restart button.
+
+### PR enrichment
+
+The `enrich_pr` tool batch-enriches changed files with temporal session
+context, decisions, and code archaeology from memory, matched to the branch.
+
+How to use: the `/create-pr` skill, or the `enrich_pr` tool directly.
+
+---
+
+## Inline comments and annotations
+
+Talk back to your terminal output, and let the AI draw on it.
+
+### Inline comments on output
+
+Anchor a citation comment to a span of terminal output, with a persistent
+underline, multi-row underlines for multi-line selections, an expanded pill
+that auto-collapses, and a number pill that appears on hover.
+
+How to use: select output and press Enter to cite. `Cmd+E` runs auto-bullet
+detection and the multi-comment wizard; `Cmd+Option+E` scopes detection to the
+selected rows.
+
+### Comment image paste and compose panel
+
+Paste images into the comment editor and a compose panel; bullet detection is
+viewport-first with an (N/M) editor preview.
+
+How to use: paste an image into the comment editor.
+
+### AI canvas overlays
+
+The agent draws rectangles, text, buttons, lines, HTML, arrows, brackets, and
+highlights over the GPU terminal as named primitives it can update, replace, or
+remove.
+
+How to use: the `draw_html`, `draw_rect`, and related MCP tools. Use
+`eval_in_primitive` to script a named primitive.
+
+---
+
+## Link and file preview
+
+Hover to see what a path, URL, color, or task actually is.
+
+### Link hover preview panel
+
+`Cmd`/`Ctrl`+hover a file path or URL to get a preview popover: Shiki syntax
+highlighting, image thumbnails, a full-file virtual-scroll preview, a
+markdown Rendered/Raw toggle, a draggable and resizable pinned tooltip, smart
+positioning, and dotfile support.
+
+How to use: `Cmd`/`Ctrl`+hover a path or URL in output.
+
+### Color preview and picker
+
+Hover a hex or `rgb()` / `rgba()` color literal to reveal a swatch and an
+iro.js color picker.
+
+How to use: `Cmd`+hover a color literal.
+
+### Task and URL rich cards
+
+`Cmd`+hover a task reference for a summary card (dependencies, metadata, owner)
+pulled from memory; `Cmd`+hover a URL for an Open Graph rich card via the
+og-scraper endpoint.
+
+How to use: `Cmd`+hover a task id or a URL.
+
+---
+
+## File browser
+
+### Left-side file browser sidebar
+
+The file tree lives on the left; sessions live on the right. Material
+file-type icons, a reveal-tree preview, drag-to-attach into the terminal, and a
+hub-backed `/api/v1/files` index and grep.
+
+How to use: open the file sidebar. Drag a file onto a terminal to attach it.
+
+---
+
+## Tasks
+
+A task board that lives beside your terminal and links to your sessions.
+
+### Sidebar task board
+
+Drag-and-drop task management with lane filters, dependencies, metadata, owner,
+a title-lock, reorder, archive, and a sparkle animation. Persisted through the
+hub tasks API.
+
+How to use: open the task board modal (`Ctrl+Shift+T`). Create, update, and
+delete tasks from the UI or the MCP tools.
+
+### Bullets-to-tasks wizard
+
+Turn detected bullet lines in output into tasks through a wizard, with
+session-scoped popups and bold detection.
+
+How to use: `Cmd+D` over bulleted output; `Cmd+Option+D` scopes the wizard to a
+selection.
+
+### Task enrichment and injection
+
+A hub endpoint enriches a task with AI context; the task injector links tasks
+to sessions and injects primer context.
+
+How to use: `POST /api/v1/tasks/:id/enrich`. Linking is automatic.
+
+---
+
+## Digest
+
+The pipeline that turns a finished session into durable memories.
+
+### Auto-digest pipeline
+
+The `immorterm-digest` daemon watches transcripts and extracts memories per
+session using `claude -p`, with token-usage and cost logging, a structured
+digest, and supersession audit passes.
+
+How to use: runs from the SessionStart hook (`ensure-digest-daemon`).
+
+### Warm-session pooling (immorterm-p)
+
+A subscription-safe replacement for `claude -p` that drives an interactive
+Claude session headlessly. `--pool` reuses one warm session — roughly twelve
+times cheaper — and preserves `--append-system-prompt` across `/clear`. Bring
+your own CLI with `IMMORTERM_P_CMD_TEMPLATE`. It is embedded in the daemon
+binary.
+
+How to use: `immorterm-p` (used by `digest-llm-invoke.sh`); `--pool` mode for
+auto-digest.
+
+### Digest LLM picker
+
+A three-step picker (wizard, menu, CLI) that puts subscription-backed providers
+first — five or more of them, with Copilot as a first-class vendor —
+per-provider templates, a delivery-method selector, and a Test Connection
+command. The modal works in both VS Code and the Tauri app.
+
+How to use: Sessions popover, then Digest LLM.
+
+### Vendor-agnostic digestion
+
+First-class support for nine AI tools — codex, gemini, opencode, copilot,
+cursor, windsurf, cline, aider, and Claude — with per-vendor hook adapters,
+transcript normalization (`immorterm-adapter`), a neutral digest prompt,
+`ai_tool` tagging, and a Stop-hook trigger for every vendor.
+
+How to use: pick your vendor in the wizard's vendor step (auto-detected).
+
+---
+
+## Sharing
+
+Move context from one terminal to another, local or remote.
+
+### Drag-and-drop session sharing
+
+Drag a session, file, or task onto another terminal to share its context, shown
+as a themed badge and pill. A per-terminal pending-share queue makes
+cross-terminal and multi-share work; pills stay until you consume or dismiss
+them.
+
+How to use: drag a session, file, or task onto a terminal.
+
+### Remote attachment
+
+Attach a remote file, session, or task over the daemon WebSocket
+`write_share_item` path (the same path as screenshot save), writing the remote
+host's pending-share directory. The webview branches between remote/standalone
+(WebSocket) and VS Code-local (extension).
+
+How to use: share from a remote-bound tab.
+
+---
+
+## Remote sessions
+
+Run and manage sessions on another machine over SSH.
+
+### Remote sessions over SSH
+
+Add, list, remove, test, and edit SSH remotes, with a remote-setup bootstrap,
+ssh-config alias autocomplete, and a strict-known-hosts toggle. Spawn sessions
+on the remote, get push-based registry events (ssh plus `inotifywait` into a
+WebSocket), remote-aware config, themes, and tasks, and register remote MCP
+over SSH-stdio.
+
+How to use: the Remotes Manager modal, or `remote add` / `remote setup` /
+`remote configure-mcp` from the CLI. `Ctrl+Shift+A` opens a new ImmorTerm
+(Rust) session in the current project.
+
+### Remote clipboard image paste
+
+`Cmd+Option+V` pastes a clipboard image into a remote tab via
+`clipboard_save_image_bytes` and an xclip shim, with a hard re-render and
+alt-screen reflow.
+
+How to use: `Cmd+Option+V` in a remote tab.
+
+---
+
+## Workshops
+
+Persistent interactive panels the AI can build and update over time.
+
+### Persistent interactive workshops
+
+HTML panels that survive across turns and reloads, with open, update,
+`eval_in`, close, list, and read tools, a dedicated panel render path, a
+per-session badge, cross-session scope, replay on subscribe, and PTY and hook
+click wake-up.
+
+How to use: the `open_workshop`, `update_workshop`, and `eval_in_workshop` MCP
+tools, or the `/immorterm-workshops` skill.
+
+---
+
+## Browser panel
+
+### Self-driven browser
+
+An agent-controllable browser embedded in the terminal — open, click, scroll,
+find, form input, screenshot, read page, console, network, tabs, upload,
+wait-for, and request-human — productized as an open-source engine plus the
+rudder-cloud managed service.
+
+How to use: the `immorterm_browser_*` MCP tools.
+
+---
+
+## Desktop app
+
+ImmorTerm as a standalone application, no editor required.
+
+### Tauri desktop app
+
+A standalone Tauri v2 app with multi-webview tabs and instant switching, a
+project picker, per-window tab persistence, `Cmd+=` / `Cmd+-` / `Cmd+0` zoom
+(persisted to disk, scaling the tab strip too), a native menu bar, a redesigned
+tab strip (themed tints, drag-and-drop), an auto-updater with sidecar version
+reconcile, and a DMG build.
+
+How to use: launch the ImmorTerm app.
+
+### App-control MCP tools
+
+`immorterm_app_*` tools let the agent list, open, close, and focus tabs and
+windows, reload a webview, eval in a webview, snapshot, and open plain tabs —
+driving the Tauri shell.
+
+How to use: the `immorterm_app_*` MCP tools.
+
+---
+
+## Hub service
+
+The local backend behind sessions, tasks, and file links.
+
+### Hub (Rust)
+
+A Rust hub (ported from TypeScript) that provides the SessionManager registry,
+`claude_tracker` batch sync, the tasks API, file-link open/reveal/exists, a
+URL-preview scraper, a digest test endpoint, remotes endpoints, and markdown
+rendering (pulldown-cmark plus syntect). It serves multiple projects.
+
+How to use: runs as `services/hub`; the bind address is env-driven
+(`IMMORTERM_HUB_URL`).
+
+---
+
+## Status bar
+
+### Expressive status bar
+
+A themed status bar showing the active tab's own git branch (daemon-emitted,
+Tauri-compatible), an LED marquee that scrolls long titles, a breathing working
+dot, a persistent bell, and an attention badge over daemon IPC.
+
+How to use: automatic.
+
+---
+
+## AI personas and voice
+
+### Speak Mode personas
+
+A per-session and per-project persona cascade that overrides the AI's
+character, including a CEO "bottom-line" character. A tiny reminder rides each
+turn and a full persona injects only on a transition; toggling off resets once.
+
+How to use: the Speak Mode picker in the menu (it opens as a hover side
+submenu).
+
+### Dictation and voice input
+
+macOS Dictation and IME support through a hidden textarea, with a pulsing ring
+and a voice-burst pulse at the cursor, and an iTerm2-style live dictation
+preview.
+
+How to use: trigger macOS Dictation while focused in the terminal input.
+
+---
+
+## Terminal protocol
+
+Standard escape sequences that make apps behave well inside ImmorTerm.
+
+### OSC escape support
+
+OSC 8 hyperlinks (routed into the preview panel), OSC 9/99/777 desktop
+notifications, OSC 52 clipboard write, and OSC 7 cwd tracking (live worktree
+updates). ImmorTerm advertises `TERM_PROGRAM_VERSION` and `COLORTERM`.
+
+How to use: automatic for apps that emit these sequences.
+
+---
+
+## Text selection and editing
+
+### Advanced text selection
+
+Editor-style selection in the Claude Code input, keyboard selection with visual
+cursor detection, multi-cursor selection with theme-accent highlights, and
+`Alt+drag` rectangular block selection.
+
+How to use: select with mouse or keyboard; `Alt+drag` for a block.
+
+### Cmd+Z paste-undo
+
+`Cmd+Z` / `Ctrl+Z` undoes the last paste — text, image, or path. `[Image #N]`
+pills delete atomically in a single backspace, because ImmorTerm records what
+echoed, not what was sent.
+
+How to use: `Cmd+Z` after a paste.
+
+### Image paste as temp-file path
+
+`Cmd+Option+V` pastes a clipboard image as a temp file path (a per-session
+paste dir at `~/.immorterm/paste/<window_id>/<n>.png`), with an `[Image #N]`
+placeholder that has a link preview. The daemon prunes stale pastes.
+
+How to use: `Cmd+Option+V`.
+
+---
+
+## Search and explore
+
+### Explore-selection web search
+
+`Ctrl+Shift+F` opens a popup that searches a selection across four streaming
+sources plus a Google iframe, with a Haiku fallback. Click outside to dismiss.
+
+How to use: select text and press `Ctrl+Shift+F`.
+
+---
+
+## Productivity
+
+### Pomodoro focus tracker
+
+A Pomodoro focus timer as a pill with hover controls and visibility modes. It
+also works in the standalone browser.
+
+How to use: enable the Pomodoro pill, or toggle it with the Alt+Shift+backtick
+chord.
+
+---
+
+## Onboarding and setup
+
+### Stranger-proof onboarding
+
+Non-TTY init, a one-command memory install, a UUID identity, hooks installed
+everywhere through the shared installer, Tauri projects that auto-wire memory
+(daemon auto-install with a banner fallback), and automatic gitignoring of the
+`.immorterm/` runtime state.
+
+How to use: `npx immorterm init`. The `/stranger-rehearsal` ritual is the
+acceptance test.
+
+---
+
+## Billing and web
+
+### Billing and pricing tiers
+
+Dodo Payments checkout, webhooks, and license activation (migrated from Lemon
+Squeezy), an `/account` page to pay for, check, and manage licenses, and a $9
+standalone memory-pro SKU end to end.
+
+How to use: the web `/account` page.
+
+### Design system and Storybook
+
+The `libs/ui` component library with forty Storybook stories — every component
+in a terminal-noir habitat — served via a Tilt resource. Brand governance lives
+in `docs/brand/` (Mort the axolotl mascot, brand soul and voice, design lock).
+
+How to use: Storybook is served locally; brand docs are in `docs/brand/`.
+
+---
+
+## Release and deployment
+
+### CI Trusted Publishing
+
+npm Trusted Publishing over OIDC for the CLI, memory, and gateway promotes
+(the `NPM_TOKEN` is retired), a docs promote to Cloudflare Pages, and
+publish-ready `@immorterm/*` packages (FSL license, repository fields,
+pack-verified).
+
+How to use: the CI lanes run on merge.
+
+### Docker and remote-box deployment
+
+A Docker image that bakes in `immorterm-memory`, `immorterm-digest`, the hooks,
+and the Claude Code CLI, and bootstraps a demo project and session at
+entrypoint. A headless cargo feature covers Linux and VPS builds, bind
+addresses are env-driven, and there is a canonical remote-box test launcher.
+
+How to use: run the container or the remote-box launcher.
+
+---
+
+## Knowledge packs
+
+Turn books and sources into an expert the AI can consult.
+
+### AI worker pipeline
+
+A LangGraph pipeline that digests books and sources into knowledge packs, with
+a pack-centric public API behind an admin auth gate, a packs service extracted
+from the ai-worker with a thin Docker CI, and Gemini through the Vercel AI
+Gateway.
+
+How to use: `/immorterm:create-expert` and `/immorterm:digest-book`.

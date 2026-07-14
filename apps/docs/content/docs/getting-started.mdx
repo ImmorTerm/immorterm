@@ -1,0 +1,139 @@
+---
+title: Getting Started
+description: The four ImmorTerm surfaces — CLI, VS Code extension, local AI memory, and the desktop app — and how they fit together.
+---
+
+ImmorTerm is a persistent terminal that survives crashes, reboots, and dropped
+SSH connections. Sessions run in a daemon beneath your editor, so you reattach
+live — full scrollback, the build still running. It comes in four pieces you
+can adopt in any order.
+
+This page orients you across all of them. Each has its own reference; the links
+at the end of each section go deeper.
+
+## The four surfaces
+
+| Surface | What it is | You need it when |
+|---|---|---|
+| **CLI** (`immorterm`) | Control plane — setup, services, diagnostics, upgrades | Always. This is the entry point. |
+| **VS Code extension** | Persistent terminals, status bar, themes, and commands inside VS Code | You live in VS Code. |
+| **Local AI memory** | A native binary that captures and recalls what you and your AI decided | You want your AI to remember across sessions. Optional. |
+| **Desktop app** | The same GPU terminal as a standalone native app — no VS Code | You want ImmorTerm without an editor. Optional. |
+
+The CLI is the only required piece. Everything else is opt-in, and the CLI
+sets each one up.
+
+## 1. Install the CLI
+
+```bash
+npm install -g immorterm
+```
+
+Or run it once without installing:
+
+```bash
+npx immorterm init
+```
+
+This is the control-plane CLI — setup, services, license, upgrades,
+diagnostics. The full command surface is on the [CLI reference](/docs/cli).
+
+## 2. Initialize
+
+```bash
+immorterm init
+```
+
+The interactive wizard configures your terminal backend, theme, services, and
+license, then writes `~/.immorterm/config.json`. Add `--yes` to skip the
+prompts and write defaults (memory enabled, gateway disabled, free tier,
+`Purple Haze` theme, `ai` terminal backend).
+
+`init` also attempts to install the VS Code extension if the `code` CLI is on
+your PATH — non-fatal when it isn't.
+
+## 3. Pick a host
+
+The terminal itself renders in one of two places. They share the same engine;
+pick whichever matches where you work.
+
+### Inside VS Code
+
+If `init` installed the extension, open the Command Palette and run
+**ImmorTerm: New Terminal** to open a persistent terminal. Other commands you
+will reach for early:
+
+- **ImmorTerm: Enable for This Project** — turn ImmorTerm on for the current
+  workspace
+- **ImmorTerm: Set Theme for This Project** — pick from 21 status-bar themes
+- **ImmorTerm: Show Status** — service and session state at a glance
+
+There are 25 commands in total, plus keybindings like `` Ctrl+Shift+` `` for a
+new terminal. The full list is in the
+[extension reference](/docs/extension), the [command list](/docs/commands), and
+[keyboard shortcuts](/docs/keyboard-shortcuts). Behavior tunes through VS Code
+settings (`immorterm.*`) covered in [Features](/docs/features).
+
+### As the desktop app
+
+The desktop app is the same GPU terminal as a standalone native application —
+no VS Code required. It is distributed as a signed `.dmg` (drag the app to
+`/Applications`), spawns its own local hub to serve the terminal, and provides
+native windows and tabs:
+
+- `Cmd+N` — new window
+- `Cmd+T` — new project tab
+- `Cmd+W` — close the current tab
+- `Cmd+/` — open the keyboard-shortcuts cheatsheet
+
+It ships an auto-updater that checks for new releases on launch and, when one
+is available, shows a banner to download, install, and relaunch in one click.
+Full detail — install, tabs, updates, and how it
+differs from the extension — is in the [desktop app guide](/docs/desktop-app).
+
+## 4. Add local AI memory (optional)
+
+Memory is a single native binary that runs on your machine. It captures the
+facts and decisions from your sessions and recalls them by meaning in about
+8ms. Nothing leaves your machine — it binds to localhost and stores everything
+in local SQLite.
+
+```bash
+immorterm memory install   # download the binary into ~/.immorterm/bin/
+immorterm memory up        # start the daemon
+```
+
+First boot downloads about 150 MB of embedding and reranking models, so the
+health wait is 180 seconds instead of the usual 10. After that, every boot is
+fast. When it is up:
+
+```text
+Memory service: http://127.0.0.1:8765/health
+```
+
+In day-to-day use you do not call it directly: your AI tool connects over MCP
+and hooks capture memories from your sessions automatically. Set that up in the
+[Claude Code integration guide](/docs/claude-code), or read
+[Connecting over MCP](/docs/mcp-connection) for other clients. The REST surface
+and what Memory Pro adds are on the [Memory API overview](/docs/memory-api).
+
+## Verify
+
+```bash
+immorterm doctor
+```
+
+Seven checks — config, binaries, service health, gateway, disk, hooks, license
+— each with a one-line fix hint when something is not a pass. `immorterm status` gives the
+shorter live view.
+
+## Where next
+
+- [Extension reference](/docs/extension) — commands, status bar, and settings
+  inside VS Code
+- [Desktop app](/docs/desktop-app) — the standalone native terminal
+- [Features](/docs/features) — terminal modes, themes, and configuration
+- [Memory API](/docs/memory-api) — running the memory service and its REST
+  surface
+- [Claude Code integration](/docs/claude-code) — hooks, MCP, and what gets
+  captured
