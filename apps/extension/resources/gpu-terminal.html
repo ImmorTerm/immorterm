@@ -8712,7 +8712,14 @@
       scratchOpenPending.add(owner);
       // A pre-scratch daemon (started before this feature deployed) silently
       // drops scratch_open — never leave the pending latch stuck on no-reply.
-      setTimeout(() => { scratchOpenPending.delete(owner); }, 4000);
+      setTimeout(() => {
+        // Still pending = the daemon never replied (it predates the scratch
+        // feature). Say so instead of failing silently.
+        if (scratchOpenPending.delete(owner) && showTransientPopover) {
+          const anchor = document.getElementById('terminal-canvas');
+          showTransientPopover('Scratch terminal needs a fresh session — this one is running an older engine. Open a new session (+) and try there.', anchor, 5000);
+        }
+      }, 4000);
       ws.send(JSON.stringify({ type: 'scratch_open', request_id: 'scratch-' + Date.now() }));
     }
 
