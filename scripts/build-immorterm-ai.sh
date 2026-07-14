@@ -113,6 +113,7 @@ if [ -d "$EXT_DIR" ]; then
   # Also deploy terminal HTML resources (oxlint-checked in step 7)
   cp "$REPO_ROOT/apps/extension/resources/"*-terminal.html "$EXT_DIR/resources/" 2>/dev/null || true
   cp "$REPO_ROOT/apps/extension/resources/"*-terminal.css "$EXT_DIR/resources/" 2>/dev/null || true
+  cp "$REPO_ROOT/apps/extension/resources/gpu-terminal-"*.js "$EXT_DIR/resources/" 2>/dev/null || true
   # Resolve workspace symlinks in node_modules/@immorterm/ — bun links these
   # as relative symlinks that break when copied outside the monorepo.
   DEST_NM="$EXT_DIR/node_modules/@immorterm"
