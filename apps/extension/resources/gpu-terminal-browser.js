@@ -138,6 +138,18 @@ export function browserWorkshopCss() {
   display: block;
   outline: none;
 }
+/* Invisible keyboard/paste/click capture over the frame. Transparent text +
+   caret so the frame shows through; z-index below the Mort cursor/balloons.
+   pointer-events only while the human is driving, so Mort's cursor isn't
+   blocked during self-driven browsing. */
+.bw-capture {
+  position: absolute; inset: 0; z-index: 5;
+  width: 100%; height: 100%;
+  margin: 0; padding: 0; border: 0; resize: none;
+  background: transparent; color: transparent; caret-color: transparent;
+  outline: none; overflow: hidden; white-space: pre; cursor: crosshair;
+}
+.bw-root:not(.paused) .bw-capture { pointer-events: none; }
 .bw-root:not(.paused) .bw-frame { cursor: crosshair; }
 .bw-root.paused .bw-frame { cursor: crosshair; }
 /* Mort cursor overlay. */
@@ -220,7 +232,12 @@ export function browserWorkshopHtml(mortAvatarUrl) {
     <button class="bw-continue" type="button">✓ Done — continue</button>
   </div>
   <div class="bw-body">
-    <img class="bw-frame" tabindex="0" draggable="false" alt="Self-driven browser">
+    <img class="bw-frame" draggable="false" alt="Self-driven browser">
+    <!-- Transparent capture surface (like the terminal's hidden kbInput). A real
+         <textarea> is the ONLY element that reliably receives paste/copy/keydown
+         from real user input — a focused <img> does not. Only interactive while
+         the human is driving (pointer-events gated on .paused). -->
+    <textarea class="bw-capture" aria-hidden="true" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
     <div class="bw-mort-cursor">${MORT_CURSOR_SVG}</div>
     <div class="bw-balloons"></div>
   </div>
@@ -252,6 +269,7 @@ export function createBrowserController({ shadow, send }) {
   const continueBtn = q('.bw-continue');
   const mort = q('.bw-mort-cursor');
   const balloons = q('.bw-balloons');
+  const capture = q('.bw-capture');
 
   let lastSeq = -Infinity;
   let idleTimer = null;
@@ -269,7 +287,7 @@ export function createBrowserController({ shadow, send }) {
       mort.classList.remove('on');
     } else {
       hideBanner();
-      img.blur();
+      capture.blur();
     }
   }
   function showPauseBanner() {
@@ -309,27 +327,33 @@ export function createBrowserController({ shadow, send }) {
     return { x: Math.round(px), y: Math.round(py) };
   }
 
-  img.addEventListener('click', (ev) => {
+  // All keyboard/paste/copy/click capture happens on the transparent textarea
+  // overlay (`capture`), NOT the <img> — a non-editable <img> does not reliably
+  // receive paste/copy/keydown from real user input, which is why pasting into
+  // the frame silently failed. The textarea mirrors the terminal's kbInput.
+  capture.addEventListener('click', (ev) => {
     const p = mapToPageCss(ev);
     if (!p) return;
-    if (paused) img.focus();
+    if (paused) capture.focus();
     emit({ type: 'browser_input', kind: 'click', x: p.x, y: p.y });
   });
-  img.addEventListener('keydown', (ev) => {
+  capture.addEventListener('keydown', (ev) => {
     if (!paused) return;
-    if (ev.key === 'Escape') { img.blur(); return; }
-    // Let the browser's native paste/copy events fire (handled below) instead
-    // of forwarding a bare 'v'/'c' keystroke — clipboardData only reaches us
-    // via the paste/copy events under the user gesture.
+    if (ev.key === 'Escape') { capture.blur(); return; }
+    // Let the native paste/copy events fire (handled below) instead of
+    // forwarding a bare 'v'/'c' keystroke — clipboardData only reaches us via
+    // the paste/copy events under the user gesture.
     const accel = ev.metaKey || ev.ctrlKey;
     if (accel && (ev.key === 'v' || ev.key === 'c')) return;
     ev.preventDefault();
     emit({ type: 'browser_input', kind: 'key', key: ev.key });
   });
+  // Keep the textarea empty so typed/IME characters never accumulate visibly.
+  capture.addEventListener('input', () => { capture.value = ''; });
   // Paste: read text from the paste event's clipboardData (works under the user
   // gesture; navigator.clipboard.readText is blocked in webviews). preventDefault
   // + stopPropagation so the terminal's own Cmd+V handler doesn't also fire.
-  img.addEventListener('paste', (ev) => {
+  capture.addEventListener('paste', (ev) => {
     if (!paused) return;
     ev.preventDefault();
     ev.stopPropagation();
@@ -338,7 +362,7 @@ export function createBrowserController({ shadow, send }) {
   });
   // Copy: ask the daemon for the page selection; it replies over the control
   // channel and the host writes it to the clipboard (see applyCopy below).
-  img.addEventListener('copy', (ev) => {
+  capture.addEventListener('copy', (ev) => {
     if (!paused) return;
     ev.preventDefault();
     ev.stopPropagation();
@@ -419,7 +443,7 @@ export function createBrowserController({ shadow, send }) {
     root.classList.add('paused');
     toggleBtn.textContent = '▶ Continue';
     driverEl.textContent = "you're driving";
-    img.focus();
+    capture.focus();
   }
 
   // ── Mort cursor ───────────────────────────────────────────────
