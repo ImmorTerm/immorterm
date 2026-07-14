@@ -1,0 +1,163 @@
+---
+title: Desktop App
+description: The standalone ImmorTerm desktop app — a native AI terminal you install without VS Code, with OTA updates, windows, and project tabs.
+---
+
+## What it is
+
+The ImmorTerm desktop app is a native application (macOS, Linux, Windows) built
+on Tauri v2. It hosts the same GPU terminal as the VS Code extension —
+`gpu-terminal.html` plus the WASM engine — but as its own window instead of
+inside VS Code. You install it as a signed binary and run it on its own. No
+VS Code required.
+
+Under the hood the app is a thin native shell around shared terminal code. It
+spawns a local hub server, opens native windows, and points their webviews at
+the terminal HTML served over HTTP from that local hub (`http://localhost:1440`).
+The terminal UI is the exact same code the extension uses; the app just
+provides the window, tab, and menu host around it.
+
+- Product name: **ImmorTerm**
+- Bundle identifier: `com.immorterm.desktop`
+
+---
+
+## Install
+
+The app is distributed as a signed `.app` inside a `.dmg` — not through an App
+Store. The DMG is named `ImmorTerm_<version>_<arch>.dmg` and contains
+`ImmorTerm.app` plus an `/Applications` symlink.
+
+To install:
+
+1. Open the DMG.
+2. Drag `ImmorTerm.app` onto the `/Applications` folder.
+
+Builds are published to GitHub Releases. Bundles are produced per target:
+
+| Platform | Target |
+|---|---|
+| macOS (Apple silicon) | `darwin-aarch64` |
+| macOS (Intel) | `darwin-x86_64` |
+| Linux | `linux-x86_64` |
+
+Windows bundles are not published yet.
+
+---
+
+## Automatic updates (OTA)
+
+The desktop app updates itself over the air. It does not need a reinstall to
+pick up a new version.
+
+**How it works.** On boot the app quietly checks for a newer release. Updates
+are published as signed artifacts on GitHub Releases, described by a
+`latest.json` manifest on the newest release. The updater polls that manifest,
+downloads the artifact for your platform, verifies its signature against a
+public key embedded in the app, replaces the current install, and relaunches.
+Only correctly signed updates are ever applied.
+
+**What you see.** When an update is available, a dismissible banner appears in
+the tab strip showing the new version and its release notes. Choose **Update**
+to download it — a progress readout shows while it downloads — and the app
+relaunches into the new version when it finishes. Dismissing the banner only
+hides it for the current session; the app checks again on the next launch.
+
+**Sidecars.** The updater replaces the app bundle itself. The optional memory
+and MCP Gateway sidecars are handled separately: on each launch the app
+reconciles the installed sidecars against the versions the current build
+expects and downloads any that drift, in the background. Each download is
+verified by SHA256 before it replaces the old file. So an update that bumps the
+expected sidecar versions transparently pulls the new sidecar binaries on the
+next boot.
+
+---
+
+## Windows
+
+Each window is a native window (1200×800 by default, minimum 400×300). On
+macOS the title bar is transparent and the terminal fills the full window under
+the traffic lights.
+
+- **New window** — `Cmd+N` (`Ctrl+N` on Windows/Linux). Works even with no
+  windows currently open.
+- **Restore on launch** — when the app starts it reopens every window that had
+  saved tabs, so you come back to the layout you left.
+- **Closing the last window (macOS)** — the app keeps running when you close
+  the last window; it does not quit. Use `Cmd+Q` to quit fully.
+
+---
+
+## Project tabs and plain tabs
+
+Every window has a tab strip at the top and one terminal per tab. There are two
+kinds of tab:
+
+- **Project tab** (`Cmd+T`) — opens a project picker; pick a directory and the
+  tab becomes a full ImmorTerm terminal scoped to that project. Opening a
+  project that is already open just focuses its existing tab, and the directory
+  is automatically trusted.
+- **Plain terminal tab** (`Cmd+Shift+T`) — a bare terminal with none of the
+  ImmorTerm project side effects. Plain tabs are not deduplicated and are not
+  auto-trusted. This one is marked *coming soon* in the in-app help.
+
+Tabs are persisted to `~/.immorterm/tabs.json` per window, so they survive a
+restart. Switching between tabs is instant — the app keeps every tab's terminal
+alive and just brings the active one forward.
+
+### Keyboard shortcuts
+
+These are the window and tab shortcuts. On Windows and Linux, use `Ctrl` where
+the table shows `Cmd`.
+
+| Action | Shortcut |
+|---|---|
+| New window | `Cmd+N` |
+| New project tab (picker) | `Cmd+T` |
+| New plain terminal tab | `Cmd+Shift+T` |
+| Close current tab | `Cmd+W` |
+| Previous tab | `Ctrl+Shift+Left` |
+| Next tab | `Ctrl+Shift+Right` |
+| Reload current tab | `Cmd+R` |
+| Zoom in | `Cmd+=` |
+| Zoom out | `Cmd+-` |
+| Actual size (reset zoom) | `Cmd+0` |
+| Keyboard shortcuts help | `Cmd+/` |
+| Previous session (in a project) | `Shift+Up` |
+| Next session (in a project) | `Shift+Down` |
+| New session (in a project) | `Ctrl+Shift+A` |
+
+`Cmd+W` on the last tab closes the window. The tab-switch shortcuts use `Ctrl`
+even on macOS on purpose — the `Cmd` variants collide with macOS text
+selection.
+
+Zoom applies across every window and tab and is remembered between launches.
+
+---
+
+## First run
+
+The first time you launch the app it shows a short setup wizard instead of
+restoring windows. When you finish the wizard, the app opens its first window
+with the project picker so you choose a project before any terminal appears.
+
+---
+
+## How it differs from the VS Code extension
+
+Both use the same terminal engine — the identical shared terminal code. The
+difference is the host around it.
+
+| | VS Code extension | Desktop app |
+|---|---|---|
+| **Where the terminal lives** | Inside a VS Code webview | In its own native window |
+| **Requires VS Code** | Yes | No |
+| **Windows and tabs** | Managed by VS Code | Native windows (`Cmd+N`) and its own tab strip (`Cmd+T` / `Cmd+Shift+T`), persisted to `~/.immorterm/tabs.json` |
+| **Menu bar** | VS Code's | Its own native menu with shortcuts |
+| **Clipboard** | VS Code API | Native clipboard |
+| **The local hub** | Owned by the extension | The app spawns and owns its own hub |
+| **Updates** | Through the VS Code extension | Built-in OTA auto-updater |
+| **Optional sidecars** | Installed separately | Downloaded on demand (memory, MCP Gateway) |
+
+The net: the desktop app is a self-contained AI terminal you install as a
+native binary, with no VS Code needed.
