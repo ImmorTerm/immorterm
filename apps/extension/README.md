@@ -1,388 +1,177 @@
 <p align="center">
-  <img src="resources/icon.png" alt="ImmorTerm Logo" width="128">
+  <img src="https://raw.githubusercontent.com/ImmorTerm/immorterm/main/apps/extension/resources/icon.png" alt="ImmorTerm" width="128">
 </p>
 
 # ImmorTerm
 
-**Immortal terminals that survive VS Code crashes, restarts, and updates.**
+**Your terminal sessions survive VS Code crashes and restarts — and your AI remembers every session.**
 
-Never lose your terminal session, running processes, or scroll history again. ImmorTerm uses GNU Screen to persist your terminals across VS Code restarts, crashes, and system reboots.
+Kick off a long build, then watch VS Code crash. Reopen it: the terminal is exactly where you left it — same scrollback, same running process — and it reconnects on its own. Your sessions live in a separate persistent process (the native ImmorTerm engine), so when the editor dies, they don't notice.
+
+Optionally, ImmorTerm also gives your Claude Code sessions a local memory. Decisions, bug root-causes, and code changes are captured on your machine and recalled the next time you (or Claude) start work — the context is already there before you ask.
 
 ## Features
 
-- **Session Persistence**: Terminals survive VS Code crashes, restarts, and updates
-- **Auto-Restore**: Terminals automatically restore when you reopen VS Code
-- **Full History**: Scroll history and running processes are preserved
-- **Zero Configuration**: Works out of the box with sensible defaults
-- **Status Bar**: Quick glance at terminal count and Screen status
-- **Graceful Degradation**: Still works without Screen (no persistence)
-- **Claude Code Memory** *(Optional)*: Give Claude Code persistent memory across sessions
-
-## Claude Code Memory Services
-
-ImmorTerm can optionally provide **persistent memory** for Claude Code, allowing it to remember context, decisions, and learnings across sessions.
-
-### What It Does
-
-When you run Claude Code in an ImmorTerm terminal, the memory services:
-
-1. **Session Context Loading**: When Claude starts, relevant memories from previous sessions are automatically loaded
-2. **Decision Tracking**: Approved plans and architectural decisions are stored for future reference
-3. **Semantic Search**: Claude can search past conversations by meaning, not just keywords
-4. **Project Isolation**: Each project has its own memory namespace - no cross-project contamination
-
-### How It Works
-
-ImmorTerm uses **Claude Code's built-in hooks system** to inject memories into Claude's context automatically.
-
-**The Setup:**
-```
-.claude/
-├── hooks.json              # Tells Claude when to run hooks
-└── hooks/
-    ├── session-context-loader.sh   # Runs on SessionStart
-    └── plan-approval-saver.sh      # Runs on plan approval
-```
-
-**The Flow:**
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  1. LOADING MEMORIES (SessionStart)                             │
-│                                                                 │
-│  You run: claude                                                │
-│           │                                                     │
-│           ▼                                                     │
-│  Claude Code triggers SessionStart hook                         │
-│           │                                                     │
-│           ▼                                                     │
-│  session-context-loader.sh queries Qdrant                       │
-│           │                                                     │
-│           ▼                                                     │
-│  Outputs <memory-context>...</memory-context>                   │
-│           │                                                     │
-│           ▼                                                     │
-│  Claude sees memories as part of its initial context!           │
-└─────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────┐
-│  2. SAVING MEMORIES (Plan Approval)                             │
-│                                                                 │
-│  Claude creates a plan and you approve it                       │
-│           │                                                     │
-│           ▼                                                     │
-│  Claude calls ExitPlanMode tool                                 │
-│           │                                                     │
-│           ▼                                                     │
-│  plan-approval-saver.sh receives plan content                   │
-│           │                                                     │
-│           ▼                                                     │
-│  Ollama creates embedding (semantic fingerprint)                │
-│           │                                                     │
-│           ▼                                                     │
-│  Stored in Qdrant with timestamp & metadata                     │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-**What Claude Sees:**
-
-When you start a new Claude session, it automatically receives context like:
-```
-<memory-context>
-# Project Memories (from previous sessions)
-
-## decision (2024-02-09T10:30:00Z)
-We decided to use JWT tokens with refresh rotation for auth.
-The implementation is in src/auth/jwt-handler.ts.
-
-## decision (2024-02-08T15:45:00Z)
-Database schema uses soft deletes with deleted_at timestamps.
-</memory-context>
-```
-
-**Components:**
-- **Ollama**: Runs locally to generate embeddings (768-dimensional vectors representing semantic meaning)
-- **Qdrant**: Vector database that stores memories and finds similar ones by meaning
-- **Claude Hooks**: Shell scripts that bridge Claude Code ↔ memory services
-
-### Enabling Memory Services
-
-1. Run command: `ImmorTerm: Enable for This Project`
-2. Select a theme for your terminal status bar
-3. Choose which services to enable:
-   - **Persistent Memory** *(Recommended)*: Semantic search for decisions & context (~200 MB RAM)
-   - **Relationship Tracking** *(Optional)*: Graph database for cause→effect chains (~1-2 GB additional RAM)
-4. ImmorTerm validates all services are running and installs the necessary hooks
-
-### Requirements for Memory
-
-| Service | Purpose | Installation |
-|---------|---------|--------------|
-| **Ollama** | Local embeddings | `brew install ollama && ollama serve` |
-| **Qdrant** | Vector search | Auto-downloaded by ImmorTerm |
-| **Neo4j** *(optional)* | Relationship graphs | `brew install neo4j` |
-
-### Memory Status Indicators
-
-- **Status Bar**: Shows 🧠 when memory services are active
-- **Terminal**: AI stats show `AI: 312M 1% 6h20m 🧠` when memory is functioning
-- **Show Status**: Displays detailed memory service health
-
-### Disabling Memory
-
-Run `ImmorTerm: Configure Services` to disable memory services. This removes:
-- Claude hooks from `.claude/hooks/`
-- Memory settings from workspace
-
-Note: Your stored memories in Qdrant are preserved and can be re-enabled later.
-
-## Requirements
-
-### GNU Screen (Required for Persistence)
-
-ImmorTerm requires GNU Screen to persist terminals. Install it for your platform:
-
-**macOS:**
-```bash
-brew install screen
-```
-
-**Ubuntu/Debian:**
-```bash
-sudo apt-get install screen
-```
-
-**RHEL/CentOS/Fedora:**
-```bash
-sudo yum install screen
-# or
-sudo dnf install screen
-```
-
-**Arch Linux:**
-```bash
-sudo pacman -S screen
-```
-
-> **Note**: ImmorTerm works without Screen installed, but terminals will not persist across VS Code restarts.
+- **Persistent sessions** — terminals outlive VS Code crashes, restarts, and updates
+- **Auto-reconnect** — sessions reattach when you reopen VS Code; scrollback and live processes intact
+- **GPU-rendered terminal** — the ImmorTerm engine (Rust + WebGPU) renders fast and smooth
+- **Zero configuration** — works out of the box with sensible defaults
+- **Themed status bar** — terminal count and session health at a glance
+- **AI memory** *(optional)* — persistent, local memory for Claude Code across sessions
 
 ## Installation
 
-1. Open VS Code
-2. Go to Extensions (Ctrl+Shift+X / Cmd+Shift+X)
-3. Search for "ImmorTerm"
-4. Click Install
-5. Reload VS Code
+**1. Run the setup wizard** (installs the extension and the terminal engine — no separate binary to install):
 
-That's it! Your terminals are now immortal.
+```bash
+npx immorterm init
+```
+
+**2. Open your project in VS Code.** ImmorTerm asks *"Enable ImmorTerm for this project?"* — click **Enable**, pick a status-bar theme, and your terminals are persistent.
+
+That's it. Open terminals as usual; ImmorTerm handles the rest.
+
+> You can also install the extension directly from the VS Code Marketplace or Open VSX by searching for **ImmorTerm**, then run `npx immorterm init` to finish setup.
 
 ## Usage
 
-### Basic Usage
-
-Simply open terminals as usual. ImmorTerm automatically:
-- Creates a Screen session for each terminal
-- Persists scroll history and running processes
-- Restores terminals when VS Code restarts
-
-### Commands
-
-Open the Command Palette (Ctrl+Shift+P / Cmd+Shift+P) and type "ImmorTerm":
+Open the Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`) and type "ImmorTerm":
 
 | Command | Description |
 |---------|-------------|
-| **ImmorTerm: Show Status** | View all terminals and their status |
+| **ImmorTerm: New Terminal** | Open a new persistent terminal |
+| **ImmorTerm: Show Status** | View all sessions and their health |
+| **ImmorTerm: Reattach Shelved Terminal** | Bring back a shelved session |
+| **ImmorTerm: Rename Terminal** | Rename the active terminal |
 | **ImmorTerm: Forget Current Terminal** | Stop persisting the active terminal |
 | **ImmorTerm: Forget All Terminals** | Stop persisting all terminals |
-| **ImmorTerm: Cleanup Stale Sessions** | Remove orphaned Screen sessions |
-| **ImmorTerm: Kill All Screen Sessions** | Kill all project Screen sessions |
-| **ImmorTerm: Sync Now** | Manually sync terminal names |
-| **ImmorTerm: Migrate from v2** | Migrate from previous version |
-| **ImmorTerm: Enable for This Project** | Set up ImmorTerm with theme and memory |
-| **ImmorTerm: Disable for This Project** | Remove ImmorTerm and all its files |
-| **ImmorTerm: Configure Services** | Enable/disable memory services |
-| **ImmorTerm: Apply Theme** | Change the terminal status bar theme |
+| **ImmorTerm: Cleanup Stale Sessions** | Remove orphaned sessions |
+| **ImmorTerm: Enable for This Project** | Set up ImmorTerm (theme + memory) |
+| **ImmorTerm: Disable for This Project** | Remove ImmorTerm and its files |
+| **ImmorTerm: Set Theme for This Project** | Change the status-bar theme |
+| **ImmorTerm: Configure Memory Services** | Enable or disable AI memory |
+| **ImmorTerm: Run Memory Doctor (Diagnostics)** | Check memory service health |
 
-### Keyboard Shortcuts
+### Keyboard shortcuts
 
-| Shortcut | Command | When |
-|----------|---------|------|
-| `Ctrl+Shift+Q Q` | Forget Current Terminal | Terminal focused |
-| `Ctrl+Shift+Q A` | Forget All Terminals | Terminal focused |
+| Shortcut | Command |
+|----------|---------|
+| `Ctrl+Shift+Backtick` | New Terminal |
+| `Ctrl+Shift+Q Q` | Forget Current Terminal *(terminal focused)* |
+| `Ctrl+Shift+Q A` | Forget All Terminals *(terminal focused)* |
+| `Ctrl+Shift+T` | New Task |
+
+## AI Memory for Claude Code *(optional)*
+
+Run Claude Code inside an ImmorTerm terminal and it gets a memory that persists across sessions — all local, no cloud, no Docker.
+
+**What it does:**
+
+1. **Recall on start** — when Claude starts, relevant memories from past sessions load into its context automatically, in about 8ms.
+2. **Captures decisions** — approved plans, architectural decisions, and code changes are stored as you work.
+3. **Semantic search** — Claude searches past sessions by meaning, not just keywords.
+4. **Project isolation** — each project has its own memory partition; no cross-project bleed.
+
+**How it works:** ImmorTerm installs [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) that run on session start and on plan approval. Memories live in a native memory binary (~15 MB) in `~/.immorterm/bin/` — SQLite storage with on-device embeddings, served to Claude over MCP. When you start a session, Claude receives a block like:
+
+```
+<memory-context>
+## decision (2026-02-09)
+We chose JWT with rotating refresh tokens for auth. Implementation in src/auth/jwt-handler.ts.
+
+## decision (2026-02-08)
+Database uses soft deletes with deleted_at timestamps.
+</memory-context>
+```
+
+**Enable it:**
+
+1. Run **ImmorTerm: Configure Memory Services** (or choose it during `npx immorterm init`).
+2. The native memory binary downloads to `~/.immorterm/bin/` and hooks are installed automatically.
+3. The status bar shows 🧠 when memory is active. Run **ImmorTerm: Run Memory Doctor** to check health.
+
+To turn it off, run **ImmorTerm: Configure Memory Services** again. Your stored memories are preserved and can be re-enabled later.
 
 ## Configuration
 
-Access settings via File > Preferences > Settings > Extensions > ImmorTerm
+Settings live under **Settings → Extensions → ImmorTerm**.
 
-### Screen Settings
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `immorterm.scrollbackBuffer` | 50000 | Lines in Screen scrollback buffer |
-| `immorterm.historyOnAttach` | 20000 | Lines shown when reattaching |
-
-### Terminal Restoration
+### Sessions
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `immorterm.restoreOnStartup` | true | Auto-restore terminals on VS Code start |
-| `immorterm.terminalRestoreDelay` | 800 | Delay (ms) between terminal restorations |
-
-### Log Management
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `immorterm.maxLogSizeMb` | 300 | Max total log size before cleanup |
-| `immorterm.logRetainLines` | 50000 | Lines to keep when truncating |
+| `immorterm.restoreOnStartup` | `true` | Auto-reconnect sessions when VS Code starts |
+| `immorterm.terminalRestoreDelay` | `200` | Delay (ms) between session reconnections |
+| `immorterm.scrollbackBuffer` | `50000` | Lines kept in the scrollback buffer |
+| `immorterm.historyOnAttach` | `20000` | Lines shown when a session reattaches |
+| `immorterm.closeAction` | `shelve` | What happens when you close a terminal |
+| `immorterm.shelvedSessionTtl` | `24` | Hours a shelved session is kept before cleanup |
 
 ### Behavior
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `immorterm.closeGracePeriod` | 60000 | Wait (ms) before cleanup on close |
-| `immorterm.autoCleanupStale` | true | Auto-cleanup orphaned sessions |
-| `immorterm.statusBarEnabled` | true | Show status bar item |
+| `immorterm.autoCleanupStale` | `true` | Auto-clean orphaned sessions |
+| `immorterm.closeGracePeriod` | `60000` | Wait (ms) before cleanup on close |
+| `immorterm.statusBarEnabled` | `true` | Show the status-bar item |
+| `immorterm.statusBarTheme` | `Purple Haze` | Status-bar theme |
 | `immorterm.namingPattern` | `immorterm-${n}` | Pattern for terminal names |
 
-### Memory Services
+### Memory & logs
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `immorterm.services.memory.enabled` | false | Enable persistent memory (Qdrant + Ollama) |
-| `immorterm.services.graph.enabled` | false | Enable relationship tracking (Neo4j) |
-
-### Debugging
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `immorterm.enableDebugLog` | false | Enable verbose logging |
-
-## Migrating from v2
-
-If you're upgrading from ImmorTerm v2:
-
-1. Open VS Code with your project
-2. A migration prompt will appear automatically
-3. Click "Migrate Now" to transfer your terminals
-4. Your existing Screen sessions are preserved
-5. A backup of v2 configuration is created
-
-You can also trigger migration manually:
-1. Open Command Palette (Ctrl+Shift+P / Cmd+Shift+P)
-2. Run "ImmorTerm: Migrate from v2"
+| `immorterm.services.memory.enabled` | `false` | Enable local AI memory for Claude Code |
+| `immorterm.services.mcpGateway.enabled` | `false` | Enable the shared MCP gateway |
+| `immorterm.maxLogSizeMb` | `300` | Max total log size before cleanup |
+| `immorterm.logRetainLines` | `50000` | Lines to keep when truncating logs |
+| `immorterm.enableDebugLog` | `false` | Verbose logging |
 
 ## Troubleshooting
 
-### Terminals Not Persisting
+**Sessions not reconnecting**
+- Check the status bar shows a session count. Run **ImmorTerm: Show Status** for details.
+- Ensure `immorterm.restoreOnStartup` is `true`.
+- Open the Output panel (**View → Output**), select "ImmorTerm", and check for errors.
 
-1. **Check Screen is installed:**
-   ```bash
-   which screen
-   ```
-   If not found, install Screen (see Requirements above)
+**Status bar not showing**
+- Ensure `immorterm.statusBarEnabled` is `true`, then run **Developer: Reload Window**.
 
-2. **Check status bar:**
-   - Should show terminal count if Screen is working
-   - Shows warning icon if Screen is missing
+**Memory not working**
+- Run **ImmorTerm: Run Memory Doctor (Diagnostics)** — it reports which service is down and why.
+- Confirm `immorterm.services.memory.enabled` is `true`.
+- Look for 🧠 in the status bar; if it's missing, run **ImmorTerm: Configure Memory Services** to re-enable.
 
-3. **View logs:**
-   - Open Output panel (View > Output)
-   - Select "ImmorTerm" from dropdown
-   - Check for error messages
+**Performance**
+- Lower `immorterm.scrollbackBuffer` (e.g. `10000`) and `immorterm.historyOnAttach` (e.g. `5000`).
 
-### Screen Sessions Not Restored
+## How it works
 
-1. **Verify Screen sessions exist:**
-   ```bash
-   screen -ls
-   ```
+1. **Separate process** — each terminal runs against the native ImmorTerm engine, a persistent process independent of VS Code.
+2. **Editor dies, session doesn't** — when VS Code crashes or restarts, the engine keeps running with your scrollback and live processes.
+3. **Reattach** — on restart, ImmorTerm reconnects to the running sessions. Nothing is restored, because nothing was lost.
+4. **Cleanup** — stale sessions are cleaned up on a schedule (configurable).
 
-2. **Check restore setting:**
-   - Ensure `immorterm.restoreOnStartup` is `true`
+## Data storage
 
-3. **Try manual cleanup:**
-   - Run "ImmorTerm: Cleanup Stale Sessions"
-   - Restart VS Code
+- **VS Code workspace state** — the session registry (survives restarts)
+- `.immorterm/` (per project) — session registry, hooks, and logs
+- `~/.immorterm/` — global config and, if memory is enabled, the memory binary and its SQLite store
 
-### Status Bar Not Showing
+## Requirements
 
-1. **Check setting:**
-   - Ensure `immorterm.statusBarEnabled` is `true`
-
-2. **Reload VS Code:**
-   - Run "Developer: Reload Window"
-
-### Performance Issues
-
-1. **Reduce scrollback:**
-   - Lower `immorterm.scrollbackBuffer` (e.g., 10000)
-
-2. **Reduce history on attach:**
-   - Lower `immorterm.historyOnAttach` (e.g., 5000)
-
-3. **Increase restore delay:**
-   - Increase `immorterm.terminalRestoreDelay` (e.g., 1500)
-
-### Memory Services Not Working
-
-1. **Ollama not running:**
-   ```bash
-   # Check if Ollama is running
-   curl http://localhost:11434/api/version
-
-   # Start Ollama
-   ollama serve
-   ```
-
-2. **Qdrant not starting:**
-   ```bash
-   # Check if Qdrant is running
-   curl http://localhost:16333/
-
-   # ImmorTerm auto-downloads Qdrant to ~/.immorterm/bin/
-   # Try reloading VS Code to trigger download
-   ```
-
-3. **No 🧠 in status bar:**
-   - Ensure memory is enabled: Check `immorterm.services.memory.enabled` in settings
-   - Run `ImmorTerm: Show Status` to see detailed service health
-   - Run `ImmorTerm: Configure Services` to re-enable
-
-4. **Embedding model not found:**
-   ```bash
-   # Pull the embedding model
-   ollama pull nomic-embed-text
-   ```
-
-## How It Works
-
-1. **Terminal Creation**: When you open a terminal, ImmorTerm creates a Screen session
-2. **Session Naming**: Sessions are named `{project}-{uniqueId}` for isolation
-3. **Persistence**: Screen runs in the background, independent of VS Code
-4. **Restoration**: On VS Code restart, ImmorTerm reattaches to existing sessions
-5. **Cleanup**: Stale sessions are automatically cleaned up (configurable)
-
-## Data Storage
-
-ImmorTerm stores terminal state in:
-- **VS Code workspaceState**: Terminal registry (survives VS Code restarts)
-- `.vscode/terminals/`: Scripts and configuration
-- `.vscode/terminals/logs/`: Terminal log files
-
-## Known Issues
-
-- Terminal names may not update immediately after rename (use "Sync Now")
-- Screen must be installed before extension activation for full functionality
-- Windows is not supported (Screen requires Unix-like environment)
+- macOS or Linux
+- VS Code
+- Optional AI memory: no extra install — the memory binary downloads automatically when you enable it
 
 ## Contributing
 
-Issues and pull requests welcome at [GitHub](https://github.com/ImmorTerm/immorterm).
+Issues and pull requests welcome at [github.com/ImmorTerm/immorterm](https://github.com/ImmorTerm/immorterm).
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+See [LICENSE](LICENSE) for details.
 
 ---
 
-**Made with persistence by lonormaly**
+Mort keeps things running. It's not hard when you're an axolotl. — **ImmorTerm**
