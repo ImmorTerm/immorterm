@@ -20,6 +20,12 @@
 
 'use strict';
 
+// Shared input pipeline — the EXACT same keyboard/mouse/paste/IME handling
+// as the main terminal (see gpu-terminal-input.js). Resolved relative to
+// this module's own URL so it works from both the VS Code webview
+// (asWebviewUri) and the standalone relative path.
+import { createTerminalInput } from './gpu-terminal-input.js';
+
 // ── Panel HTML (light DOM — canvas must be reachable by getElementById) ──
 // canvasId is per-controller: with one scratch per session, several panels
 // can coexist and init_gpu looks its canvas up by id.
@@ -33,6 +39,10 @@ function scratchPanelHtml(canvasId) {
   </div>
   <div class="scratch-body">
     <canvas id="${canvasId}"></canvas>
+    <!-- Click-to-cursor teleport visuals (same elements as the main
+         terminal's #phantom-cursor / #cursor-mask, scoped to this panel). -->
+    <div class="scratch-cursor-mask" style="position:absolute;pointer-events:none;z-index:5;display:none;background:var(--vscode-terminal-background,#000);color:#fff;font-family:var(--vscode-editor-font-family,monospace);line-height:1;white-space:pre;overflow:hidden;transition:none;text-decoration:none;text-align:left;padding:0;margin:0;border:0;"></div>
+    <div class="scratch-phantom-cursor" style="position:absolute;pointer-events:none;z-index:6;display:none;background:rgba(255,255,255,0.85);mix-blend-mode:difference;transition:none;"></div>
     <!-- Transparent capture surface (mirrors the terminal's hidden kbInput /
          the browser panel's bw-capture): a real <textarea> is the only element
          that reliably receives keydown/paste from real user input. -->
@@ -76,10 +86,12 @@ function waitForDims(canvas, maxMs = 10000) {
 // @param onDestroy   ()=>void — host clears its controller reference
 // @param onHide      ()=>void — host returns focus to the main terminal
 //                    whenever the panel minimizes (✕, blur, outside click)
+// @param openLink    (link)=>void — Cmd/Ctrl+click link opener (host's
+//                    postMessage transport, same one the main terminal uses)
 export async function createScratchController({
   wasmModule, wsPort, scratchName,
   fontData, fontName, fontSize, lineHeight, fontWeight,
-  applyColors, sendKill, onDestroy, onHide,
+  applyColors, sendKill, onDestroy, onHide, openLink,
 }) {
   // ── Panel DOM ─────────────────────────────────────────────────
   // Canvas id must be unique per controller — scratchName is
@@ -264,182 +276,43 @@ export async function createScratchController({
   });
   ro.observe(body);
 
-  // ── Keyboard capture (mirrors kbInput's handle_key → input_raw) ──
-  capture.addEventListener('keydown', (e) => {
-    // Cmd/Ctrl+C with selection = copy (rich + plain). Selection is
-    // intentionally preserved after copy — same rationale as the main
-    // terminal's Cmd+C handler (repeat-press-to-confirm habit).
-    if ((e.metaKey || e.ctrlKey) && e.key === 'c' && term.has_selection()) {
-      const text = term.get_selected_text();
-      const html = term.get_selected_html();
-      if (text) {
-        // Same fallback chain as main: rich ClipboardItem → Tauri plugin
-        // (WKWebView flake) → navigator.clipboard.writeText.
-        const tcb = window.__TAURI__ && window.__TAURI__.clipboardManager;
-        const writeRich = () => navigator.clipboard.write([new ClipboardItem({
-          'text/plain': new Blob([text], { type: 'text/plain' }),
-          'text/html': new Blob([html || text], { type: 'text/html' }),
-        })]);
-        const writePlain = () => (tcb && typeof tcb.writeText === 'function')
-          ? tcb.writeText(text)
-          : navigator.clipboard.writeText(text);
-        writeRich().catch(() => writePlain()).catch(() => { /* clipboard unavailable */ });
-      }
-      e.preventDefault();
-      return;
-    }
-    // Keyboard selection: Shift+Arrow (+Alt = word, +Cmd = home/end) —
-    // same dir mapping as main, minus its pseudo-cursor branch.
-    if (e.shiftKey && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
-      let dir;
-      if (e.metaKey) {
-        dir = e.key === 'ArrowLeft' ? 'home' : e.key === 'ArrowRight' ? 'end' : e.key === 'ArrowUp' ? 'up' : 'down';
-      } else if (e.altKey) {
-        dir = e.key === 'ArrowLeft' ? 'word_left' : e.key === 'ArrowRight' ? 'word_right' : e.key === 'ArrowUp' ? 'up' : 'down';
-      } else {
-        dir = e.key === 'ArrowLeft' ? 'left' : e.key === 'ArrowRight' ? 'right' : e.key === 'ArrowUp' ? 'up' : 'down';
-      }
-      term.selection_extend(dir);
-      dirty = true;
-      e.preventDefault();
-      return;
-    }
-    // Cmd+Arrow = Home/End (readline Ctrl+A / Ctrl+E — same as main).
-    if (e.metaKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
-      sendWs({ type: 'input_raw', data: btoa(e.key === 'ArrowLeft' ? '\x01' : '\x05') });
-      e.preventDefault();
-      return;
-    }
-    // Remaining Cmd-modified keys pass through to the host app (zoom,
-    // find, Cmd+V — which reaches us as a native `paste` event on this
-    // textarea) — same rule as the main terminal's kbInput.
-    if (e.metaKey) return;
-    // Clear selection on non-modifier keystrokes (standard input behavior).
-    if (term.has_selection() && !['Shift', 'Meta', 'Alt', 'Control', 'CapsLock'].includes(e.key)) {
-      term.selection_clear();
-      dirty = true;
-    }
-    const bytes = term.handle_key(e.key, e.ctrlKey, e.shiftKey, e.altKey);
-    if (bytes.length > 0) {
-      const b64 = btoa(String.fromCharCode(...bytes));
-      sendWs({ type: 'input_raw', data: b64 });
-    }
-    dirty = true;
-    e.preventDefault();
-  });
-  // ── IME / dictation (mirrors kbInput's composition handlers, minus the
-  // composition-view overlay + selection-replace, which are main-only) ──
-  let composing = false;
-  capture.addEventListener('compositionstart', () => { composing = true; });
-  capture.addEventListener('compositionend', (e) => {
-    composing = false;
-    const text = e.data || '';
-    capture.value = '';
-    if (text) sendWs({ type: 'input', data: text });
-  });
-  // beforeinput fallback for inputs that bypass composition entirely —
-  // same two inputTypes the main terminal special-cases.
-  capture.addEventListener('beforeinput', (e) => {
-    if (composing) return;
-    if (e.inputType !== 'insertReplacementText' && e.inputType !== 'insertFromDictation') return;
-    e.preventDefault();
-    const text = e.data || '';
-    capture.value = '';
-    if (text) sendWs({ type: 'input', data: text });
-  });
-  // Drop chars the textarea accumulates from un-prevented keystrokes —
-  // but never mid-composition (clearing cancels the IME string).
-  capture.addEventListener('input', () => { if (!composing) capture.value = ''; });
-  capture.addEventListener('paste', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    // Same message shape as main's pasteText ({type:'input'}, no client-side
-    // bracketing). Image paste ([Image #N] pills) is main-terminal-only for now.
-    const text = e.clipboardData && e.clipboardData.getData('text');
-    if (text) sendWs({ type: 'input', data: text });
-  });
-  // Wheel → local scrollback (positive scroll() = up into history).
-  let scrollAccum = 0;
-  body.addEventListener('wheel', (e) => {
-    e.preventDefault();
-    const cell = term.cell_size_device ? (term.cell_size_device()[1] / (window.devicePixelRatio || 1)) : 16;
-    scrollAccum += e.deltaMode === 1 ? e.deltaY : e.deltaY / (cell || 16);
-    const lines = Math.trunc(scrollAccum);
-    if (lines !== 0) {
-      term.scroll(-lines);
-      scrollAccum -= lines;
-      dirty = true;
-    }
-  }, { passive: false });
-  // ── Mouse selection (mirrors the main canvas pointer handlers) ──
-  // Listeners live on `body` because the transparent capture textarea
-  // overlays the canvas and receives the raw pointer events; coordinates
-  // are computed against the canvas rect (same area). Drag = line
-  // selection, Alt+drag = block, dbl-click = word, triple-click = line.
-  // The main terminal never forwards mouse events to the PTY (it has no
-  // mouse-tracking path), so neither do we.
-  // ponytail: skipped vs main — link-click, AI buttons, scroll-indicator
-  // drag, click-to-cursor teleport, pseudo-cursors, drag auto-scroll.
-  const DRAG_THRESHOLD = 3; // px of movement before a drag starts a selection
-  const DBLCLICK_MS = 400;  // max ms between clicks to count as multi-click
-  let mouseDownPos = null;  // {x, y, altKey, dragged} of initial pointerdown
-  let lastClickTime = 0;
-  let clickCount = 0;       // 1=single, 2=double (word), 3=triple (line)
-  body.addEventListener('pointerdown', (e) => {
-    if (destroyed || e.button !== 0) return;
+  // ── Input pipeline (shared with the main terminal) ─────────────
+  // EXACT input parity: keyboard (multi-cursor, keyboard selection,
+  // readline shortcuts, type-to-replace), rich copy, paste, IME, mouse
+  // selection (drag/word/line/block), scroll-thumb drag, drag auto-scroll,
+  // wheel, click-to-cursor teleport, Cmd+hover/Cmd+click links, context
+  // menu suppression. Pointer/mouse listeners land on `body` because the
+  // transparent capture textarea overlays the canvas; coordinates are
+  // computed against the canvas rect (same area).
+  // No host hooks: bullets/comments/pills wizards, paste-undo, AI buttons,
+  // image paste, and daemon scrollback fetch are main-terminal-only.
+  const phantomEl = panel.querySelector('.scratch-phantom-cursor');
+  const maskEl = panel.querySelector('.scratch-cursor-mask');
+  const input = createTerminalInput({
+    getTerm: () => (destroyed ? null : term),
+    canvas,
+    keyTarget: capture,
+    pointerTarget: body,
+    getWs: () => (ws && ws.readyState === WebSocket.OPEN) ? ws : null,
+    markDirty: () => { dirty = true; },
+    isReady: () => !destroyed,
     // Keep the capture textarea focused so keydown/paste keep working.
-    setTimeout(() => { if (!destroyed) capture.focus({ preventScroll: true }); }, 0);
-    const rect = canvas.getBoundingClientRect();
-    const cssX = e.clientX - rect.left;
-    const cssY = e.clientY - rect.top;
-    const now = Date.now();
-    clickCount = (now - lastClickTime < DBLCLICK_MS) ? clickCount + 1 : 1;
-    lastClickTime = now;
-    if (clickCount === 2) {
-      try { term.select_word_at(cssX, cssY); } catch (_) { /* best effort */ }
-      dirty = true;
-      e.preventDefault();
-      return;
-    }
-    if (clickCount >= 3) {
-      clickCount = 0;
-      try { term.select_line_at(cssX, cssY); } catch (_) { /* best effort */ }
-      dirty = true;
-      e.preventDefault();
-      return;
-    }
-    mouseDownPos = { x: cssX, y: cssY, altKey: e.altKey, dragged: false };
-    body.setPointerCapture(e.pointerId);
-    // Regular click clears the previous selection (same as main).
-    if (!e.altKey && term.has_selection()) {
-      term.selection_clear();
-      dirty = true;
-    }
-    // Don't call selection_start yet — wait for the drag threshold.
+    focus: () => setTimeout(() => { if (!destroyed) capture.focus({ preventScroll: true }); }, 0),
+    getCellSize: () => {
+      const dpr = window.devicePixelRatio || 1;
+      const cs = (term && term.cell_size_device) ? term.cell_size_device() : null;
+      return cs ? { w: cs[0] / dpr, h: cs[1] / dpr } : { w: 8, h: 16 };
+    },
+    openLink, // host postMessage transport — same mechanism as main
+    phantomEl, maskEl,
+    scrollProximity: true,
+    hooks: {
+      // Cursor feedback on the capture textarea (it overlays the canvas,
+      // so the canvas cursor style would never be visible).
+      linkHover: () => { capture.style.cursor = 'pointer'; },
+      linkHoverEnd: () => { capture.style.cursor = ''; },
+    },
   });
-  body.addEventListener('pointermove', (e) => {
-    if (destroyed || !mouseDownPos) return;
-    const rect = canvas.getBoundingClientRect();
-    const cx = e.clientX - rect.left;
-    const cy = e.clientY - rect.top;
-    const needsStart = mouseDownPos.altKey ? !mouseDownPos.dragged : !term.has_selection();
-    if (needsStart) {
-      if (Math.abs(cx - mouseDownPos.x) < DRAG_THRESHOLD
-          && Math.abs(cy - mouseDownPos.y) < DRAG_THRESHOLD) return;
-      // Threshold exceeded — start from the original pointerdown point.
-      // Alt+drag = block (rectangular) selection; regular drag = line.
-      try {
-        if (mouseDownPos.altKey) term.selection_start_block(mouseDownPos.x, mouseDownPos.y);
-        else term.selection_start(mouseDownPos.x, mouseDownPos.y);
-        mouseDownPos.dragged = true;
-      } catch (_) { return; } // re-entrant start — same guard as main
-    }
-    term.selection_update(cx, cy);
-    dirty = true;
-  });
-  body.addEventListener('pointerup', () => { mouseDownPos = null; });
-  // Suppress the webview context menu over the terminal (same as main).
-  body.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); });
 
   // ── Drag (header) + CSS `resize: both` handle ─────────────────
   // The panel is CSS-centered via translate(-50%,-50%); both dragging and
@@ -513,6 +386,7 @@ export async function createScratchController({
   function destroy() {
     if (destroyed) return;
     destroyed = true;
+    input.dispose(); // remove window-level pointerup/keyup listeners + timers
     if (rafId) cancelAnimationFrame(rafId);
     if (sizeTimer) clearTimeout(sizeTimer);
     ro.disconnect();

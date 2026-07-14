@@ -3608,17 +3608,13 @@
     let bulletWizard = { active: false, ranges: [], idx: 0, stagedIds: [] };
     let pendingPtyChunks = []; // buffered binary WS data — drained in renderLoop
     let pendingPtyLen = 0;     // total bytes buffered (for prealloc)
-    let mouseDown = false;
+    // NOTE: mouse-down / drag / multi-cursor / scroll-accumulator state now
+    // lives inside gpu-terminal-input.js (termInput). Query via
+    // termInput.isMouseDown() / termInput.isComposing().
     let userScrollLock = false; // true when user scrolled up — suppresses auto-scroll
-    let scrollAccumulator = 0;  // fractional line accumulator for smooth trackpad scrolling
     let serverScrollbackTotal = 0; // total scrollback rows on the daemon (for on-demand fetch)
     let daemonFetchedRows = 0;     // daemon rows consumed (may differ from local count after reflow)
     let scrollRequestPending = false; // debounce: true while waiting for scrollback_rows response
-    let lastClickPos = null;    // {x, y} CSS coords of last click — used as Shift+Arrow anchor
-    // Alt double-tap detection for vertical multi-cursor
-    let altTapCount = 0;
-    let altTapTimer = null;
-    let verticalMultiCursorActive = false;
     let cellWidth = 0;
     let cellHeight = 0;
     let currentHoverTarget = 'none';
@@ -3816,8 +3812,7 @@
       }
     }
 
-    // ── Scroll Indicator Dragging ──
-    let scrollDrag = null; // { startY, startOffset } — active when dragging the scroll thumb
+    // (Scroll-indicator thumb dragging is owned by gpu-terminal-input.js.)
 
     // ── AI Card Dragging ──
     let cardDrag = null; // { card, startX, startY, origLeft, origTop, dragging }
@@ -8747,6 +8742,10 @@
           onDestroy: () => { scratchControllers.delete(sessionName); },
           // Blur-minimize hands focus back to the main terminal.
           onHide: () => window.focusInput && window.focusInput(),
+          // Cmd/Ctrl+click links open through the same host transport as the
+          // main terminal (no session cwd — the scratch PTY's cwd is unknown
+          // to the webview).
+          openLink: (link) => openTerminalLink(link, undefined),
         });
         scratchControllers.set(sessionName, controller);
       } catch (e) {
@@ -9111,7 +9110,7 @@
         if (userScrollLock) {
           const sbGrown = terminal.scrollback_len() - sbBefore;
           if (sbGrown > 0) terminal.scroll(sbGrown);
-        } else if (!mouseDown && terminal.scroll_offset() > 0) {
+        } else if (!(termInput && termInput.isMouseDown()) && terminal.scroll_offset() > 0) {
           terminal.scroll_to_bottom();
         }
         repositionScrollAnchoredCards();
@@ -9266,67 +9265,21 @@
       return (session && session.ws && session.connected) ? session.ws : null;
     }
 
-    // Erase the current terminal selection by replaying the WASM-computed
-    // delete sequence (arrows + backspaces) to Ink's readline, one chunk per
-    // 4ms macrotask (Ink processes one escape sequence per render tick).
-    // Chunks are delivered sequentially (each setTimeout schedules the next)
-    // so strict in-order delivery is guaranteed regardless of timer clamp.
-    // `afterFn` is invoked once the last chunk has been sent — callers that
-    // follow up with more input should setTimeout the follow-up by one render
-    // tick (~20ms) so Ink fully drains the delete chunk before the next write
-    // lands (prevents the last BS from racing past the new char).
+    // The shared input pipeline (keyboard, mouse selection, paste, IME,
+    // links, wheel — everything terminal-intrinsic) lives in
+    // gpu-terminal-input.js so the scratch panel gets EXACT input parity.
+    // Created in initTerminalInput() once wasm-init supplies the module URL.
+    let termInput = null;
+    // Render-tick settle time — reassigned from the module on load (single
+    // source of truth there).
+    let INK_SETTLE_MS = 20;
+    // Erase the current terminal selection via the module's Ink-aware
+    // chunked delete. Callers that follow up with more input should
+    // setTimeout the follow-up by INK_SETTLE_MS.
     function replaceSelection(ws, afterFn) {
-      if (!terminal.has_selection()) { if (afterFn) afterFn(); return; }
-      const seq = terminal.delete_selection_sequence();
-      const chunks = [];
-      let i = 0;
-      while (i < seq.length) {
-        const b = seq[i];
-        if (b === 0x1b) {
-          // CSI: ESC [ params final(0x40-0x7e). Fallback: ESC-x 2-byte.
-          if (i + 1 < seq.length && seq[i + 1] === 0x5b /* [ */) {
-            let end = i + 2;
-            while (end < seq.length && seq[end] < 0x40) end++;
-            if (end < seq.length) end++;
-            chunks.push(seq.slice(i, end));
-            i = end;
-          } else if (i + 1 < seq.length) {
-            chunks.push(seq.slice(i, i + 2));
-            i += 2;
-          } else {
-            chunks.push(seq.slice(i, i + 1));
-            i += 1;
-          }
-        } else if (b === 0x7f) {
-          // Coalesce backspace runs — Ink handles them atomically per tick.
-          let j = i;
-          while (j < seq.length && seq[j] === 0x7f) j++;
-          chunks.push(seq.slice(i, j));
-          i = j;
-        } else {
-          chunks.push(seq.slice(i, i + 1));
-          i += 1;
-        }
-      }
-      terminal.selection_clear();
-      dirty = true;
-      if (chunks.length === 0) { if (afterFn) afterFn(); return; }
-      const deliver = (idx) => {
-        const b64 = btoa(String.fromCharCode(...chunks[idx]));
-        ws.send(JSON.stringify({ type: 'input_raw', data: b64 }));
-        if (idx + 1 < chunks.length) {
-          setTimeout(() => deliver(idx + 1), 4);
-        } else if (afterFn) {
-          afterFn();
-        }
-      };
-      deliver(0);
+      if (termInput) termInput.replaceSelection(ws, afterFn);
+      else if (afterFn) afterFn();
     }
-
-    // Render-tick settle time (60fps = ~16.7ms). Follow-ups after a
-    // replaceSelection() must wait at least one tick so Ink fully drains
-    // the delete chunk before the next write lands.
-    const INK_SETTLE_MS = 20;
 
     // ── Shift+Up/Down: switch sessions ──
     // Document-level capture so it works regardless of which element has focus
@@ -9375,6 +9328,9 @@
         return;
       }
       if (!terminal) return;
+      // Keystrokes inside a scratch panel belong to ITS terminal — don't
+      // steal Shift+Up/Down (keyboard selection there) for session switching.
+      if (e.target && e.target.closest && e.target.closest('.scratch-panel')) return;
       if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey
           && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
         const names = sessionOrder.length > 0 ? [...sessionOrder] : Array.from(sessions.keys());
@@ -9456,7 +9412,7 @@
       showDictationPulse();
       if (_pulseHideTimer) clearTimeout(_pulseHideTimer);
       _pulseHideTimer = setTimeout(() => {
-        if (!composing) hideDictationPulse();
+        if (!(termInput && termInput.isComposing())) hideDictationPulse();
         _pulseHideTimer = null;
       }, durationMs);
     }
@@ -9738,66 +9694,22 @@
       if (_pasteUndoPillTimer) clearTimeout(_pasteUndoPillTimer);
       _pasteUndoPillTimer = setTimeout(() => { pill.style.opacity = '0'; }, 1600);
     }
-    let composing = false;
-    kbInput.addEventListener('compositionstart', () => {
-      composing = true;
-      showDictationPulse();
-      showCompositionView('');
-    });
-    kbInput.addEventListener('compositionupdate', (e) => {
-      // Live interim text from macOS Dictation / IME. Update the overlay
-      // directly from the textarea value so we see the same in-progress
-      // string the OS is holding.
-      showCompositionView(e.data || kbInput.value || '');
-    });
-    kbInput.addEventListener('compositionend', (e) => {
-      hideDictationPulse();
-      hideCompositionView();
-      composing = false;
-      const text = e.data || '';
-      kbInput.value = '';
-      if (!text) return;
-      const ws = getActiveWs();
-      if (!ws) return;
-      const send = () => ws.send(JSON.stringify({ type: 'input', data: text }));
-      if (terminal && terminal.has_selection()) {
-        replaceSelection(ws, () => setTimeout(send, INK_SETTLE_MS));
-      } else {
-        send();
-      }
-    });
-    // beforeinput fallback for inputs that bypass composition entirely
-    // (e.g. some dictation tools commit via insertReplacementText only).
-    kbInput.addEventListener('beforeinput', (e) => {
-      if (composing) return;
-      if (e.inputType !== 'insertReplacementText' && e.inputType !== 'insertFromDictation') return;
-      const text = e.data || '';
-      e.preventDefault();
-      kbInput.value = '';
-      if (!text) return;
-      const ws = getActiveWs();
-      if (!ws) return;
-      const send = () => ws.send(JSON.stringify({ type: 'input', data: text }));
-      if (terminal && terminal.has_selection()) {
-        replaceSelection(ws, () => setTimeout(send, INK_SETTLE_MS));
-      } else {
-        send();
-      }
-    });
-    // Drop any chars the textarea accumulates from un-prevented keystrokes.
-    kbInput.addEventListener('input', () => {
-      if (!composing) kbInput.value = '';
-    });
+    // Composition (IME/dictation) listeners, the keydown pipeline, mouse
+    // selection, wheel, paste, and link hit-testing are registered by
+    // gpu-terminal-input.js (initTerminalInput below). The functions here
+    // are the HOST-SPECIFIC interceptors it splices in.
 
-    kbInput.addEventListener('keydown', (e) => {
-      if (!terminal || (modals && modals.isActive())) return;
-      // Task wizard owns its own keyboard. Don't fight it from the
-      // canvas keydown path — the wizard's listener handles Esc/Cmd+Enter
-      // and routes all other keys through normal browser behavior.
-      if (taskWizardOpen) return;
-      const ws = getActiveWs();
-      if (!ws) return;
+    // Guard: swallow keydown entirely while a modal or the task wizard owns
+    // the keyboard (the wizard's own listener handles Esc/Cmd+Enter and
+    // routes all other keys through normal browser behavior).
+    function terminalInputGuard() {
+      return !!((modals && modals.isActive()) || taskWizardOpen);
+    }
 
+    // Pre-key interceptor — runs after the ws guard, before the module's
+    // multi-cursor / copy / selection branches. Returns true when the key
+    // was consumed.
+    function terminalPreKeyHook(e) {
       // Paste-undo bookkeeping: Enter submits the prompt and Escape clears
       // it (Claude double-Esc) — either way the paste is no longer undoable.
       // Other edits are caught by exec()'s exact-match gate; this just makes
@@ -9822,13 +9734,13 @@
           bulletPreviewActive = false;
           dirty = true;
           e.preventDefault();
-          return;
+          return true;
         }
         if ((e.metaKey && !e.ctrlKey && e.key === 'e') || e.key === 'Enter') {
           // TODO(#4): advance the comment wizard from here.
           dbg('[bullets] wizard step pending — advance not yet implemented');
           e.preventDefault();
-          return;
+          return true;
         }
         if (e.metaKey && e.key === 'c') {
           // Copy: leave bullets in place, fall through to the existing Cmd+C
@@ -9863,70 +9775,16 @@
           ? commentComposeEl.querySelector('.cm-prompt-textarea')
           : null;
         sendStagedCommentsAndPrompt(taEl ? taEl.value : '');
-        return;
+        return true;
       }
+      return false;
+    }
 
-      // ── Alt double-tap + Arrow = vertical multi-cursor ──
-      if (e.key === 'Alt') {
-        altTapCount++;
-        clearTimeout(altTapTimer);
-        altTapTimer = setTimeout(() => { altTapCount = 0; }, 400);
-        if (altTapCount >= 2) {
-          verticalMultiCursorActive = true;
-          // If no pseudo-cursors yet, seed one at the visual cursor position
-          if (!terminal.has_pseudo_cursors()) {
-            // Use the visual cursor detection from WASM
-            terminal.pseudo_cursor_add_at_visual_cursor();
-            dirty = true;
-          }
-        }
-        return; // Don't clear selection on modifier key
-      }
-      // Alt held + Arrow in vertical multi-cursor mode
-      if (verticalMultiCursorActive && e.altKey && ['ArrowUp','ArrowDown'].includes(e.key)) {
-        terminal.pseudo_cursor_add_vertical(e.key === 'ArrowUp' ? 'up' : 'down');
-        dirty = true;
-        e.preventDefault();
-        return;
-      }
-      // Any non-Alt key exits vertical multi-cursor placement mode
-      if (e.key !== 'Alt') {
-        verticalMultiCursorActive = false;
-      }
-
-      // Cmd+C with selection = copy (rich text + plain text). Selection is
-      // intentionally preserved after copy — many users press Cmd+C multiple
-      // times to confirm the copy succeeded, and clearing would surprise them.
-      // Matches macOS native behavior (Finder, text editors, browsers).
-      if ((e.metaKey || e.ctrlKey) && e.key === 'c' && terminal.has_selection()) {
-        const text = terminal.get_selected_text();
-        const html = terminal.get_selected_html();
-        if (text) {
-          // Prefer rich text (text/plain + text/html) via ClipboardItem
-          // so users can paste into editors with formatting. Fall back to
-          // plain text via Tauri plugin in WKWebView where ClipboardItem
-          // sometimes silently fails (same root cause as the Cmd+V flake).
-          // Final fallback: navigator.clipboard.writeText.
-          const tcb = window.__TAURI__ && window.__TAURI__.clipboardManager;
-          const writeRich = () => {
-            const item = new ClipboardItem({
-              'text/plain': new Blob([text], { type: 'text/plain' }),
-              'text/html': new Blob([html || text], { type: 'text/html' }),
-            });
-            return navigator.clipboard.write([item]);
-          };
-          const writePlain = () => {
-            if (tcb && typeof tcb.writeText === 'function') return tcb.writeText(text);
-            return navigator.clipboard.writeText(text);
-          };
-          writeRich().catch(() => writePlain()).catch((err) => {
-            console.error('[copy] all clipboard writes failed:', err);
-          });
-        }
-        e.preventDefault();
-        return;
-      }
-
+    // Chord interceptor — runs after the module's multi-cursor + Cmd+C copy
+    // branches, before Cmd+A. Returns true when the chord was consumed.
+    // (Alt double-tap multi-cursor and Cmd+C rich copy now live in
+    // gpu-terminal-input.js.)
+    function terminalChordHook(e) {
       // Cmd+D with selection = parse the selected text for bullets and
       // open the task wizard with those as items. If no bullet pattern
       // is found inside the selection, fall back to a single-item wizard
@@ -9963,7 +9821,7 @@
             openTaskWizardFromBullets([{ text: single }], anchorPx);
           }
           e.preventDefault();
-          return;
+          return true;
         }
       }
 
@@ -10006,7 +9864,7 @@
             dirty = true;
             openTaskWizard(flat);
             e.preventDefault();
-            return;
+            return true;
           }
         }
         // Gates failed → no-op (don't fall through to anything else).
@@ -10073,13 +9931,13 @@
             dirty = true;
             startBulletWizard(chosen);
             e.preventDefault();
-            return;
+            return true;
           }
         }
         // Gates failed or <2 bullets — swallow the chord so it doesn't
         // fall through into the plain Cmd+E comment editor.
         e.preventDefault();
-        return;
+        return true;
       }
 
       // Cmd+Option+D:
@@ -10140,12 +9998,12 @@
             dirty = true;
             openTaskWizard(chosenD);
             e.preventDefault();
-            return;
+            return true;
           }
         }
         // Swallow the chord — don't fall through to other D handlers.
         e.preventDefault();
-        return;
+        return true;
       }
 
       // Ctrl+Shift+F: open the "Explore selection" popup. Press AGAIN while
@@ -10163,11 +10021,11 @@
         // the helper restores the buttons before clicking Explain.
         if (explorePopupOpen) {
           triggerExploreExplain();
-          return;
+          return true;
         }
-        if (!terminal || !terminal.has_selection()) return;
+        if (!terminal || !terminal.has_selection()) return true;
         const selText = terminal.get_selected_text() || '';
-        if (!selText.trim()) return;
+        if (!selText.trim()) return true;
         // Prefer a row-range anchor so the popup sits below/above the
         // selection rather than at an arbitrary canvas corner.
         let anchorPx = null;
@@ -10178,7 +10036,7 @@
           }
         } catch (err) { dbg('selection_content_range(Ctrl+Shift+F) error: ' + err); }
         openExplorePopup({ selectionText: selText, anchorPx });
-        return;
+        return true;
       }
 
       // Cmd+E with NO selection inside an active Claude session = auto-detect
@@ -10226,7 +10084,7 @@
             // Cmd+Enter; cancelling rolls back any staged comments.
             startBulletWizard(flat);
             e.preventDefault();
-            return;
+            return true;
           }
         }
         // Fall through if gates fail — no-op for plain Cmd+E with no selection.
@@ -10258,18 +10116,14 @@
         } catch (_) {}
         beginCommentFromSelection(anchorX, anchorY);
         e.preventDefault();
-        return;
+        return true;
       }
+      return false;
+    }
 
-      // Cmd+A = select all input text (Claude Code interactive mode)
-      if ((e.metaKey || e.ctrlKey) && e.key === 'a') {
-        if (terminal.select_all_input()) {
-          dirty = true;
-          e.preventDefault();
-          return;
-        }
-      }
-
+    // Clipboard-chord interceptor — runs after the module's Cmd+A branch,
+    // before Cmd+V. Returns true when the chord was consumed.
+    function terminalClipboardHook(e) {
       // Cmd+Option+V / Ctrl+Alt+V — "paste image as path". Writes the
       // clipboard image to a temp PNG and types the path so Claude Code
       // reads it lazily via Read instead of inlining it into the
@@ -10320,7 +10174,7 @@
           setTimeout(() => { clipboardCheckResolvers.delete(requestId); }, 5000);
         }
         e.preventDefault();
-        return;
+        return true;
       }
       // Cmd+Z (Mac) / Ctrl+Z (Win/Linux) — undo the last paste. Fires only
       // when the paste is still verifiably intact on screen (exec()'s gate).
@@ -10346,9 +10200,9 @@
             }
           }
           if (!live) {
-            if (pasteUndoBusy) { e.preventDefault(); return; } // undo in flight — don't double-fire
-            if (isMacKb) { e.preventDefault(); pasteUndoFlash('Nothing to undo'); return; }
-            return; // Win/Linux: let Ctrl+Z reach the PTY as SIGTSTP
+            if (pasteUndoBusy) { e.preventDefault(); return true; } // undo in flight — don't double-fire
+            if (isMacKb) { e.preventDefault(); pasteUndoFlash('Nothing to undo'); return true; }
+            return true; // Win/Linux: let Ctrl+Z reach the PTY as SIGTSTP
           }
           e.preventDefault();
           pasteUndoBusy = true;
@@ -10366,35 +10220,19 @@
               pasteUndoFlash('Paste undo incomplete');
             }
           });
-          return;
+          return true;
         }
       }
-      // Cmd+V / Ctrl+V = paste (text or image). With an active selection,
-      // first erase the selection (editor-style replace) before inserting.
-      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key === 'v') {
-        // Send `text` as a paste, erasing any current selection first so
-        // the paste lands into an empty input (editor semantics).
-        const pasteText = (text) => {
-          const aws = getActiveWs();
-          if (!aws || !text) return;
-          maybeFlashPasteBurst(text);
-          // Arm inside send() (not earlier): after a selection-replace the
-          // snapshot must capture the post-delete text or the undo diff
-          // would see a deletion and refuse.
-          const send = () => {
-            pasteUndoArm('text');
-            aws.send(JSON.stringify({ type: 'input', data: text }));
-          };
-          if (terminal.has_selection()) {
-            replaceSelection(aws, () => setTimeout(send, INK_SETTLE_MS));
-          } else {
-            send();
-          }
-        };
-        // Empty bracketed-paste markers — Claude Code's TUI sees the paste
-        // event and reads the OS clipboard itself, producing its native
-        // [Image #N] marker for image bytes (PNG, JPEG, TIFF, file copies).
-        const sendEmptyPaste = () => {
+      return false;
+    }
+
+    // ── Image-paste legs + daemon clipboard RPC ──
+    // Host side of the module's Cmd+V resolver chain (the text leg lives in
+    // gpu-terminal-input.js; these cover images + Finder file URLs).
+    // Empty bracketed-paste markers — Claude Code's TUI sees the paste
+    // event and reads the OS clipboard itself, producing its native
+    // [Image #N] marker for image bytes (PNG, JPEG, TIFF, file copies).
+    const sendEmptyPaste = () => {
           const aws = getActiveWs();
           if (!aws) return;
           pasteUndoArm('image');
@@ -10513,247 +10351,48 @@
             if (clipboardCheckResolvers.delete(requestId)) resolve(empty);
           }, 200);
         });
-        (async () => {
-          // Resolver chain for clipboard reads:
-          //   1. Tauri clipboard plugin (window.__TAURI__.clipboardManager
-          //      .readText / readImage). Backed by an IPC command — reliable
-          //      in WKWebView where navigator.clipboard often silently fails.
-          //   2. navigator.clipboard.read() — VS Code webview path + Chrome
-          //      web fallback.
-          //   3. daemon RPC for fileUrl + JPEG/TIFF detection (macOS NSPasteboard).
-          //      Only meaningful when the daemon is local (NSPasteboard on Linux
-          //      remote returns None and we silently skip).
-          const tcb = window.__TAURI__ && window.__TAURI__.clipboardManager;
+    // (Keyboard selection, Delete/Backspace-with-selection, type-to-replace,
+    // clear-selection rule, Cmd+Arrow Home/End, Ctrl+Shift+B, Cmd
+    // passthrough, and the default handle_key path all live in
+    // gpu-terminal-input.js. Shift+Up/Down session switching stays in the
+    // document-level capture listener above; Alt+Shift+` Pomodoro too.)
 
-          // Try Tauri plugin first when present.
-          if (tcb && typeof tcb.readImage === 'function') {
-            try {
-              const img = await tcb.readImage();
-              if (img) { dispatchImagePaste(); return; }
-            } catch (_) { /* not an image, try text */ }
-          }
-          if (tcb && typeof tcb.readText === 'function') {
-            try {
-              const text = await tcb.readText();
-              if (text && text.length > 0) { pasteText(text); return; }
-            } catch (e) {
-              console.warn('[paste] Tauri clipboardManager.readText failed:', e);
-            }
-          }
-
-          // Fall back to browser clipboard API.
-          try {
-            const items = await navigator.clipboard.read();
-            for (const item of items) {
-              if (item.types.find(t => t.startsWith('image/'))) {
-                dispatchImagePaste();
-                return;
-              }
-            }
-          } catch (_) { /* fall through to daemon RPC */ }
-          const result = await askDaemon();
-          if (result.fileUrl) { pasteText(result.fileUrl); return; }
-          if (result.hasImage) { dispatchImagePaste(); return; }
-          try {
-            pasteText(await navigator.clipboard.readText());
-          } catch (_) { /* clipboard unavailable */ }
-        })();
-        e.preventDefault();
-        return;
-      }
-
-      // (Shift+Up/Down session switching is handled by document-level capture listener above.)
-
-      // ── Keyboard selection (Shift+Arrow, Shift+Option+Arrow for word, Cmd+Shift for line) ──
-      if (e.shiftKey && ['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)) {
-        let dir;
-        if (e.metaKey) {
-          dir = e.key === 'ArrowLeft' ? 'home' : e.key === 'ArrowRight' ? 'end' : e.key === 'ArrowUp' ? 'up' : 'down';
-        } else if (e.altKey) {
-          dir = e.key === 'ArrowLeft' ? 'word_left' : e.key === 'ArrowRight' ? 'word_right' : e.key === 'ArrowUp' ? 'up' : 'down';
-        } else {
-          dir = e.key === 'ArrowLeft' ? 'left' : e.key === 'ArrowRight' ? 'right' : e.key === 'ArrowUp' ? 'up' : 'down';
-        }
-        // Multi-cursor mode: extend all pseudo-cursors
-        if (terminal.has_pseudo_cursors()) {
-          terminal.pseudo_cursor_extend_all(dir);
-        } else {
-          terminal.selection_extend(dir);
-        }
-        dirty = true;
-        e.preventDefault();
-        return;
-      }
-
-      // Delete/Backspace with selection = erase via replaceSelection().
-      // Why not Ctrl+U: Ink's readline kills only the CURRENT visual line,
-      // not the whole multi-row input buffer.
-      if (terminal.has_selection() && (e.key === 'Backspace' || e.key === 'Delete')) {
-        replaceSelection(ws, null);
-        e.preventDefault();
-        return;
-      }
-
-      // Editor-style type-to-replace: any printable character (incl. Enter,
-      // Tab) while a selection is active first erases the selection, then
-      // inserts the typed character — matching VS Code / textarea behavior.
-      // Excludes modified keys so shortcuts like Ctrl+U still pass through.
-      if (terminal.has_selection() && !e.metaKey && !e.ctrlKey && !e.altKey
-          && (e.key.length === 1 || e.key === 'Enter' || e.key === 'Tab')) {
-        const bytes = terminal.handle_key(e.key, e.ctrlKey, e.shiftKey, e.altKey);
-        replaceSelection(ws, () => {
-          if (bytes.length > 0) {
-            const b64 = btoa(String.fromCharCode(...bytes));
-            setTimeout(() => {
-              ws.send(JSON.stringify({ type: 'input_raw', data: b64 }));
-            }, INK_SETTLE_MS);
-          }
-        });
-        e.preventDefault();
-        return;
-      }
-
-      // Clear selection on non-modifier keystrokes (standard input behavior)
-      if (terminal.has_selection() && !['Shift','Meta','Alt','Control','CapsLock'].includes(e.key)) {
-        terminal.selection_clear();
-        dirty = true;
-      }
-
-      // Cmd+Arrow = Home/End (macOS convention: Cmd+Left = beginning of line, Cmd+Right = end)
-      if (e.metaKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
-        const seq = e.key === 'ArrowLeft' ? '\x01' : '\x05'; // Ctrl+A / Ctrl+E (readline)
-        if (window.__keylog !== false) {
-          const hex = e.key === 'ArrowLeft' ? '01' : '05';
-          console.log(`[keylog] Cmd+${e.key} → [${hex}] (1B) = ${e.key === 'ArrowLeft' ? 'Home' : 'End'}`);
-        }
-        ws.send(JSON.stringify({ type: 'input_raw', data: btoa(seq) }));
-        e.preventDefault();
-        return;
-      }
-
-      // (Alt+Shift+` Pomodoro toggle is handled by document-level capture listener above.)
-
-      // Ctrl+Shift+B — dump BiDi debug info for cursor row to console
-      if (e.ctrlKey && e.shiftKey && e.key === 'B') {
-        if (terminal && typeof terminal.debug_bidi_row === 'function') {
-          console.log('[BiDi-debug]', terminal.debug_bidi_row());
-        }
-        e.preventDefault();
-        return;
-      }
-
-      // Let all other Cmd-modified keys pass through to VS Code (zoom, find, etc.)
-      // Only Ctrl+<letter> without Cmd should go to the terminal (Ctrl+C, Ctrl+D, etc.)
-      if (e.metaKey) return;
-
-      // Voice-burst detection: count printable, unmodified keystrokes only.
-      // Excludes shortcuts (Ctrl/Alt) and navigation keys.
-      if (!e.ctrlKey && !e.altKey && e.key.length === 1) {
-        recordKeyForBurst();
-      }
-
-      const bytes = terminal.handle_key(e.key, e.ctrlKey, e.shiftKey, e.altKey);
-      // [DEBUG] Log every keystroke + bytes sent (remove after diagnosis)
-      if (window.__keylog !== false) {
-        const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(' ');
-        const mods = (e.ctrlKey ? 'Ctrl+' : '') + (e.altKey ? 'Alt+' : '') + (e.shiftKey ? 'Shift+' : '');
-        console.log(`[keylog] ${mods}${e.key} → [${hex}] (${bytes.length}B)`);
-      }
-      if (bytes.length > 0) {
-        const b64 = btoa(String.fromCharCode(...bytes));
-        ws.send(JSON.stringify({ type: 'input_raw', data: b64 }));
-      }
-      dirty = true;
-      e.preventDefault();
-    });
-
-    // ── Mouse Handling: drag-to-select (single click does NOT start selection) ──
     // Content padding in CSS pixels (must match set_content_padding call in initWasm)
     const PAD_TOP_CSS = 2;
     const PAD_LEFT_CSS = 10;
-    let mouseDownPos = null;   // {x, y} of initial mousedown in CSS coords
-    const DRAG_THRESHOLD = 3;  // pixels of movement before we treat it as a drag
-    let lastClickTime = 0;     // timestamp of last pointerdown for multi-click detection
-    let clickCount = 0;        // 1=single, 2=double (word), 3=triple (line)
-    const DBLCLICK_MS = 400;   // max ms between clicks to count as multi-click
+    // (Drag-to-select, multi-click word/line select, Alt block-select /
+    // pseudo-cursors, scroll-thumb drag, drag auto-scroll, click-to-cursor
+    // teleport, and context-menu suppression live in gpu-terminal-input.js.)
 
-    // ── Auto-scroll during drag selection ──
-    let autoScrollTimer = null;
-    let autoScrollSpeed = 0; // lines per tick (negative = down, positive = up)
-    let lastDragCssX = 0;    // last known mouse X during drag (for selection_update)
-
-    function startAutoScroll(speed, cssX) {
-      autoScrollSpeed = speed;
-      lastDragCssX = cssX;
-      if (autoScrollTimer) return; // already running
-      autoScrollTimer = setInterval(() => {
-        if (!terminal || !terminal.has_selection()) { stopAutoScroll(); return; }
-        terminal.scroll(autoScrollSpeed); // scroll() delta: positive = up into scrollback
-        userScrollLock = terminal.scroll_offset() > 0;
-        // Update selection endpoint at the edge row
-        const edgeY = autoScrollSpeed > 0
-          ? PAD_TOP_CSS                                       // scrolling up → top edge
-          : PAD_TOP_CSS + terminal.visible_rows() * cellHeight; // scrolling down → bottom edge
-        terminal.selection_update(lastDragCssX, edgeY);
-        dirty = true;
-        try { applyCommentPillPositions(); } catch (_) {}
-      }, 50);
-    }
-
-    function stopAutoScroll() {
-      if (autoScrollTimer) { clearInterval(autoScrollTimer); autoScrollTimer = null; }
-      autoScrollSpeed = 0;
-    }
-
-    canvas.addEventListener('pointerdown', (e) => {
-      if (!terminal || !wasmReady || e.button !== 0) return;
-      // Keep hidden textarea focused so dictation/IME keep working after a click.
-      focusInput();
-      const rect = canvas.getBoundingClientRect();
-      const cssX = e.clientX - rect.left;
-      const cssY = e.clientY - rect.top;
-
-      // ── Cmd/Ctrl+click: open link (URL or file path) ──
-      const isMac = navigator.platform.toLowerCase().includes('mac');
-      const linkModifier = isMac ? e.metaKey : e.ctrlKey;
-      if (linkModifier) {
-        let linkJson = '';
-        try { linkJson = terminal.link_at(cssX, cssY); }
-        catch (err) { console.warn('[link_at] click threw:', err); }
-        console.log('[link] click result:', linkJson);
-        if (linkJson) {
-          try {
-            const link = JSON.parse(linkJson);
-            if (link.kind === 'url') {
-              vscode.postMessage({ type: 'open-external', url: link.text });
-            } else if (link.kind === 'file') {
-              const session = sessions.get(activeSessionName);
-              vscode.postMessage({
-                type: 'open-file-link',
-                path: link.text, line: link.line, col: link.col,
-                cwd: session && session.cwd ? session.cwd : undefined,
-              });
-            } else if (link.kind === 'osc8') {
-              const uri = link.text;
-              if (uri.startsWith('file://')) {
-                const filePath = decodeURIComponent(uri.replace(/^file:\/\/[^/]*/, ''));
-                const session = sessions.get(activeSessionName);
-                vscode.postMessage({
-                  type: 'open-file-link', path: filePath,
-                  cwd: session && session.cwd ? session.cwd : undefined,
-                });
-              } else {
-                vscode.postMessage({ type: 'open-external', url: uri });
-              }
-            }
-            e.preventDefault();
-            mouseDown = false;
-            return;
-          } catch (_) {}
+    // Cmd/Ctrl+click link opener — shared postMessage transport for the
+    // main terminal (session cwd) and the scratch panel (no cwd).
+    function openTerminalLink(link, cwd) {
+      if (link.kind === 'url') {
+        vscode.postMessage({ type: 'open-external', url: link.text });
+      } else if (link.kind === 'file') {
+        vscode.postMessage({
+          type: 'open-file-link',
+          path: link.text, line: link.line, col: link.col,
+          cwd: cwd || undefined,
+        });
+      } else if (link.kind === 'osc8') {
+        const uri = link.text;
+        if (uri.startsWith('file://')) {
+          const filePath = decodeURIComponent(uri.replace(/^file:\/\/[^/]*/, ''));
+          vscode.postMessage({
+            type: 'open-file-link', path: filePath,
+            cwd: cwd || undefined,
+          });
+        } else {
+          vscode.postMessage({ type: 'open-external', url: uri });
         }
       }
+    }
 
-      // Check if click hits an AI button (content-area physical pixel coords)
+    // Pointerdown interceptor — runs after the module's Cmd+click link
+    // branch, before the scroll-indicator hit-test. AI-button hit-test in
+    // content-area physical pixel coords. Returns true when a button was hit.
+    function terminalPointerDownHook(e, cssX, cssY) {
       const dpr = window.devicePixelRatio || 1;
       const physX = (cssX - 10) * dpr; // subtract content padding (10px left)
       const physY = (cssY - 2) * dpr;  // subtract content padding (2px top)
@@ -10774,238 +10413,12 @@
           if (typeof vscode !== 'undefined') {
             vscode.postMessage({ type: 'ai-button-clicked', id: id, text: '' });
           }
-          mouseDown = false;
           e.preventDefault();
-          return;
+          return true;
         }
       }
-
-      // ── Scroll indicator hit-test ──
-      const canvasCSSWidth = canvas.getBoundingClientRect().width;
-      const indicatorW = 20;
-      const indicatorInset = 6;
-      const indicatorLeft = canvasCSSWidth - indicatorInset - indicatorW;
-      const sbLen = terminal.scrollback_len();
-      if (cssX >= indicatorLeft && sbLen > 0 && terminal.scroll_offset() > 0) {
-        scrollDrag = { startY: cssY, startOffset: terminal.scroll_offset() };
-        mouseDown = true;
-        canvas.setPointerCapture(e.pointerId);
-        e.preventDefault();
-        return;
-      }
-
-      // Multi-click: double = select word, triple = select line
-      const now = Date.now();
-      if (now - lastClickTime < DBLCLICK_MS) {
-        clickCount++;
-      } else {
-        clickCount = 1;
-      }
-      lastClickTime = now;
-      if (clickCount === 2) {
-        try { terminal.select_word_at(cssX, cssY); } catch (_) {}
-        dirty = true;
-        mouseDown = false;
-        e.preventDefault();
-        return;
-      }
-      if (clickCount >= 3) {
-        clickCount = 0;
-        try { terminal.select_line_at(cssX, cssY); } catch (_) {}
-        dirty = true;
-        mouseDown = false;
-        e.preventDefault();
-        return;
-      }
-
-      // Alt+Click = pseudo-cursor OR Alt+drag = block selection
-      // Defer pseudo-cursor to pointerup (only if no drag happened)
-      if (e.altKey) {
-        mouseDownPos = { x: cssX, y: cssY, altKey: true, dragged: false };
-        lastClickPos = { x: cssX, y: cssY };
-        mouseDown = true;
-        canvas.setPointerCapture(e.pointerId);
-        e.preventDefault();
-        return;
-      }
-
-      mouseDownPos = { x: cssX, y: cssY };
-      lastClickPos = { x: mouseDownPos.x, y: mouseDownPos.y };
-      mouseDown = true;
-      canvas.setPointerCapture(e.pointerId);
-      // Regular click clears all selections and pseudo-cursors
-      if (terminal.has_selection()) {
-        terminal.selection_clear();
-        dirty = true;
-      }
-      // Don't call selection_start yet — wait for drag threshold
-    });
-
-    canvas.addEventListener('pointermove', (e) => {
-      // ── Scroll indicator drag ──
-      if (scrollDrag && terminal) {
-        const rect = canvas.getBoundingClientRect();
-        const cy = e.clientY - rect.top;
-        const sbLen = terminal.scrollback_len();
-        if (sbLen === 0) return;
-        const dpr = window.devicePixelRatio || 1;
-        const visibleRows = Math.floor((rect.height - 2) / cellHeight);
-        const trackHeight = visibleRows * cellHeight;
-        const totalLines = sbLen + visibleRows;
-        const thumbHeight = Math.max(trackHeight * visibleRows / totalLines, 80 / dpr);
-        const scrollableRange = trackHeight - thumbHeight;
-        if (scrollableRange <= 0) return;
-        const deltaY = cy - scrollDrag.startY;
-        const deltaFraction = deltaY / scrollableRange;
-        const deltaOffset = Math.round(deltaFraction * sbLen);
-        const newOffset = Math.max(0, scrollDrag.startOffset - deltaOffset);
-        terminal.set_scroll_offset(newOffset);
-        userScrollLock = terminal.scroll_offset() > 0;
-        dirty = true;
-        repositionScrollAnchoredCards();
-        try { applyCommentPillPositions(); } catch (_) {}
-        return;
-      }
-      if (!terminal || !mouseDown || !mouseDownPos) return;
-      const rect = canvas.getBoundingClientRect();
-      const cx = e.clientX - rect.left;
-      const cy = e.clientY - rect.top;
-
-      // For Alt+drag: use the dragged flag to know if we already started this drag.
-      // We can't rely on has_selection() because pseudo-cursors also make it true.
-      const needsStart = mouseDownPos.altKey ? !mouseDownPos.dragged : !terminal.has_selection();
-      if (needsStart) {
-        // Not yet dragging — check if mouse moved enough to start selection
-        const dx = cx - mouseDownPos.x;
-        const dy = cy - mouseDownPos.y;
-        if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
-        // Threshold exceeded — initiate selection from the original mousedown point
-        // Alt+drag = block (rectangular) selection; regular drag = line selection
-        try {
-          if (mouseDownPos.altKey) {
-            terminal.pseudo_cursor_clear();
-            terminal.selection_start_block(mouseDownPos.x, mouseDownPos.y);
-            mouseDownPos.dragged = true;
-          } else {
-            terminal.selection_start(mouseDownPos.x, mouseDownPos.y);
-          }
-        } catch (err) {
-          console.warn('[GPU] selection_start skipped (re-entrant):', err.message);
-          return;
-        }
-      }
-      terminal.selection_update(cx, cy);
-      dirty = true;
-
-      // ── Auto-scroll when dragging above/below viewport ──
-      const viewportTop = PAD_TOP_CSS;
-      const viewportBottom = PAD_TOP_CSS + terminal.visible_rows() * cellHeight;
-      if (cy < viewportTop && terminal.scroll_offset() < terminal.scrollback_len()) {
-        const lines = (viewportTop - cy) / cellHeight;
-        startAutoScroll(Math.ceil(Math.min(lines * (1 + lines * 0.1), 20)), cx);
-      } else if (cy > viewportBottom && terminal.scroll_offset() > 0) {
-        const lines = (cy - viewportBottom) / cellHeight;
-        startAutoScroll(-Math.ceil(Math.min(lines * (1 + lines * 0.1), 20)), cx);
-      } else {
-        stopAutoScroll();
-      }
-    });
-
-    window.addEventListener('pointerup', () => {
-      // Alt+click with no drag = add pseudo-cursor
-      if (mouseDownPos && mouseDownPos.altKey && !mouseDownPos.dragged && terminal) {
-        terminal.pseudo_cursor_add(mouseDownPos.x, mouseDownPos.y);
-        dirty = true;
-      }
-      // Plain click with no drag and no selection = teleport cursor via arrow keys.
-      // Strategy: show phantom at target + mask the real cursor during transit, then
-      // poll & auto-correct any drift until real position matches phantom target.
-      if (mouseDownPos && !mouseDownPos.altKey && !mouseDownPos.dragged && !terminal.has_selection() && terminal) {
-        try {
-          // Get plan metadata first (returns JSON String, borrow released immediately),
-          // then get the byte sequence. Separate calls avoid RefCell aliasing.
-          const planJson = terminal.click_to_cursor_plan(mouseDownPos.x, mouseDownPos.y);
-          const plan = JSON.parse(planJson || '{}');
-          const seq = terminal.click_to_cursor_sequence(mouseDownPos.x, mouseDownPos.y);
-          if (seq.length > 0) {
-            const phantom = document.getElementById('phantom-cursor');
-            const mask = document.getElementById('cursor-mask');
-            if (typeof plan.target_col === 'number' && typeof plan.disp_row === 'number' && cellWidth > 0 && phantom && mask) {
-              // Position phantom at target cell.
-              phantom.style.left = (PAD_LEFT_CSS + plan.target_col * cellWidth) + 'px';
-              phantom.style.top  = (PAD_TOP_CSS + plan.disp_row * cellHeight) + 'px';
-              phantom.style.width = cellWidth + 'px';
-              phantom.style.height = cellHeight + 'px';
-              phantom.style.display = 'block';
-              // Mask: covers the real cursor cell with terminal-bg + the cell's
-              // character rendered in WHITE (to neutralize Ink's INVERSE cursor).
-              mask.style.width = cellWidth + 'px';
-              mask.style.height = cellHeight + 'px';
-              mask.style.fontSize = (cellHeight * 0.85) + 'px';
-              const placeMask = (col, dispRow, gridRow) => {
-                mask.style.left = (PAD_LEFT_CSS + col * cellWidth) + 'px';
-                mask.style.top  = (PAD_TOP_CSS + dispRow * cellHeight) + 'px';
-                const ch = (typeof terminal.cell_grapheme_at === 'function')
-                  ? terminal.cell_grapheme_at(gridRow, col) : '';
-                mask.textContent = ch || ' ';
-                mask.style.display = 'block';
-              };
-              // Debug: log the computed path so we can diagnose mismatches.
-              console.log('[click-to-cursor]', 'plan=', plan, 'seq_bytes=', seq.length,
-                'seq=', Array.from(seq).map(b => '0x' + b.toString(16).padStart(2,'0')).join(' '));
-              try { console.log('[click-trace]', JSON.parse(terminal.debug_click_trace(mouseDownPos.x, mouseDownPos.y))); } catch(e) {}
-              const session = sessions.get(activeSessionName);
-              if (session && session.ws && session.connected) {
-                const b64 = btoa(String.fromCharCode(...seq));
-                session.ws.send(JSON.stringify({ type: 'input_raw', data: b64 }));
-              }
-              // Initial mask at current visual cursor.
-              const vc0 = terminal.visual_cursor_display();
-              if (vc0 && vc0[0] >= 0) {
-                placeMask(vc0[0], vc0[1], vc0[1] + terminal.scroll_offset());
-              }
-
-              // rAF loop: poll visual cursor to track mask position and
-              // hide phantom+mask once cursor reaches the target.
-              // NO corrections — the initial Dijkstra plan is optimal and
-              // corrections while Ink is still processing cause overshoot.
-              const startedAt = Date.now();
-              const targetCol = plan.target_col;
-              const targetRow = plan.target_row;
-              const tick = () => {
-                const vc = terminal.visual_cursor_display();
-                if (vc && vc[0] >= 0) {
-                  const curGridRow = vc[1] + terminal.scroll_offset();
-                  placeMask(vc[0], vc[1], curGridRow);
-                  if (vc[0] === targetCol && curGridRow === targetRow) {
-                    phantom.style.display = 'none';
-                    mask.style.display = 'none';
-                    return;
-                  }
-                }
-                if (Date.now() - startedAt > 1500) {
-                  phantom.style.display = 'none';
-                  mask.style.display = 'none';
-                  return;
-                }
-                requestAnimationFrame(tick);
-              };
-              requestAnimationFrame(tick);
-            }
-          }
-        } catch (_e) {
-          document.getElementById('phantom-cursor').style.display = 'none';
-          document.getElementById('cursor-mask').style.display = 'none';
-        }
-      }
-      mouseDown = false;
-      mouseDownPos = null;
-      scrollDrag = null;
-      stopAutoScroll();
-    });
-
-    // Suppress VS Code's default webview context menu on the terminal canvas.
-    canvas.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); });
+      return false;
+    }
 
     // ── File drop from VS Code's explorer (or Finder) ──
     // Files dragged onto the terminal are inserted as references at the
@@ -11460,63 +10873,116 @@
         setTimeout(() => document.addEventListener('click', dismiss, true), 0);
       }
     }
-    canvas.addEventListener('pointerdown', handleRightClick);
+    // (handleRightClick is registered by initTerminalInput AFTER the shared
+    // module's selection pointerdown — preserving the original listener
+    // order on the canvas. The wheel handler lives in the module; the
+    // on-demand daemon scrollback fetch below is its host hook.)
 
-    canvas.addEventListener('wheel', (e) => {
-      if (!terminal) { console.warn('[scroll] wheel ignored — terminal is null'); return; }
-      // Accumulate fractional scroll for smooth trackpad + momentum support.
-      // deltaMode 0 = pixels (trackpad), 1 = lines (mouse wheel).
-      // For pixel mode, divide by ~line height in CSS px to get fractional lines.
-      // Use actual cell height for 1:1 scroll like a native terminal.
-      const pixelsPerLine = cellHeight || 16;
-      const delta = e.deltaMode === 1 ? e.deltaY : e.deltaY / pixelsPerLine;
-      scrollAccumulator += delta;
-
-      // Consume whole lines from the accumulator
-      const lines = Math.trunc(scrollAccumulator);
-      if (lines !== 0) {
-        // Negate: browser deltaY>0 = scroll down, but WASM scroll(+) = up into history
-        const needsMore = terminal.scroll(-lines);
-        scrollAccumulator -= lines;
-
-        // On-demand scrollback: request more rows from daemon when user scrolls past local buffer
-        if (needsMore && !scrollRequestPending && serverScrollbackTotal > 0) {
-          // Compute next fetch position from daemon-side offset (unaffected by reflow).
-          // daemonFetchedRows tracks total daemon rows consumed; starts at 0 after snapshot.
-          const remaining = serverScrollbackTotal - daemonFetchedRows;
-          if (remaining > 0) {
-            scrollRequestPending = true;
-            // Safety timeout: clear the flag if daemon never responds (e.g. WS dropped mid-request)
-            setTimeout(() => { scrollRequestPending = false; }, 5000);
-            const fetchCount = Math.min(100, remaining);
-            const fetchOffset = Math.max(0, remaining - fetchCount);
-            const activeWs = sessions.get(activeSessionName)?.ws;
-            if (activeWs && activeWs.readyState === WebSocket.OPEN) {
-              dbg('[scroll] fetch: offset=' + fetchOffset + ' count=' + fetchCount + ' daemonFetched=' + daemonFetchedRows + ' serverTotal=' + serverScrollbackTotal);
-              activeWs.send(JSON.stringify({
-                type: 'scroll_request',
-                offset: fetchOffset,
-                count: fetchCount,
-              }));
-            } else {
-              dbg('[scroll] BLOCKED: no active WS (activeSession=' + activeSessionName + ' wsReady=' + (activeWs ? activeWs.readyState : 'null') + ')');
-              scrollRequestPending = false; // don't leave stuck
-            }
+    // Wheel scrolled past the local buffer — request more rows from daemon.
+    function terminalScrollFetchHook() {
+      if (!scrollRequestPending && serverScrollbackTotal > 0) {
+        // Compute next fetch position from daemon-side offset (unaffected by reflow).
+        // daemonFetchedRows tracks total daemon rows consumed; starts at 0 after snapshot.
+        const remaining = serverScrollbackTotal - daemonFetchedRows;
+        if (remaining > 0) {
+          scrollRequestPending = true;
+          // Safety timeout: clear the flag if daemon never responds (e.g. WS dropped mid-request)
+          setTimeout(() => { scrollRequestPending = false; }, 5000);
+          const fetchCount = Math.min(100, remaining);
+          const fetchOffset = Math.max(0, remaining - fetchCount);
+          const activeWs = sessions.get(activeSessionName)?.ws;
+          if (activeWs && activeWs.readyState === WebSocket.OPEN) {
+            dbg('[scroll] fetch: offset=' + fetchOffset + ' count=' + fetchCount + ' daemonFetched=' + daemonFetchedRows + ' serverTotal=' + serverScrollbackTotal);
+            activeWs.send(JSON.stringify({
+              type: 'scroll_request',
+              offset: fetchOffset,
+              count: fetchCount,
+            }));
+          } else {
+            dbg('[scroll] BLOCKED: no active WS (activeSession=' + activeSessionName + ' wsReady=' + (activeWs ? activeWs.readyState : 'null') + ')');
+            scrollRequestPending = false; // don't leave stuck
           }
-        } else if (needsMore && serverScrollbackTotal === 0) {
-          dbg('[scroll] BLOCKED: serverScrollbackTotal=0 (snapshot never set it?) scrollPending=' + scrollRequestPending);
         }
+      } else if (serverScrollbackTotal === 0) {
+        dbg('[scroll] BLOCKED: serverScrollbackTotal=0 (snapshot never set it?) scrollPending=' + scrollRequestPending);
       }
+    }
 
-      userScrollLock = terminal.scroll_offset() > 0;
-      dirty = true;
-      // Reposition scroll-anchored AI cards
-      repositionScrollAnchoredCards();
-      applyLinkTooltipY();
-      // Same pattern as applyLinkTooltipY — pure-JS delta shift of each pill.
-      try { applyCommentPillPositions(); } catch (_) {}
-      e.preventDefault();
-    }, { passive: false });
+    // ── Shared input pipeline bring-up ──
+    // gpu-terminal-input.js owns every terminal-intrinsic input behavior;
+    // the hooks splice the host-specific features back in, in the exact
+    // order the old inline handlers ran. Called from the wasm-init message
+    // (the module URL is derived from utilsUri — same static dir in both
+    // the VS Code webview and standalone hosts).
+    let _termInputLoading = false;
+    async function initTerminalInput(moduleUrl) {
+      if (termInput || _termInputLoading) return;
+      _termInputLoading = true;
+      try {
+        const inputModule = await import(moduleUrl);
+        INK_SETTLE_MS = inputModule.INK_SETTLE_MS;
+        termInput = inputModule.createTerminalInput({
+          getTerm: () => terminal,
+          canvas,
+          keyTarget: kbInput,
+          pointerTarget: canvas,
+          getWs: getActiveWs,
+          markDirty: () => { dirty = true; },
+          isReady: () => wasmReady,
+          focus: focusInput,
+          getCellSize: () => ({ w: cellWidth, h: cellHeight }),
+          openLink: (link) => {
+            const session = sessions.get(activeSessionName);
+            openTerminalLink(link, session && session.cwd ? session.cwd : undefined);
+          },
+          phantomEl: document.getElementById('phantom-cursor'),
+          maskEl: document.getElementById('cursor-mask'),
+          hooks: {
+            guard: terminalInputGuard,
+            preKey: terminalPreKeyHook,
+            chordKey: terminalChordHook,
+            clipboardKey: terminalClipboardHook,
+            pointerDown: terminalPointerDownHook,
+            onPasteText: maybeFlashPasteBurst,
+            armPasteUndo: pasteUndoArm,
+            dispatchImagePaste,
+            askClipboardDaemon: askDaemon,
+            onPrintableKey: recordKeyForBurst,
+            linkHover: terminalLinkHoverHook,
+            linkHoverEnd: terminalLinkHoverEndHook,
+            updateScrollLock: () => { userScrollLock = terminal.scroll_offset() > 0; },
+            afterWheel: () => {
+              // Reposition scroll-anchored AI cards, tooltip, comment pills.
+              repositionScrollAnchoredCards();
+              applyLinkTooltipY();
+              try { applyCommentPillPositions(); } catch (_) {}
+            },
+            afterScrollDrag: () => {
+              repositionScrollAnchoredCards();
+              try { applyCommentPillPositions(); } catch (_) {}
+            },
+            afterAutoScroll: () => {
+              try { applyCommentPillPositions(); } catch (_) {}
+            },
+            onScrollNeedsMore: terminalScrollFetchHook,
+            compositionUI: {
+              start: () => { showDictationPulse(); showCompositionView(''); },
+              update: (text) => showCompositionView(text),
+              end: () => { hideDictationPulse(); hideCompositionView(); },
+            },
+          },
+        });
+        // Same-target listeners that must run AFTER the module's, keeping
+        // the original inline registration order on the canvas:
+        // pointerdown (selection) → pointerdown (right-click), and
+        // mousemove (link hover) → mousemove (status-bar hover).
+        canvas.addEventListener('pointerdown', handleRightClick);
+        canvas.addEventListener('mousemove', onStatusBarHoverMove);
+      } catch (e) {
+        _termInputLoading = false;
+        reportError('gpu-terminal-input', e);
+      }
+    }
 
     // ── Cmd/Ctrl+hover: detect clickable links (URL / file path) ──
     const linkExistCache = new Map(); // path → {exists, kind, inWorkspace}
@@ -12933,25 +12399,14 @@
       e.preventDefault();
       canvas.dispatchEvent(new WheelEvent('wheel', e));
     }, { passive: false });
-    canvas.addEventListener('mousemove', (e) => {
-      if (!terminal || mouseDown) return;
-      const isMac = navigator.platform.toLowerCase().includes('mac');
-      const linkModifier = isMac ? e.metaKey : e.ctrlKey;
-      if (!linkModifier) {
-        if (linkCursorActive) setLinkCursor(false);
-        hideLinkTooltip();
-        return;
-      }
-      const rect = canvas.getBoundingClientRect();
-      const rawX = e.clientX - rect.left;
-      const rawY = e.clientY - rect.top;
-      let linkJson = '';
-      try { linkJson = terminal.link_at(rawX, rawY); }
-      catch (err) { console.warn('[link_at] threw:', err); }
-      if (window.__immortermDebugLinks) console.log('[link_at]', { rawX, rawY, linkJson });
-      if (!linkJson) { setLinkCursor(false); hideLinkTooltip(); return; }
-      try {
-        const link = JSON.parse(linkJson);
+    // Cmd/Ctrl+hover feedback — spliced into the module's link hit-test
+    // (gpu-terminal-input.js owns the mousemove + link_at call; this hook
+    // resolves per-kind previews through the extension host / hub).
+    function terminalLinkHoverEndHook() {
+      setLinkCursor(false);
+      hideLinkTooltip();
+    }
+    function terminalLinkHoverHook(link, e) {
         const activate = (meta) => { setLinkCursor(true); showLinkTooltip(link, e.clientX, e.clientY, meta); };
         const deactivate = () => { setLinkCursor(false); hideLinkTooltip(); };
         if (link.kind === 'hex-color') {
@@ -13097,16 +12552,14 @@
             activate(null);
           }
         }
-      } catch (_) { setLinkCursor(false); hideLinkTooltip(); }
-    });
-    // Clear link cursor when modifier released
-    window.addEventListener('keyup', (e) => {
-      if (e.key === 'Meta' || e.key === 'Control') { setLinkCursor(false); hideLinkTooltip(); }
-    });
+    }
+    // (Meta/Control keyup clearing the link cursor is registered by the module.)
 
     // ── Status Bar Hover Detection ──
-    canvas.addEventListener('mousemove', (e) => {
-      if (!terminal || mouseDown) return;
+    // Registered by initTerminalInput AFTER the module's link-hover
+    // mousemove, preserving the original listener order.
+    function onStatusBarHoverMove(e) {
+      if (!terminal || (termInput && termInput.isMouseDown())) return;
       const rect = canvas.getBoundingClientRect();
       const cssX = e.clientX - rect.left - PAD_LEFT_CSS;
       const cssY = e.clientY - rect.top - PAD_TOP_CSS;
@@ -13197,17 +12650,16 @@
           hideStatusBar();
         }
       }
-    });
+    }
 
     // ── Auto mode: hide when mouse leaves canvas ──
+    // (Link tooltip/cursor teardown on mouseleave is handled by the module.)
     canvas.addEventListener('mouseleave', () => {
       // Reset scroll indicator hover
       if (terminal) { terminal.set_scroll_indicator_proximity(0); dirty = true; }
       // Hide title tooltip
       if (titleTooltipTimer) { clearTimeout(titleTooltipTimer); titleTooltipTimer = null; }
       titleTooltip.classList.remove('visible');
-      hideLinkTooltip();
-      setLinkCursor(false);
       if (prefs.statusBarMode === 'auto') {
         if (sbAnim.autoHideTimer) { clearTimeout(sbAnim.autoHideTimer); sbAnim.autoHideTimer = null; }
         hideStatusBar();
@@ -14281,6 +13733,11 @@
           if (msg.fontName) fontName = msg.fontName;
           if (msg.markedUri) markedUri = msg.markedUri;
           if (msg.iroUri) iroUri = msg.iroUri;
+          // Shared input pipeline (gpu-terminal-input.js) — same static dir
+          // as the other sibling modules, derived by swapping the filename.
+          if (msg.utilsUri) {
+            initTerminalInput(msg.utilsUri.replace(/[^/]+$/, 'gpu-terminal-input.js'));
+          }
           // Import utils module (pure functions + factories)
           if (msg.utilsUri && !utils) {
             try {
