@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "_comment": [
+    "Optional sidecars the desktop app can lazy-download after install.",
+    "Each component is keyed by id. The manifest is embedded in the app via",
+    "include_str! at compile time so a user with no network still sees the",
+    "full menu of optional components and can choose to skip them.",
+    "",
+    "Per-triple URLs point at GitHub Releases (or any static host). SHA256",
+    "MUST match or install aborts. Update current_version to roll out a new",
+    "build; the auto-updater reruns install on next launch."
+  ],
+  "components": {
+    "memory": {
+      "display_name": "ImmorTerm Memory",
+      "description": "Local semantic memory with SQLite + ONNX embeddings. Powers cross-session recall, code-bound memory, and context enrichment. About 120 MB after install.",
+      "size_mb_approx": 120,
+      "default_enabled": false,
+      "binary_name": "immorterm-memory",
+      "current_version": "0.1.0",
+      "versions": {
+        "0.1.0": {
+          "aarch64-apple-darwin": {
+            "url": "https://github.com/immorterm/memory/releases/download/v0.1.0/immorterm-memory-aarch64-apple-darwin",
+            "sha256": "TBD-aarch64-apple-darwin"
+          },
+          "x86_64-apple-darwin": {
+            "url": "https://github.com/immorterm/memory/releases/download/v0.1.0/immorterm-memory-x86_64-apple-darwin",
+            "sha256": "TBD-x86_64-apple-darwin"
+          },
+          "x86_64-pc-windows-msvc": {
+            "url": "https://github.com/immorterm/memory/releases/download/v0.1.0/immorterm-memory-x86_64-pc-windows-msvc.exe",
+            "sha256": "TBD-x86_64-pc-windows-msvc"
+          },
+          "x86_64-unknown-linux-gnu": {
+            "url": "https://github.com/immorterm/memory/releases/download/v0.1.0/immorterm-memory-x86_64-unknown-linux-gnu",
+            "sha256": "TBD-x86_64-unknown-linux-gnu"
+          },
+          "aarch64-unknown-linux-gnu": {
+            "url": "https://github.com/immorterm/memory/releases/download/v0.1.0/immorterm-memory-aarch64-unknown-linux-gnu",
+            "sha256": "TBD-aarch64-unknown-linux-gnu"
+          }
+        }
+      }
+    },
+    "mcp-gateway": {
+      "display_name": "MCP Gateway",
+      "description": "Shared MCP server proxy — route multiple MCP servers over a single endpoint, share across terminal tabs. About 25 MB.",
+      "size_mb_approx": 25,
+      "default_enabled": false,
+      "binary_name": "mcp-gateway",
+      "current_version": "0.1.0",
+      "versions": {
+        "0.1.0": {
+          "aarch64-apple-darwin": {
+            "url": "https://github.com/immorterm/mcp-gateway/releases/download/v0.1.0/mcp-gateway-aarch64-apple-darwin",
+            "sha256": "TBD-aarch64-apple-darwin"
+          },
+          "x86_64-apple-darwin": {
+            "url": "https://github.com/immorterm/mcp-gateway/releases/download/v0.1.0/mcp-gateway-x86_64-apple-darwin",
+            "sha256": "TBD-x86_64-apple-darwin"
+          },
+          "x86_64-pc-windows-msvc": {
+            "url": "https://github.com/immorterm/mcp-gateway/releases/download/v0.1.0/mcp-gateway-x86_64-pc-windows-msvc.exe",
+            "sha256": "TBD-x86_64-pc-windows-msvc"
+          },
+          "x86_64-unknown-linux-gnu": {
+            "url": "https://github.com/immorterm/mcp-gateway/releases/download/v0.1.0/mcp-gateway-x86_64-unknown-linux-gnu",
+            "sha256": "TBD-x86_64-unknown-linux-gnu"
+          },
+          "aarch64-unknown-linux-gnu": {
+            "url": "https://github.com/immorterm/mcp-gateway/releases/download/v0.1.0/mcp-gateway-aarch64-unknown-linux-gnu",
+            "sha256": "TBD-aarch64-unknown-linux-gnu"
+          }
+        }
+      }
+    }
+  }
+}
