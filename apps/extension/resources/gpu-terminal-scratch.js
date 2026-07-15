@@ -35,8 +35,8 @@ function scratchPanelHtml(canvasId) {
   <div class="scratch-header">
     <span class="scratch-title">Scratch</span>
     <span class="scratch-spacer"></span>
-    <button class="scratch-trash" type="button" title="Close scratch terminal">🗑</button>
-    <button class="scratch-close" type="button" title="Close scratch terminal">✕</button>
+    <button class="scratch-trash" type="button" title="Discard scratch terminal">🗑</button>
+    <button class="scratch-close" type="button" title="Minimize (reopen from the status bar)">✕</button>
   </div>
   <div class="scratch-body">
     <canvas id="${canvasId}"></canvas>
@@ -407,26 +407,12 @@ export async function createScratchController({
   header.addEventListener('pointerup', () => { drag = null; });
   header.addEventListener('lostpointercapture', () => { drag = null; });
 
-  // ── Blur = minimize ───────────────────────────────────────────
-  // Pointerdown anywhere OUTSIDE the panel hides it (PTY + WS stay alive).
-  // Capture phase so it runs even if the target swallows the event. The
-  // status-bar ">_" icon can't insta-undo its own show(): show fires on the
-  // icon's `click`, which lands AFTER this pointerdown — a hidden panel is
-  // skipped here, then shown by the click.
-  function onDocPointerDown(e) {
-    if (destroyed || panel.style.display === 'none') return;
-    if (panel.contains(e.target)) return;
-    hide();
-  }
-  document.addEventListener('pointerdown', onDocPointerDown, true);
-  // Focus leaving the panel (e.g. Tab) also minimizes. relatedTarget is
-  // null on canvas clicks inside the panel — require a real outside target.
-  panel.addEventListener('focusout', (e) => {
-    if (destroyed || !e.relatedTarget || panel.contains(e.relatedTarget)) return;
-    hide();
-  });
+  // Clicking outside the panel does NOT minimize it — the scratch stays put
+  // until you minimize it with ✕ or switch sessions. (It used to hide on
+  // any outside pointerdown/focusout; that stole the first click off the
+  // header buttons and surprised users, so it's gone by design.)
 
-  // ── Close confirmation (✕ / trash) ────────────────────────────
+  // ── Close confirmation (trash) ────────────────────────────────
   // Inline DOM overlay (NOT window.confirm — native dialogs block the
   // webview): dims the panel body, small centered card, Cancel / Close.
   // While open, the input module's guard hook swallows all terminal keys.
@@ -490,7 +476,6 @@ export async function createScratchController({
     if (rafId) cancelAnimationFrame(rafId);
     if (sizeTimer) clearTimeout(sizeTimer);
     ro.disconnect();
-    document.removeEventListener('pointerdown', onDocPointerDown, true);
     try { if (ws) ws.close(); } catch (_) { /* best effort */ }
     ws = null;
     try { if (term && term.free) term.free(); } catch (_) { /* best effort */ }
@@ -500,9 +485,14 @@ export async function createScratchController({
     if (onDestroy) onDestroy();
   }
 
-  // ✕ and trash both confirm-then-kill: plain minimize already happens via
-  // click-outside/blur, and users read ✕ as "close".
-  panel.querySelector('.scratch-close').addEventListener('click', openConfirm);
+  // ✕ minimizes (PTY + WS stay alive, reopen from the ">_" icon); only the
+  // trash discards the terminal, behind a confirmation. preventDefault on
+  // mousedown keeps focus on the capture textarea so the first click always
+  // lands (a focus shift to the button used to swallow it → double-click).
+  for (const btn of panel.querySelectorAll('.scratch-header button')) {
+    btn.addEventListener('mousedown', (e) => e.preventDefault());
+  }
+  panel.querySelector('.scratch-close').addEventListener('click', hide);
   panel.querySelector('.scratch-trash').addEventListener('click', openConfirm);
 
   capture.focus({ preventScroll: true });
