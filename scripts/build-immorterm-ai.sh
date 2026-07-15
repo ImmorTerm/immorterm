@@ -12,7 +12,9 @@ cd "$REPO_ROOT"
 
 export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$HOME/.cargo/bin:$PATH"
 
-EXT_DIR="$HOME/.vscode/extensions/immorterm.immorterm-terminal-1.0.4"
+# Newest installed version — Marketplace auto-updates rotate the directory
+# (1.0.4 → 1.0.6 wiped a dev deploy on 2026-07-14).
+EXT_DIR=$(ls -dt "$HOME"/.vscode/extensions/immorterm.immorterm-terminal-* 2>/dev/null | head -1)
 WASM_SRC="apps/immorterm-ai/immorterm-wasm"
 WASM_PKG="$WASM_SRC/pkg"
 WASM_DEST="apps/extension/resources/wasm"
@@ -113,6 +115,7 @@ if [ -d "$EXT_DIR" ]; then
   # Also deploy terminal HTML resources (oxlint-checked in step 7)
   cp "$REPO_ROOT/apps/extension/resources/"*-terminal.html "$EXT_DIR/resources/" 2>/dev/null || true
   cp "$REPO_ROOT/apps/extension/resources/"*-terminal.css "$EXT_DIR/resources/" 2>/dev/null || true
+  cp "$REPO_ROOT/apps/extension/resources/gpu-terminal-"*.js "$EXT_DIR/resources/" 2>/dev/null || true
   # Resolve workspace symlinks in node_modules/@immorterm/ — bun links these
   # as relative symlinks that break when copied outside the monorepo.
   DEST_NM="$EXT_DIR/node_modules/@immorterm"

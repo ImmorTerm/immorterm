@@ -55,7 +55,8 @@ cd apps/extension && bun run compile
 cd -
 
 # ── Step 3: Deploy to installed extension ──
-EXT_DIR="$HOME/.vscode/extensions/immorterm.immorterm-terminal-1.0.4"
+# Newest installed version — Marketplace auto-updates rotate the directory
+EXT_DIR=$(ls -dt "$HOME"/.vscode/extensions/immorterm.immorterm-terminal-* 2>/dev/null | head -1)
 if [ -d "$EXT_DIR" ]; then
   cp -r apps/extension/out/* "$EXT_DIR/out/"
   cp -r apps/extension/resources/* "$EXT_DIR/resources/"

@@ -4035,6 +4035,7 @@ impl WasmTerminalInner {
                 StatusBarTarget::Brand => "brand".into(),
                 StatusBarTarget::AiStats => "ai_stats".into(),
                 StatusBarTarget::ThemeArea => "theme".into(),
+                StatusBarTarget::Scratch => "scratch".into(),
                 StatusBarTarget::Title => "title".into(),
                 StatusBarTarget::Project => "project".into(),
                 StatusBarTarget::None => "none".into(),
@@ -4052,6 +4053,7 @@ impl WasmTerminalInner {
             "brand" => StatusBarTarget::Brand,
             "ai_stats" => StatusBarTarget::AiStats,
             "theme" => StatusBarTarget::ThemeArea,
+            "scratch" => StatusBarTarget::Scratch,
             "title" => StatusBarTarget::Title,
             _ => StatusBarTarget::None,
         };

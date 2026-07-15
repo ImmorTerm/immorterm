@@ -13,6 +13,7 @@ pub enum StatusBarTarget {
     Brand,     // "ImmorTerm" text → session picker
     AiStats,   // AI stats text → toggle mode
     ThemeArea, // Dot + time area → theme picker
+    Scratch,   // ">_" icon → scratch terminal toggle
     Title,     // Session title → tooltip with last user prompt
     Project,   // Project name (bottom-left) → project navigation menu
     #[default]
@@ -254,6 +255,10 @@ pub struct StatusBarData {
     pub theme_area_start_col: usize,
     /// Theme area end column (exclusive)
     pub theme_area_end_col: usize,
+    /// Scratch terminal icon start column (">_" region)
+    pub scratch_start_col: usize,
+    /// Scratch terminal icon end column (exclusive)
+    pub scratch_end_col: usize,
     /// Project name start column (for project menu)
     pub project_start_col: usize,
     /// Project name end column (exclusive)
@@ -428,10 +433,12 @@ pub fn build_sections_with_theme(
     let title_hovered = scroll_offset == usize::MAX;
 
     // ── Pre-compute right total width (needed for title budget) ──
+    let right_text_scratch = " >_ ";
     let right_text_last = format!(" Last: {} ", last_active);
     let right_text_dot = format!(" {} ", dot);
     let right_text_brand = " ImmorTerm ";
-    let right_total_chars = right_text_last.chars().count()
+    let right_total_chars = right_text_scratch.chars().count()
+        + right_text_last.chars().count()
         + right_text_dot.chars().count()
         + right_text_brand.chars().count();
 
@@ -608,6 +615,12 @@ pub fn build_sections_with_theme(
     // ── Right sections (no AI stats — they moved to center) ──
     let mut right_sections = Vec::new();
 
+    // Scratch terminal icon (theme accent color)
+    right_sections.push(StatusBarSection {
+        text: right_text_scratch.to_string(),
+        fg: theme.fg_accent,
+    });
+
     // "Last:" label + time value (theme fg)
     right_sections.push(StatusBarSection {
         text: format!(" Last: {} ", last_active),
@@ -639,9 +652,12 @@ pub fn build_sections_with_theme(
         cursor += sec.text.chars().count();
     }
 
+    // Scratch icon = first right section
+    let scratch_start_col = starts[0];
+    let scratch_end_col = if n > 1 { starts[1] } else { 0 };
     // Theme area = Last/time only (dot is independent, not part of any hover zone)
-    let theme_area_start_col = starts[0];
-    let theme_area_end_col = if n > 1 { starts[1] } else { 0 };
+    let theme_area_start_col = starts.get(1).copied().unwrap_or(0);
+    let theme_area_end_col = starts.get(2).copied().unwrap_or(0);
     let brand_start_col = starts.last().copied().unwrap_or(0);
 
     // Project column range: left_sections[0] (project name, starts at col 0)
@@ -663,6 +679,8 @@ pub fn build_sections_with_theme(
         ctx_pct: if has_ai { ctx_pct } else { 0.0 },
         theme_area_start_col,
         theme_area_end_col,
+        scratch_start_col,
+        scratch_end_col,
         project_start_col: 0,
         project_end_col,
         title_start_col,
@@ -738,6 +756,11 @@ pub fn hit_test(data: &StatusBarData, col: usize) -> StatusBarTarget {
         && col < data.theme_area_end_col
     {
         StatusBarTarget::ThemeArea
+    } else if data.scratch_end_col > data.scratch_start_col
+        && col >= data.scratch_start_col
+        && col < data.scratch_end_col
+    {
+        StatusBarTarget::Scratch
     } else if data.title_end_col > data.title_start_col
         && col >= data.title_start_col
         && col < data.title_end_col

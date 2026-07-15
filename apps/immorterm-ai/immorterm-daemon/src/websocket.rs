@@ -390,6 +390,17 @@ pub enum WsServerMsg {
         request_id: Option<String>,
         ok: bool,
     },
+    /// Reply to scratch_open / scratch_kill — the scratch sibling terminal's
+    /// WS port. `ws_port` is null (and `alive` false) when no scratch is
+    /// running; the webview connects to it exactly like the main session's
+    /// port.
+    #[serde(rename = "scratch_info")]
+    ScratchInfo {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        ws_port: Option<u16>,
+        alive: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -517,6 +528,23 @@ pub enum WsClientMsg {
         /// Full share payload: { id, kind, file_path?, rel_path?,
         /// source_immorterm_id?, source_name?, task_id?, ... }.
         item: serde_json::Value,
+    },
+    /// Open (or reuse) the scratch sibling terminal — a second daemon named
+    /// "scratch-<session>" spawned with IMMORTERM_SKIP_REGISTRY=1 for
+    /// throwaway shell work next to the main session. Idempotent: if a
+    /// scratch is already alive its port is returned; otherwise one is
+    /// spawned. Replies scratch_info.
+    #[serde(rename = "scratch_open")]
+    ScratchOpen {
+        #[serde(default)]
+        request_id: Option<String>,
+    },
+    /// Kill the scratch sibling terminal (exact stored pid). Replies
+    /// scratch_info { ws_port: null, alive: false }.
+    #[serde(rename = "scratch_kill")]
+    ScratchKill {
+        #[serde(default)]
+        request_id: Option<String>,
     },
     /// Draw a filled rectangle.
     #[serde(rename = "draw_rect")]
@@ -1633,6 +1661,23 @@ async fn handle_client_message(
             // remote host, so the remote session's hook will consume it.
             let ok = write_share_item_to_queue(&window_id, &item);
             let resp = WsServerMsg::ShareItemWritten { request_id, ok };
+            if let Ok(json) = serde_json::to_string(&resp) {
+                let _ = ws_sink.send(Message::Text(json)).await;
+            }
+        }
+        WsClientMsg::ScratchOpen { request_id } => {
+            // Spawn-or-reuse runs here in the per-connection task — the
+            // ~5s port-file poll inside must never stall the daemon main
+            // loop, so this is handled inline rather than via WsCommand.
+            let (ws_port, alive) = crate::daemon::scratch_open().await;
+            let resp = WsServerMsg::ScratchInfo { request_id, ws_port, alive };
+            if let Ok(json) = serde_json::to_string(&resp) {
+                let _ = ws_sink.send(Message::Text(json)).await;
+            }
+        }
+        WsClientMsg::ScratchKill { request_id } => {
+            crate::daemon::scratch_kill().await;
+            let resp = WsServerMsg::ScratchInfo { request_id, ws_port: None, alive: false };
             if let Ok(json) = serde_json::to_string(&resp) {
                 let _ = ws_sink.send(Message::Text(json)).await;
             }
