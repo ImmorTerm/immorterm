@@ -50,11 +50,15 @@ jobs:
             bundles: app,dmg
             artifact_prefix: ImmorTerm-macos-aarch64
             updater_platform: darwin-aarch64
-          - target: x86_64-apple-darwin
-            os: macos-13
-            bundles: app,dmg
-            artifact_prefix: ImmorTerm-macos-x86_64
-            updater_platform: darwin-x86_64
+          # Intel Mac disabled for launch: the free macos-13 runner pool is
+          # badly backed up (jobs sit queued for 1h+ without ever starting),
+          # blocking the whole release. aarch64 covers every M-series Mac.
+          # Re-enable once the runner queue clears / via the re-add task.
+          # - target: x86_64-apple-darwin
+          #   os: macos-13
+          #   bundles: app,dmg
+          #   artifact_prefix: ImmorTerm-macos-x86_64
+          #   updater_platform: darwin-x86_64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             bundles: appimage,deb
