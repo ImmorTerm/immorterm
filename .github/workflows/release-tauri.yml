@@ -269,10 +269,14 @@ jobs:
               '. + {($key): {signature: $sig, url: $url}}' <<<"$PLATFORMS_JSON")
             echo "  [+] ${key}: ${tarball}"
           }
-          # Tauri's naming varies slightly per platform; probe for the file whose
-          # suffix matches the platform's updater artifact.
-          add_platform "darwin-aarch64" "$(ls release/ | grep -E '_aarch64\.app\.tar\.gz$' | head -1)"
-          add_platform "darwin-x86_64"  "$(ls release/ | grep -E '_x64\.app\.tar\.gz$|_x86_64\.app\.tar\.gz$' | head -1)"
+          # Tauri v2 names the macOS updater bundle plainly `<productName>.app.tar.gz`
+          # (NO arch suffix), so probe for that exact suffix. With only aarch64 built
+          # there's a single match. NOTE: if Intel mac is re-added, both targets emit
+          # the same `ImmorTerm.app.tar.gz` filename and will collide on upload — give
+          # each an arch-tagged name before this step when re-enabling x86_64.
+          add_platform "darwin-aarch64" "$(ls release/ | grep -E '\.app\.tar\.gz$' | head -1)"
+          # Linux updater: only present if Tauri emitted a signed AppImage bundle
+          # (`.AppImage.tar.gz` + .sig). Absent today — Linux OTA is a separate task.
           add_platform "linux-x86_64"   "$(ls release/ | grep -E '\.AppImage\.tar\.gz$' | head -1)"
 
           PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
