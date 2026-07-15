@@ -63,7 +63,7 @@ export async function killAllScreenSessions(
   // Prompt for confirmation unless skipped
   if (!skipConfirmation) {
     const confirmation = await vscode.window.showWarningMessage(
-      `This will kill ALL screen sessions for project "${projectName}". Continue?`,
+      `This will kill ALL sessions for project "${projectName}". Continue?`,
       { modal: true },
       'Yes, Kill All'
     );
@@ -129,7 +129,7 @@ export async function killAllScreenSessions(
   // Show notification
   if (showNotification) {
     vscode.window.showInformationMessage(
-      `Killed ${result.sessionsKilled} screen sessions, cleared ${result.entriesCleared} entries, deleted ${result.logsDeleted} logs.`
+      `Killed ${result.sessionsKilled} sessions, cleared ${result.entriesCleared} entries, deleted ${result.logsDeleted} logs.`
     );
   }
 

@@ -1,8 +1,8 @@
 {
   "name": "immorterm-terminal",
   "displayName": "ImmorTerm — Persistent Terminals",
-  "description": "Immortal terminals that survive VS Code crashes, restarts, and updates. Powered by GNU Screen.",
-  "version": "1.0.5",
+  "description": "Persistent terminal sessions that survive VS Code crashes and restarts — plus optional local AI memory for Claude Code.",
+  "version": "1.0.6",
   "publisher": "immorterm",
   "icon": "resources/icon.png",
   "galleryBanner": {
@@ -31,13 +31,11 @@
   "keywords": [
     "terminal",
     "persistence",
-    "screen",
     "crash",
     "restore",
     "immortal",
     "session",
     "recovery",
-    "gnu-screen",
     "tmux-alternative"
   ],
   "activationEvents": [
@@ -57,7 +55,7 @@
       },
       {
         "command": "immorterm.newScreenTerminal",
-        "title": "ImmorTerm: New Terminal (via Screen)"
+        "title": "ImmorTerm: New Terminal (Direct)"
       },
       {
         "command": "immorterm.forgetTerminal",
@@ -73,7 +71,7 @@
       },
       {
         "command": "immorterm.killAllScreens",
-        "title": "ImmorTerm: Kill All Screen Sessions"
+        "title": "ImmorTerm: Kill All Sessions"
       },
       {
         "command": "immorterm.showStatus",
@@ -269,7 +267,7 @@
           ],
           "default": "regular",
           "description": "Which terminal sessions to auto-restore on startup",
-          "markdownDescription": "Which terminal sessions to auto-restore on startup.\n\n- **ai**: The ImmorTerm terminal (GPU-rendered Rust engine)\n- **regular**: Legacy screen sessions from the retired C binary (kept for existing setups)\n- **both**: Both\n\nManual session creation commands always work regardless of this setting.",
+          "markdownDescription": "Which terminal sessions to auto-restore on startup.\n\n- **ai**: The ImmorTerm terminal (GPU-rendered Rust engine)\n- **regular**: Legacy sessions from the retired terminal (kept for existing setups)\n- **both**: Both\n\nManual session creation commands always work regardless of this setting.",
           "scope": "resource"
         },
         "immorterm.statusBarTheme": {
@@ -330,16 +328,16 @@
           "default": 50000,
           "minimum": 1000,
           "maximum": 500000,
-          "description": "Number of lines to keep in Screen scrollback buffer",
-          "markdownDescription": "Number of lines to keep in Screen scrollback buffer.\n\n**Higher values** use more memory but preserve more terminal history.\n\n**Example**: `100000` for extensive logs, `10000` for minimal memory usage."
+          "description": "Number of lines to keep in the terminal scrollback buffer",
+          "markdownDescription": "Number of lines to keep in the terminal scrollback buffer.\n\n**Higher values** use more memory but preserve more terminal history.\n\n**Example**: `100000` for extensive logs, `10000` for minimal memory usage."
         },
         "immorterm.historyOnAttach": {
           "type": "number",
           "default": 20000,
           "minimum": 100,
           "maximum": 100000.0,
-          "description": "Number of lines to display when reattaching to a Screen session",
-          "markdownDescription": "Number of lines to display when reattaching to a Screen session.\n\nThis is the **visible history** shown immediately after VS Code restarts.\n\n**Example**: `5000` for quick startup, `50000` for full history."
+          "description": "Number of lines to display when reattaching to a session",
+          "markdownDescription": "Number of lines to display when reattaching to a session.\n\nThis is the **visible history** shown immediately after VS Code restarts.\n\n**Example**: `5000` for quick startup, `50000` for full history."
         },
         "immorterm.terminalRestoreDelay": {
           "type": "number",
@@ -353,7 +351,7 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically restore terminals when VS Code opens",
-          "markdownDescription": "Automatically restore terminals when VS Code opens.\n\nWhen **enabled**, all previously registered terminals will be recreated and reattached to their Screen sessions.\n\nSet to `false` to manually trigger restoration via the Command Palette."
+          "markdownDescription": "Automatically restore terminals when VS Code opens.\n\nWhen **enabled**, all previously registered terminals will be recreated and reattached to their sessions.\n\nSet to `false` to manually trigger restoration via the Command Palette."
         },
         "immorterm.maxLogSizeMb": {
           "type": "number",
@@ -383,19 +381,19 @@
           "minimum": 1000,
           "maximum": 300000,
           "description": "Grace period before cleaning up a closed terminal (ms)",
-          "markdownDescription": "Grace period in milliseconds before cleaning up a closed terminal's Screen session.\n\n**Purpose**: Prevents accidental cleanup during VS Code window reloads.\n\n**Example**: `30000` (30 seconds) for faster cleanup, `120000` (2 minutes) for safety."
+          "markdownDescription": "Grace period in milliseconds before cleaning up a closed terminal's session.\n\n**Purpose**: Prevents accidental cleanup during VS Code window reloads.\n\n**Example**: `30000` (30 seconds) for faster cleanup, `120000` (2 minutes) for safety."
         },
         "immorterm.autoCleanupStale": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically cleanup orphaned Screen sessions on startup",
-          "markdownDescription": "Automatically cleanup stale Screen sessions on extension activation.\n\n**Removes**: Orphaned sessions without corresponding VS Code terminals.\n\nSet to `false` to manually manage cleanup via Command Palette."
+          "description": "Automatically cleanup orphaned sessions on startup",
+          "markdownDescription": "Automatically cleanup stale sessions on extension activation.\n\n**Removes**: Orphaned sessions without corresponding VS Code terminals.\n\nSet to `false` to manually manage cleanup via Command Palette."
         },
         "immorterm.statusBarEnabled": {
           "type": "boolean",
           "default": true,
           "description": "Show ImmorTerm status in the status bar",
-          "markdownDescription": "Show ImmorTerm status in the VS Code status bar.\n\n**Displays**:\n- Terminal count\n- Screen availability status\n- Warning icon if Screen is missing\n\nClick the status item to view detailed status."
+          "markdownDescription": "Show ImmorTerm status in the VS Code status bar.\n\n**Displays**:\n- Terminal count\n- Active session count\n- Memory service status\n\nClick the status item to view detailed status."
         },
         "immorterm.namingPattern": {
           "type": "string",
@@ -429,7 +427,7 @@
           "minimum": 0,
           "maximum": 720,
           "description": "[Reserved] Kill idle Claude sessions after this many hours (0 = never)",
-          "markdownDescription": "\u26a0\ufe0f **Reserved for future use** \u2014 this setting is not yet implemented.\n\nAutomatically terminate Claude sessions with no terminal I/O for this many hours.\n\n**How it works**: Uses terminal log file mtime as the activity signal. When idle time exceeds the threshold, Claude receives SIGTERM (graceful), then SIGKILL after 5s. The screen session stays alive \u2014 you can always resume with `claude --resume <UUID>`.\n\nA beautiful hibernation message with your theme colors is displayed in the terminal.\n\nSet to `0` to disable."
+          "markdownDescription": "\u26a0\ufe0f **Reserved for future use** \u2014 this setting is not yet implemented.\n\nAutomatically terminate Claude sessions with no terminal I/O for this many hours.\n\n**How it works**: Uses terminal log file mtime as the activity signal. When idle time exceeds the threshold, Claude receives SIGTERM (graceful), then SIGKILL after 5s. The session stays alive \u2014 you can always resume with `claude --resume <UUID>`.\n\nA beautiful hibernation message with your theme colors is displayed in the terminal.\n\nSet to `0` to disable."
         },
         "immorterm.claudeChannelsEnabled": {
           "type": "boolean",
@@ -474,8 +472,8 @@
         "immorterm.screenBinary": {
           "type": "string",
           "default": "immorterm",
-          "description": "Path to the GNU Screen binary",
-          "markdownDescription": "Path to the GNU Screen binary.\n\n**Default**: `immorterm` (ImmorTerm's patched version with UTF-8 title support)\n\n**Install**: download from GitHub Releases\n\n**Fallback**: Set to `screen` to use the standard GNU Screen (some features may not work correctly)"
+          "description": "Path to the ImmorTerm terminal binary",
+          "markdownDescription": "Path to the ImmorTerm terminal binary used for persistent sessions.\n\n**Default**: `immorterm` (resolved on your `PATH`)\n\nSet an absolute path if the binary lives outside your `PATH`."
         },
         "immorterm.services.memory.enabled": {
           "type": "boolean",

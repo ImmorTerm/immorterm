@@ -62,7 +62,7 @@ export async function forgetAllTerminals(
   // Prompt for confirmation unless skipped
   if (!skipConfirmation) {
     const confirmation = await vscode.window.showWarningMessage(
-      `This will kill ALL screen sessions and delete ALL logs for project "${projectName}". Continue?`,
+      `This will kill ALL sessions and delete ALL logs for project "${projectName}". Continue?`,
       { modal: true },
       'Yes, Forget All'
     );

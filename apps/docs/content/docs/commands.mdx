@@ -1,0 +1,63 @@
+---
+title: Commands
+description: Every ImmorTerm command in the VS Code Command Palette — what each one does and its command ID.
+---
+
+These are the commands the ImmorTerm VS Code extension adds. Open the Command
+Palette (`Cmd+Shift+P` on macOS, `Ctrl+Shift+P` on Windows and Linux), type
+`ImmorTerm`, and pick one. The command IDs are the same strings you use in
+`keybindings.json` if you want to bind your own shortcuts.
+
+Default keyboard shortcuts noted below are what ships in the extension. The
+`mac` and `win`/`linux` bindings are identical — the extension uses `Ctrl`
+(not `Cmd`) on macOS too.
+
+## Terminals
+
+| Command | Command ID | What it does |
+|---|---|---|
+| ImmorTerm: New Terminal | `immorterm.newTerminal` | Open a new persistent ImmorTerm terminal. Default shortcut: `Ctrl+Shift+`` `. |
+| ImmorTerm: New Terminal (via Screen) | `immorterm.newScreenTerminal` | Open a new terminal backed by the GNU Screen session backend. |
+| ImmorTerm: New Terminal (Rust) | `immorterm.newImmortermTerminal` | Open a new ImmorTerm AI terminal (the Rust GPU-rendered backend). Default shortcut: `Ctrl+Shift+A`. |
+| ImmorTerm: Rename Terminal | `immorterm.renameTerminal` | Rename the focused terminal. Default shortcut: `Ctrl+Shift+R` (when a terminal is focused). |
+| ImmorTerm: Toggle Title Lock | `immorterm.toggleTitleLock` | Lock or unlock the terminal title so it stops auto-updating. Default shortcut: `Ctrl+Shift+L` (when a terminal is focused). |
+| ImmorTerm: Reattach Shelved Terminal | `immorterm.reattachTerminal` | Reattach a terminal that was shelved when its tab was closed. |
+| ImmorTerm: Rerender Backlog (force-replay PTY history) | `immorterm.rerenderBacklog` | Force-replay the terminal's PTY history to redraw the backlog. Default shortcut: `Ctrl+Shift+R`. |
+
+## Sessions and cleanup
+
+| Command | Command ID | What it does |
+|---|---|---|
+| ImmorTerm: Forget Current Terminal | `immorterm.forgetTerminal` | Forget the focused terminal — detach it and stop persisting it. Default shortcut: `Ctrl+Shift+Q Q` (chord, when a terminal is focused). |
+| ImmorTerm: Forget All Terminals | `immorterm.forgetAllTerminals` | Forget every ImmorTerm terminal at once. Default shortcut: `Ctrl+Shift+Q A` (chord, when a terminal is focused). |
+| ImmorTerm: Cleanup Stale Sessions | `immorterm.cleanupStale` | Clean up orphaned or stale sessions that no longer have a live terminal. |
+| ImmorTerm: Kill All Screen Sessions | `immorterm.killAllScreens` | Kill every GNU Screen session ImmorTerm is managing. |
+| ImmorTerm: Sync Now | `immorterm.syncNow` | Run a session sync immediately instead of waiting for the next automatic interval. |
+
+## Project and themes
+
+| Command | Command ID | What it does |
+|---|---|---|
+| ImmorTerm: Enable for This Project | `immorterm.enableForProject` | Turn ImmorTerm on for the current project. |
+| ImmorTerm: Disable for This Project | `immorterm.disableForProject` | Turn ImmorTerm off for the current project. |
+| ImmorTerm: Set Theme for This Project | `immorterm.applyTheme` | Choose the status-bar color theme for the current project. |
+| ImmorTerm: Set Theme for This Terminal | `immorterm.setTerminalTheme` | Choose the color theme for the focused terminal only. |
+
+## Memory services
+
+| Command | Command ID | What it does |
+|---|---|---|
+| ImmorTerm: Configure Memory Services | `immorterm.configureServices` | Open the services picker to enable or disable memory and install the per-project memory hooks. |
+| ImmorTerm: Digest LLM | `immorterm.configureDigestLlm` | Choose which LLM the auto-digester uses to extract memories. |
+| ImmorTerm: Run Memory Doctor (Diagnostics) | `immorterm.doctor` | Check memory service health, print a diagnostics report, and offer an auto-fix. |
+| ImmorTerm: Open MCP Gateway Dashboard | `immorterm.openGatewayDashboard` | Open the MCP Gateway dashboard. |
+
+## Status and productivity
+
+| Command | Command ID | What it does |
+|---|---|---|
+| ImmorTerm: Show Status | `immorterm.showStatus` | Show the current ImmorTerm status. |
+| ImmorTerm: Activate License | `immorterm.activateLicense` | Enter a license key to activate Pro. |
+| ImmorTerm: Toggle Pomodoro Timer | `immorterm.togglePomodoro` | Start or stop the Pomodoro timer. Default shortcut: `Alt+Shift+`` `. |
+| ImmorTerm: New Task | `immorterm.newTask` | Create a new task. Default shortcut: `Ctrl+Shift+T`. |
+| Send to ImmorTerm | `immorterm.sendFileToActiveSession` | Send the selected file to the active ImmorTerm terminal. |

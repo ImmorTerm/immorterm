@@ -115,15 +115,25 @@ const SHELVED_REGISTRY_PATH = path.join(os.homedir(), '.immorterm', 'registry-sh
 // overwrites session_status changes made by the extension.
 const SESSION_STATUS_PATH = path.join(os.homedir(), '.immorterm', 'session-status.json');
 
-/** Read `<projectPath>/.immorterm/project-id` if it exists. Returns null when
- *  the file is missing — the daemon creates it on first session spawn, so a
- *  brand-new project won't have one until that happens. The extension never
- *  writes this file; the daemon owns it. */
+/** Read the project UUID for `projectPath`. Canonical source is
+ *  `.immorterm/project.json` (`{"id","name"}`, daemon-owned — see
+ *  docs/plans/identity-model.md); legacy bare `.immorterm/project-id` is the
+ *  fallback. Order matters: the daemon stamps registry entries from
+ *  project.json, so reading project-id first can return a divergent UUID
+ *  (minted by an old backfill) and make restore skip every session as
+ *  "wrong project". Returns null when neither file exists — the daemon
+ *  creates project.json on first session spawn. */
 export function readProjectId(projectPath: string): string | null {
     if (!projectPath) return null;
-    const idFile = path.join(projectPath, '.immorterm', 'project-id');
+    const dir = path.join(projectPath, '.immorterm');
     try {
-        const id = fs.readFileSync(idFile, 'utf-8').trim();
+        const pj = JSON.parse(fs.readFileSync(path.join(dir, 'project.json'), 'utf-8'));
+        if (typeof pj.id === 'string' && pj.id.trim().length > 0) return pj.id.trim();
+    } catch {
+        // missing or malformed project.json — fall through to legacy file
+    }
+    try {
+        const id = fs.readFileSync(path.join(dir, 'project-id'), 'utf-8').trim();
         return id.length > 0 ? id : null;
     } catch {
         return null;

@@ -1,0 +1,137 @@
+---
+title: Keyboard Shortcuts
+description: Every ImmorTerm keyboard shortcut — VS Code extension keybindings and in-app terminal chords, for macOS and Windows/Linux.
+---
+
+ImmorTerm has two sets of keyboard shortcuts, because it runs in two places:
+
+1. **The VS Code extension** — bindings VS Code owns. These use `Ctrl+Shift`
+   on every platform, including macOS.
+2. **The desktop app and its GPU terminal** — bindings the app and the
+   terminal webview handle themselves. These follow the usual convention:
+   `Cmd` on macOS, `Ctrl` on Windows/Linux, `Option` on macOS is `Alt` on
+   Windows/Linux.
+
+Where a shortcut differs by platform, both columns are shown.
+
+---
+
+## VS Code extension
+
+These are contributed by the extension and fire inside VS Code. The macOS
+keys are literally `Ctrl` (not `Cmd`) — the extension binds the same combo on
+every platform.
+
+| Shortcut (all platforms) | Action | Context |
+|---|---|---|
+| `Ctrl+Shift+`` `` `` | New ImmorTerm terminal | Anywhere |
+| `Ctrl+Shift+A` | New ImmorTerm AI terminal | Anywhere |
+| `Ctrl+Shift+Q` then `Q` | Forget the focused terminal (stop persisting it) | Terminal focused |
+| `Ctrl+Shift+Q` then `A` | Forget all ImmorTerm terminals | Terminal focused |
+| `Ctrl+Shift+R` | Rename the focused terminal | Terminal focused |
+| `Ctrl+Shift+L` | Lock or unlock the terminal title so it stops auto-updating | Terminal focused |
+| `Shift+Up` | Focus the previous terminal in the group | Terminal focused |
+| `Shift+Down` | Focus the next terminal in the group | Terminal focused |
+| `Ctrl+Shift+R` | Rerender the terminal backlog (force-replay PTY history) | Anywhere |
+| `Ctrl+Shift+T` | Create a new task | Anywhere |
+| `Alt+Shift+`` `` `` | Toggle the Pomodoro timer | Anywhere |
+
+The `Ctrl+Shift+Q` bindings are chords: press `Ctrl+Shift+Q`, release, then
+press the second key.
+
+`Ctrl+Shift+R` is bound twice. When a terminal is focused it renames that
+terminal; anywhere else it rerenders the backlog.
+
+Every extension command is also available from the Command Palette
+(`Cmd+Shift+P` / `Ctrl+Shift+P`) by typing "ImmorTerm", whether or not it has
+a keyboard shortcut.
+
+---
+
+## Desktop app
+
+These work in the standalone ImmorTerm desktop app — the native window, tab,
+and zoom controls. They fire in any webview that has focus.
+
+| Shortcut (macOS) | Shortcut (Windows/Linux) | Action |
+|---|---|---|
+| `Cmd+N` | `Ctrl+N` | New window |
+| `Cmd+T` | `Ctrl+T` | New project tab (opens the project picker) |
+| `Cmd+Shift+T` | `Ctrl+Shift+T` | New plain terminal tab |
+| `Cmd+W` | `Ctrl+W` | Close the current tab (closes the window if it is the last tab) |
+| `Cmd+R` | `Ctrl+R` | Reload the current tab |
+| `Ctrl+Shift+Left` | `Ctrl+Shift+Left` | Previous tab |
+| `Ctrl+Shift+Right` | `Ctrl+Shift+Right` | Next tab |
+| `Cmd+=` or `Cmd++` | `Ctrl+=` or `Ctrl++` | Zoom in |
+| `Cmd+-` or `Cmd+_` | `Ctrl+-` or `Ctrl+_` | Zoom out |
+| `Cmd+0` | `Ctrl+0` | Actual size (reset zoom) |
+| `Cmd+/` | `Ctrl+/` | Open the keyboard-shortcuts help page |
+| `Cmd+Shift+?` | `Ctrl+Shift+?` | Open the keyboard-shortcuts help page (same as above) |
+
+Tab switching uses `Ctrl` rather than `Cmd` on purpose: on macOS
+`Cmd+Shift+Left` and `Cmd+Shift+Right` are reserved for select-to-line-start
+and select-to-line-end.
+
+### Sessions within a project tab
+
+These act on the session list inside the current project tab.
+
+| Shortcut (all platforms) | Action |
+|---|---|
+| `Shift+Up` | Previous session in this project |
+| `Shift+Down` | Next session in this project |
+| `Ctrl+Shift+A` | New session in this project |
+
+---
+
+## In the terminal
+
+These are handled inside the GPU terminal webview itself. They cover
+rerendering, clipboard, comments, tasks, and inline lookup. `Option` on macOS
+is `Alt` on Windows/Linux.
+
+### Rerender
+
+| Shortcut (macOS) | Shortcut (Windows/Linux) | Action |
+|---|---|---|
+| `Ctrl+Shift+R` | `Ctrl+Shift+R` | Hard rerender — wipes local scrollback, rebuilds the visible grid from the daemon, and asks the running program to redraw |
+| `Cmd+Shift+Option+R` | `Ctrl+Shift+Alt+R` | Soft rerender — rebuilds the visible grid and asks the program to redraw, but keeps local scrollback |
+
+Hard rerender uses `Ctrl` on macOS too, because Chromium reserves
+`Cmd+Shift+R` for Force Reload.
+
+### Clipboard
+
+| Shortcut (macOS) | Shortcut (Windows/Linux) | Action |
+|---|---|---|
+| `Cmd+A` | `Ctrl+A` | Select all input (the Claude Code prompt) |
+| `Cmd+C` | `Ctrl+C` | Copy the selection (selection stays — copy again to confirm) |
+| `Cmd+V` | `Ctrl+V` | Paste — text inline; a small or medium screenshot pastes as `[Image #N]` |
+| `Cmd+Option+V` | `Ctrl+Alt+V` | Paste an image as a file path — Claude reads it lazily; use this for large screenshots that hit the many-image cap |
+| `Cmd+Z` | `Ctrl+Z` | Undo the last paste (text, image, or path) while it is still untouched; keeps a history of 10. Falls through to the shell when there is nothing to undo |
+
+### Comments
+
+Comments let you annotate terminal output and send the notes back to Claude.
+
+| Shortcut (macOS) | Shortcut (Windows/Linux) | Action |
+|---|---|---|
+| `Cmd+E` | `Ctrl+E` | With a selection, open the comment editor on the selected text. With no selection and Claude active, auto-detect bullets and walk through each. Inside the wizard, skip the current bullet |
+| `Cmd+Option+E` | `Ctrl+Alt+E` | With a selection, auto-detect bullets only inside the selected rows, then walk them. Without a selection, the same as `Cmd+E` auto-detect |
+| `Cmd+Enter` | `Ctrl+Enter` | Save the current comment and advance to the next bullet, or send all staged comments to Claude |
+| `Esc` | `Esc` | Cancel the comment editor or wizard (rolls back staged comments). Also closes the shortcuts help window |
+
+### Tasks
+
+| Shortcut (macOS) | Shortcut (Windows/Linux) | Action |
+|---|---|---|
+| `Cmd+D` | `Ctrl+D` | With a selection, parse the selected lines for bullets and open the task wizard. With no selection and Claude active, auto-detect bullets in the most recent assistant turn and open the task picker |
+| `Cmd+Option+D` | `Ctrl+Alt+D` | With a selection, auto-detect bullets only inside the selected rows, then open the task picker. Without a selection, the same as `Cmd+D` auto-detect |
+
+### Explore
+
+| Shortcut (all platforms) | Action |
+|---|---|
+| `Ctrl+Shift+F` | With a selection, open the Explore popup (Search Google inline, or Explain). Press again to stream definitions (Free Dictionary, Wikipedia, DuckDuckGo, Urban Dictionary). A third press asks Claude Haiku directly |
+
+Explore uses `Ctrl` on every platform, including macOS.

@@ -1654,7 +1654,7 @@ function registerCommands(
         // Check if per-project screenrc exists
         await fs.access(screenrcPath);
       } catch {
-        vscode.window.showWarningMessage('ImmorTerm: No screenrc found. Open a terminal first.');
+        vscode.window.showWarningMessage('ImmorTerm: No terminal config found. Open a terminal first.');
         return;
       }
 
