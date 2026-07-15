@@ -8748,6 +8748,16 @@
           // main terminal (no session cwd — the scratch PTY's cwd is unknown
           // to the webview).
           openLink: (link) => openTerminalLink(link, undefined),
+          // Cmd+hover previews: same host-global resolver + #link-tooltip as
+          // the main terminal (viewport-anchored, so it lands next to the
+          // hovered cell in the floating panel). The scratch supplies its own
+          // OSC7 cwd for relative file links, falling back to the owner's.
+          linkHover: terminalLinkHoverHook,
+          linkHoverEnd: terminalLinkHoverEndHook,
+          fallbackCwd: () => {
+            const s = sessions.get(sessionName);
+            return s && s.cwd ? s.cwd : undefined;
+          },
         });
         scratchControllers.set(sessionName, controller);
       } catch (e) {
@@ -12405,7 +12415,11 @@
       setLinkCursor(false);
       hideLinkTooltip();
     }
-    function terminalLinkHoverHook(link, e) {
+    // `cwdOverride` — relative-path base for file links. The main terminal
+    // omits it (falls back to the active session's cwd); scratch panels pass
+    // their own OSC7-tracked cwd so relative paths resolve against the
+    // scratch shell, not the main session.
+    function terminalLinkHoverHook(link, e, cwdOverride) {
         const activate = (meta) => { setLinkCursor(true); showLinkTooltip(link, e.clientX, e.clientY, meta); };
         const deactivate = () => { setLinkCursor(false); hideLinkTooltip(); };
         if (link.kind === 'hex-color') {
@@ -12509,7 +12523,7 @@
               type: 'check-link-exists',
               path: link.text, requestId,
               line: link.line || null,
-              cwd: session && session.cwd ? session.cwd : undefined,
+              cwd: cwdOverride || (session && session.cwd ? session.cwd : undefined),
             });
           }
         } else if (link.kind === 'task') {

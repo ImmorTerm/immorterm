@@ -13,10 +13,11 @@
 // its OWN socket: resize / subscribe_raw / input_raw / input, binary frames
 // as raw PTY bytes, JSON "snapshot" for state restore.
 //
-// Lifecycle: × (hide) keeps the terminal + WS alive (display:none only);
-// trash sends {type:"scratch_kill"} on the main session's WS (host-supplied
-// sendKill) and destroys everything. Scratch is disposable — one WS retry,
-// no backoff machinery.
+// Lifecycle: click-outside / focus-out MINIMIZES (display:none only, PTY +
+// WS stay alive); ✕ and trash both open an inline close confirmation, and
+// confirming sends {type:"scratch_kill"} on the main session's WS
+// (host-supplied sendKill) and destroys everything. Scratch is disposable —
+// one WS retry, no backoff machinery.
 
 'use strict';
 
@@ -34,8 +35,8 @@ function scratchPanelHtml(canvasId) {
   <div class="scratch-header">
     <span class="scratch-title">Scratch</span>
     <span class="scratch-spacer"></span>
-    <button class="scratch-trash" type="button" title="Kill scratch terminal">🗑</button>
-    <button class="scratch-close" type="button" title="Hide (keeps running)">✕</button>
+    <button class="scratch-trash" type="button" title="Close scratch terminal">🗑</button>
+    <button class="scratch-close" type="button" title="Close scratch terminal">✕</button>
   </div>
   <div class="scratch-body">
     <canvas id="${canvasId}"></canvas>
@@ -90,13 +91,21 @@ function waitForDims(canvas, maxMs = 10000) {
 //                    session's WS (the scratch daemon is owned by it)
 // @param onDestroy   ()=>void — host clears its controller reference
 // @param onHide      ()=>void — host returns focus to the main terminal
-//                    whenever the panel minimizes (✕, blur, outside click)
+//                    whenever the panel minimizes (blur, outside click)
 // @param openLink    (link)=>void — Cmd/Ctrl+click link opener (host's
 //                    postMessage transport, same one the main terminal uses)
+// @param linkHover   (link, e, cwd)=>void — host's terminalLinkHoverHook:
+//                    the SAME per-kind preview resolver + #link-tooltip the
+//                    main terminal uses (viewport-anchored, so it follows
+//                    the cursor into this floating panel)
+// @param linkHoverEnd ()=>void — host's terminalLinkHoverEndHook
+// @param fallbackCwd ()=>string|undefined — owning session's cwd, used for
+//                    relative file links until the scratch shell emits OSC7
 export async function createScratchController({
   wasmModule, wsPort, scratchName,
   fontData, fontName, fontSize, lineHeight, fontWeight,
   applyColors, themeName, sendKill, onDestroy, onHide, openLink,
+  linkHover, linkHoverEnd, fallbackCwd,
 }) {
   // ── Panel DOM ─────────────────────────────────────────────────
   // Canvas id must be unique per controller — scratchName is
@@ -309,6 +318,23 @@ export async function createScratchController({
   // and daemon scrollback fetch are main-terminal-only.
   const phantomEl = panel.querySelector('.scratch-phantom-cursor');
   const maskEl = panel.querySelector('.scratch-cursor-mask');
+  // Relative-path base for file-link previews: the scratch terminal's own
+  // OSC7-tracked cwd, falling back to the owning session's cwd until the
+  // shell has emitted one.
+  function scratchCwd() {
+    try {
+      const c = (term && typeof term.cwd === 'function') ? term.cwd() : '';
+      if (c) return c;
+    } catch (_) { /* best effort */ }
+    return fallbackCwd ? fallbackCwd() : undefined;
+  }
+  // Cursor feedback lives on the capture textarea (it overlays the canvas,
+  // so the canvas cursor style would never be visible); the preview panel
+  // itself is the host's shared #link-tooltip resolver.
+  function endHover() {
+    capture.style.cursor = '';
+    if (linkHoverEnd) linkHoverEnd();
+  }
   const input = createTerminalInput({
     getTerm: () => (destroyed ? null : term),
     canvas,
@@ -332,10 +358,13 @@ export async function createScratchController({
       makeRequestId: (prefix) => prefix + (++clipboardSeq),
     },
     hooks: {
-      // Cursor feedback on the capture textarea (it overlays the canvas,
-      // so the canvas cursor style would never be visible).
-      linkHover: () => { capture.style.cursor = 'pointer'; },
-      linkHoverEnd: () => { capture.style.cursor = ''; },
+      // Suppress terminal input entirely while the close confirmation is up.
+      guard: () => !!confirmEl,
+      linkHover: (link, e) => {
+        capture.style.cursor = 'pointer';
+        if (linkHover) linkHover(link, e, scratchCwd());
+      },
+      linkHoverEnd: endHover,
     },
   });
 
@@ -397,6 +426,49 @@ export async function createScratchController({
     hide();
   });
 
+  // ── Close confirmation (✕ / trash) ────────────────────────────
+  // Inline DOM overlay (NOT window.confirm — native dialogs block the
+  // webview): dims the panel body, small centered card, Cancel / Close.
+  // While open, the input module's guard hook swallows all terminal keys.
+  let confirmEl = null;
+  function dismissConfirm(refocus) {
+    if (!confirmEl) return;
+    confirmEl.remove();
+    confirmEl = null;
+    if (refocus !== false && !destroyed) capture.focus({ preventScroll: true });
+  }
+  function confirmKill() {
+    try { if (sendKill) sendKill(); } catch (_) { /* best effort */ }
+    destroy();
+  }
+  function openConfirm() {
+    if (confirmEl || destroyed) return;
+    confirmEl = document.createElement('div');
+    confirmEl.className = 'scratch-confirm';
+    confirmEl.innerHTML = `
+      <div class="scratch-confirm-card">
+        <div class="scratch-confirm-title">Close scratch terminal?</div>
+        <div class="scratch-confirm-hint">The shell and its output will be discarded.</div>
+        <div class="scratch-confirm-actions">
+          <button type="button" class="scratch-confirm-cancel">Cancel</button>
+          <button type="button" class="scratch-confirm-close">Close</button>
+        </div>
+      </div>`;
+    body.appendChild(confirmEl);
+    confirmEl.querySelector('.scratch-confirm-cancel').addEventListener('click', () => dismissConfirm());
+    confirmEl.querySelector('.scratch-confirm-close').addEventListener('click', confirmKill);
+    confirmEl.querySelector('.scratch-confirm-close').focus();
+  }
+  // Escape dismisses, Enter confirms, everything else is swallowed so no
+  // keystroke reaches the PTY while the confirmation is up. Capture phase
+  // so this runs before the capture textarea's own keydown handler.
+  panel.addEventListener('keydown', (e) => {
+    if (!confirmEl) return;
+    e.stopPropagation();
+    if (e.key === 'Escape') { e.preventDefault(); dismissConfirm(); }
+    else if (e.key === 'Enter') { e.preventDefault(); confirmKill(); }
+  }, true);
+
   // ── Show / hide / destroy ─────────────────────────────────────
   function show() {
     panel.style.display = 'flex';
@@ -405,12 +477,15 @@ export async function createScratchController({
   }
   function hide() {
     if (panel.style.display === 'none') return;
+    dismissConfirm(false); // don't refocus a hidden panel's textarea
+    endHover(); // dismiss the link preview with the panel
     panel.style.display = 'none';
     if (onHide) onHide(); // host returns focus to the main terminal
   }
   function destroy() {
     if (destroyed) return;
     destroyed = true;
+    endHover(); // dismiss any live link preview
     input.dispose(); // remove window-level pointerup/keyup listeners + timers
     if (rafId) cancelAnimationFrame(rafId);
     if (sizeTimer) clearTimeout(sizeTimer);
@@ -420,15 +495,15 @@ export async function createScratchController({
     ws = null;
     try { if (term && term.free) term.free(); } catch (_) { /* best effort */ }
     term = null;
-    panel.remove();
+    panel.remove(); // takes the confirmation overlay with it
+    confirmEl = null;
     if (onDestroy) onDestroy();
   }
 
-  panel.querySelector('.scratch-close').addEventListener('click', hide);
-  panel.querySelector('.scratch-trash').addEventListener('click', () => {
-    try { if (sendKill) sendKill(); } catch (_) { /* best effort */ }
-    destroy();
-  });
+  // ✕ and trash both confirm-then-kill: plain minimize already happens via
+  // click-outside/blur, and users read ✕ as "close".
+  panel.querySelector('.scratch-close').addEventListener('click', openConfirm);
+  panel.querySelector('.scratch-trash').addEventListener('click', openConfirm);
 
   capture.focus({ preventScroll: true });
 
