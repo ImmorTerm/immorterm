@@ -2,7 +2,7 @@
   "name": "immorterm-terminal",
   "displayName": "ImmorTerm — Persistent Terminals",
   "description": "Persistent terminal sessions that survive VS Code crashes and restarts — plus optional local AI memory for Claude Code.",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "publisher": "immorterm",
   "icon": "resources/icon.png",
   "galleryBanner": {
