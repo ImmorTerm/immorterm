@@ -8,6 +8,11 @@
 		],
 		"module": "ESNext",
 		"moduleResolution": "bundler",
+		// fumadocs-mdx's generated .source/server.ts feeds an empty `DocData: {}`
+		// into its create<> generic; with the base's noUncheckedIndexedAccess,
+		// `TC['DocData'][name]` becomes `undefined` and the doc-entry intersection
+		// collapses to `never`, erasing `page.data.body`/`.toc`. Off for this app.
+		"noUncheckedIndexedAccess": false,
 		"allowJs": true,
 		"noEmit": true,
 		"declaration": false,

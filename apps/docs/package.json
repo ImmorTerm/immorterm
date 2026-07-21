@@ -12,10 +12,10 @@
 	"//": "No `typecheck` target on purpose: `next build` type-gates this app; a separate tsc over the Next+Fumadocs type graph is redundant and OOM-prone.",
 	"dependencies": {
 		"@immorterm/ui": "workspace:*",
-		"fumadocs-core": "14.7.7",
-		"fumadocs-mdx": "11.6.11",
-		"fumadocs-ui": "14.7.7",
-		"next": "^14.2.0",
+		"fumadocs-core": "16.11.5",
+		"fumadocs-mdx": "15.2.0",
+		"fumadocs-ui": "16.11.5",
+		"next": "16.3.0-preview.6",
 		"react": "catalog:",
 		"react-dom": "catalog:",
 		"lucide-react": "catalog:ui",
@@ -26,9 +26,9 @@
 		"@types/mdx": "^2.0.13",
 		"@types/react": "catalog:",
 		"@types/react-dom": "catalog:",
-		"autoprefixer": "^10",
+		"@tailwindcss/postcss": "^4",
 		"postcss": "^8",
-		"tailwindcss": "^3.4.0",
+		"tailwindcss": "^4",
 		"typescript": "catalog:"
 	}
 }

@@ -1,7 +1,6 @@
-/* Tailwind v3 (fumadocs-ui 14 is the tailwind-3 line — apps/web's tailwind 4 is per-app). */
+/* Tailwind v4 (fumadocs-ui 16 is the tailwind-4 line). */
 export default {
 	plugins: {
-		tailwindcss: {},
-		autoprefixer: {},
+		"@tailwindcss/postcss": {},
 	},
 };

@@ -1,6 +1,6 @@
 import "./global.css";
 import { Footer } from "@immorterm/ui";
-import { RootProvider } from "fumadocs-ui/provider";
+import { RootProvider } from "fumadocs-ui/provider/next";
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import { BrandMark } from "./components/brand-mark";

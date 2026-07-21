@@ -15,9 +15,10 @@ export default function Layout({ children }: { children: ReactNode }) {
 		<DocsLayout
 			tree={source.pageTree}
 			// Replace fumadocs' navbar with the branded @immorterm/ui Nav (sticky, h-16 —
-			// matches --fd-nav-height in global.css). Search stays on ⌘K + the sidebar.
+			// matches --fd-header-height in global.css). Search stays on ⌘K + the sidebar.
 			nav={{ component: <Nav logo={<BrandMark />} links={NAV_LINKS} /> }}
-			disableThemeSwitch
+			// fumadocs 16 dropped the `disableThemeSwitch` prop; the tank is dark-only.
+			themeSwitch={{ enabled: false }}
 		>
 			{children}
 		</DocsLayout>

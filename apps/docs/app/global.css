@@ -1,45 +1,73 @@
 /* ImmorTerm docs — terminal-dark Tank skin (the brand design tokens).
- * Fumadocs 14 reads HSL triplets from --fd-* vars; map them onto the Tank
- * palette (mort tokens in libs/ui/src/tokens.ts — hexes mirrored as HSL here). */
-@import "fumadocs-ui/style.css";
+ * Fumadocs 16 reads full color values from --color-fd-* vars (Tailwind v4);
+ * map them onto the Tank palette (mort tokens in libs/ui/src/tokens.ts — the
+ * hexes are mirrored as HSL here). */
+@import "tailwindcss";
+@import "fumadocs-ui/css/neutral.css";
+@import "fumadocs-ui/css/preset.css";
 @import "../../../libs/ui/src/styles.css";
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* Tailwind v4 auto-scans this app but not the workspace lib or hoisted deps —
+ * point it at fumadocs-ui's compiled classes and the @immorterm/ui source. */
+@source "../../../node_modules/fumadocs-ui/dist/**/*.js";
+@source "../../../libs/ui/src/**/*.{ts,tsx}";
+
+/* Token classes @immorterm/ui components use (bg-bg, text-text-muted,
+ * text-accent, ...) — the v4 @theme port of the old tailwind.config.ts extend.
+ * Values reference the --brand-* vars from libs/ui/src/styles.css (single
+ * source), so the Tank palette stays defined in exactly one place. */
+@theme {
+	--color-brand: var(--brand-coral);
+	--color-brand-dark: var(--brand-coral-deep);
+	--color-accent: var(--brand-coral);
+	--color-bg: var(--brand-tank);
+	--color-bg-card: var(--brand-tank-glass);
+	/* ponytail: bg-elevated exists only in apps/web's @theme, not tokens.ts;
+	   promote it there if a third consumer appears. */
+	--color-bg-elevated: #1a1e2b;
+	--color-text-primary: var(--brand-foam);
+	--color-text-muted: var(--brand-foam-soft);
+	--color-success: var(--brand-vitals);
+	--color-warning: var(--brand-warn);
+	--color-danger: var(--brand-danger);
+	--font-sans: "Inter", system-ui, sans-serif;
+	--font-mono: "JetBrains Mono", "Fira Code", monospace;
+}
 
 :root {
 	/* Custom Nav (@immorterm/ui, h-16) replaces the fumadocs navbar — tell the
-	   layout how tall it is so the sidebar/content offset stays correct. */
+	   layout how tall it is so the sidebar/content offset stays correct.
+	   fumadocs 16 renamed --fd-nav-height → --fd-header-height. */
 	--fd-banner-height: 0px;
-	--fd-nav-height: 64px;
+	--fd-header-height: 64px;
 }
 
 /* Forced dark — the tank has no light mode. Same values on :root as a belt-and-braces
- * for anything rendered before next-themes applies the class. */
+ * for anything rendered before next-themes applies the class. These override the
+ * fumadocs preset's default --color-fd-* tokens (imported above). */
 :root,
 .dark {
-	--fd-background: 227 29% 6%; /* tank #0b0d14 */
-	--fd-foreground: 280 12% 95%; /* foam #f4f2f5 */
-	--fd-card: 226 27% 10%; /* tank-glass #12151f */
-	--fd-card-foreground: 280 12% 95%;
-	--fd-popover: 226 25% 14%; /* elevated #1a1e2b */
-	--fd-popover-foreground: 280 12% 95%;
-	--fd-primary: 352 100% 68%; /* coral #ff5c73 */
-	--fd-primary-foreground: 227 29% 6%;
-	--fd-secondary: 226 25% 14%;
-	--fd-secondary-foreground: 280 12% 95%;
-	--fd-muted: 226 25% 14%;
-	--fd-muted-foreground: 224 12% 65%; /* foam-soft #9aa0b0 */
-	--fd-accent: 226 25% 14%;
-	--fd-accent-foreground: 280 12% 95%;
-	--fd-border: 226 23% 18%; /* tank-line #232838 */
-	--fd-ring: 352 100% 68%;
+	--color-fd-background: hsl(227 29% 6%); /* tank #0b0d14 */
+	--color-fd-foreground: hsl(280 12% 95%); /* foam #f4f2f5 */
+	--color-fd-card: hsl(226 27% 10%); /* tank-glass #12151f */
+	--color-fd-card-foreground: hsl(280 12% 95%);
+	--color-fd-popover: hsl(226 25% 14%); /* elevated #1a1e2b */
+	--color-fd-popover-foreground: hsl(280 12% 95%);
+	--color-fd-primary: hsl(352 100% 68%); /* coral #ff5c73 */
+	--color-fd-primary-foreground: hsl(227 29% 6%);
+	--color-fd-secondary: hsl(226 25% 14%);
+	--color-fd-secondary-foreground: hsl(280 12% 95%);
+	--color-fd-muted: hsl(226 25% 14%);
+	--color-fd-muted-foreground: hsl(224 12% 65%); /* foam-soft #9aa0b0 */
+	--color-fd-accent: hsl(226 25% 14%);
+	--color-fd-accent-foreground: hsl(280 12% 95%);
+	--color-fd-border: hsl(226 23% 18%); /* tank-line #232838 */
+	--color-fd-ring: hsl(352 100% 68%);
 }
 
 body {
-	background-color: hsl(var(--fd-background));
-	color: hsl(var(--fd-foreground));
+	background-color: var(--color-fd-background);
+	color: var(--color-fd-foreground);
 	font-family: "Inter", system-ui, sans-serif;
 }
 
