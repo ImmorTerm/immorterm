@@ -153,6 +153,38 @@ impl TabStops {
     }
 }
 
+/// serde helper for `HashMap<(usize, usize), V>` fields: JSON object keys must
+/// be strings, and serde_json rejects tuple keys ("key must be a string"). We
+/// serialize these maps as a sequence of `(key, value)` entries instead.
+/// ponytail: a few lines beats pulling in serde_with.
+mod tuple_key_map {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashMap;
+
+    pub fn serialize<S, V>(
+        map: &HashMap<(usize, usize), V>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        V: Serialize,
+    {
+        let entries: Vec<(&(usize, usize), &V)> = map.iter().collect();
+        entries.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D, V>(
+        deserializer: D,
+    ) -> Result<HashMap<(usize, usize), V>, D::Error>
+    where
+        D: Deserializer<'de>,
+        V: Deserialize<'de>,
+    {
+        let entries: Vec<((usize, usize), V)> = Vec::deserialize(deserializer)?;
+        Ok(entries.into_iter().collect())
+    }
+}
+
 /// Serializable snapshot of terminal state for IPC transfer.
 ///
 /// Contains everything the GPU renderer needs to produce a screenshot.
@@ -177,10 +209,18 @@ pub struct TerminalSnapshot {
     #[serde(default)]
     pub expression: ExpressionState,
     /// Per-cell color overrides from expression (sparse map).
-    #[serde(default)]
+    #[serde(
+        default,
+        with = "tuple_key_map",
+        skip_serializing_if = "std::collections::HashMap::is_empty"
+    )]
     pub expression_colors: std::collections::HashMap<(usize, usize), [f32; 4]>,
     /// Combining marks for grapheme clusters (Hebrew niqqud, etc.).
-    #[serde(default, skip_serializing_if = "CombiningMarks::is_empty")]
+    #[serde(
+        default,
+        with = "tuple_key_map",
+        skip_serializing_if = "CombiningMarks::is_empty"
+    )]
     pub combining_marks: CombiningMarks,
 }
 
@@ -3446,6 +3486,32 @@ mod tests {
         // Must be >10x smaller (typically >100x for 5000 rows)
         assert!(full.len() > viewport.len() * 10,
             "viewport should be >10x smaller: full={} viewport={}", full.len(), viewport.len());
+    }
+
+    #[test]
+    fn snapshot_serializes_with_tuple_keyed_maps() {
+        // Regression: serde_json rejects HashMap<(usize,usize), _> as a JSON
+        // object ("key must be a string"). expression_colors + combining_marks
+        // must serialize (as entry sequences) and round-trip. This is the bug
+        // that broke immorterm_screenshot once niqqud populated combining_marks.
+        let t = term();
+        let mut snap = t.snapshot();
+        snap.expression_colors.insert((3, 7), [0.1, 0.2, 0.3, 1.0]);
+        snap.combining_marks
+            .insert((3, 7), smallvec::smallvec!['\u{05B4}']); // Hebrew hiriq
+
+        let json = serde_json::to_string(&snap)
+            .expect("snapshot with tuple-keyed maps must serialize");
+
+        let back: TerminalSnapshot =
+            serde_json::from_str(&json).expect("must round-trip");
+        assert_eq!(back.expression_colors.get(&(3, 7)), Some(&[0.1, 0.2, 0.3, 1.0]));
+        assert_eq!(back.combining_marks.get(&(3, 7)).map(|m| m.len()), Some(1));
+
+        // Empty maps stay omitted (skip_serializing_if) — no format conflict.
+        let empty = serde_json::to_string(&t.snapshot()).unwrap();
+        assert!(!empty.contains("expression_colors"));
+        assert!(!empty.contains("combining_marks"));
     }
 
     #[test]
