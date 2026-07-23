@@ -9414,6 +9414,10 @@
       return dockviewModule;
     }
 
+    let plansData = [];               // latest full plan records from 'plans-load' — source for plan tiles
+    function getPlanRecord(id) { return plansData.find((p) => p && p.id === id); }
+    const _validPlanId = (id) => (typeof id === 'string' && /^[a-zA-Z0-9._-]{1,128}$/.test(id)) ? id : null;
+
     // dockview createComponent — one renderer per panel kind. The element it
     // returns is the panel CONTENT; we fill it with the unified .tile chrome.
     function makeRenderer(options) {
@@ -9426,6 +9430,8 @@
           const panelId = p.panelId || (options && options.id) || 'panel';
           if ((options && options.name) === 'primary' || p.kind === 'primary') {
             buildPrimaryTile(element, panelId);
+          } else if (p.kind === 'plan') {
+            buildPlanTile(element, panelId, p);
           } else {
             buildSessionTile(element, panelId, p);
           }
@@ -9535,6 +9541,72 @@
       } catch (e) { reportError('spaces-tile', e); }
     }
 
+    // ── Plan tile (SP3b): read-only, project-branded plan body in the grid,
+    //  first-class .tile chrome (grip/lock/lift), live-updated from plansData.
+    //  No PTY/WebGPU surface — nothing to reconfigure; body is a shadow mount. ──
+    function buildPlanTile(element, panelId, params) {
+      if (_builtPanels.has(panelId)) return; // init or reconcile already built it
+      _builtPanels.add(panelId);
+      const planId = _validPlanId(params.planId); // untrusted (persistence/dataTransfer)
+      const entry = { kind: 'plan', planId, panel: null, el: element };
+      tilePanels.set(panelId, entry);
+      const tile = el('div', 'tile');
+      const hdr = el('div', 'tile-header');
+      const grip = el('span', 'tile-grip'); grip.setAttribute('aria-hidden', 'true'); grip.textContent = '⠿';
+      const title = el('span', 'tile-title'); title.textContent = planId || 'plan'; // textContent — never innerHTML
+      const status = el('span', 'tile-status'); status.setAttribute('data-state', 'live'); status.textContent = 'plan';
+      const spacer = el('span', 'tile-spacer');
+      const lockBtn = el('button', 'tile-lock codicon codicon-unlock');
+      lockBtn.type = 'button'; lockBtn.title = 'Lock this tile (pin its size)';
+      lockBtn.addEventListener('mousedown', (e) => e.preventDefault());
+      lockBtn.addEventListener('click', () => toggleTileLock(panelId));
+      // ✕ close — §2A hides dockview's own tab-close for every group, so without
+      // this a dropped plan tile is permanent. Reuses buildSessionTile's onDestroy
+      // removal path (L9513-9516): drop the dockview panel + binding, then persist.
+      const closeBtn = el('button', 'tile-close');
+      closeBtn.type = 'button'; closeBtn.title = 'Close tile'; closeBtn.textContent = '✕';
+      closeBtn.addEventListener('mousedown', (e) => e.preventDefault());
+      closeBtn.addEventListener('click', () => {
+        const p = dv && dv.panels.find((x) => x.id === panelId);
+        if (p) { try { dv.removePanel(p); } catch (_) {} }
+        tilePanels.delete(panelId); _builtPanels.delete(panelId); scheduleSpaceSave();
+      });
+      hdr.append(grip, title, status, spacer, lockBtn, closeBtn);
+      const body = el('div', 'tile-body');
+      tile.append(hdr, body);
+      element.replaceChildren(tile);
+      entry.bodyEl = body;
+      renderPlanTileBody(entry);
+      // Restore a persisted lock (mirrors buildSessionTile L9531-9534).
+      const rec = spaceMode && spacesIndex.spaces[spaceMode];
+      if (rec && rec.tiles && rec.tiles[panelId] && rec.tiles[panelId].locked) toggleTileLock(panelId, true, true);
+    }
+
+    // (Re)render a plan tile's body + title/status from the latest plansData
+    // record. attachShadow is single-shot → rebuild a fresh host each call.
+    function renderPlanTileBody(entry) {
+      const body = entry.bodyEl || (entry.el && entry.el.querySelector('.tile-body'));
+      if (!body) return;
+      const rec = entry.planId ? getPlanRecord(entry.planId) : null;
+      const titleEl = entry.el && entry.el.querySelector('.tile-title');
+      const statusEl = entry.el && entry.el.querySelector('.tile-status');
+      if (rec && titleEl) titleEl.textContent = rec.title || entry.planId; // textContent
+      if (rec && statusEl) statusEl.textContent = rec.status || 'plan';
+      body.textContent = '';
+      const host = el('div', 'plan-body-host');
+      body.appendChild(host);
+      if (!plansModule || !rec) { host.textContent = rec ? '' : '(plan unavailable)'; return; }
+      // Untrusted plan html: parse → shared sanitize gate → shared shadow mount.
+      const doc = new DOMParser().parseFromString(rec.html || '<p>(empty plan)</p>', 'text/html');
+      plansModule.sanitizePlanDoc(doc);
+      plansModule.renderPlanBodyInto(host, doc);
+    }
+
+    // Live-update: on every 'plans-load' re-render each open plan tile in place.
+    function refreshPlanTiles() {
+      for (const [, e] of tilePanels) { if (e.kind === 'plan') renderPlanTileBody(e); }
+    }
+
     function injectTileLockButton(tileEl, panelId) {
       const header = tileEl.querySelector('.tile-header');
       if (!header) return;
@@ -9567,7 +9639,7 @@
       const rec = spaceMode && spacesIndex.spaces[spaceMode];
       if (!entry || !rec) return;
       rec.tiles = rec.tiles || {};
-      const t = rec.tiles[panelId] || (rec.tiles[panelId] = { kind: entry.kind, sessionName: entry.sessionName });
+      const t = rec.tiles[panelId] || (rec.tiles[panelId] = { kind: entry.kind, sessionName: entry.sessionName, planId: entry.planId });
       const locked = (force !== undefined) ? force : !t.locked;
       t.locked = locked;
       applyTileConstraint(entry, locked);
@@ -9760,22 +9832,36 @@
       // gpu-terminal-utils) carries SESSION_MIME; internal tile moves carry a
       // dockview panel transfer (mod.getPanelData()) and are left to dockview.
       const SESSION_MIME = mod && utils && utils.SESSION_MIME ? utils.SESSION_MIME : 'application/x-immorterm-session';
+      const PLAN_MIME = plansModule && plansModule.PLAN_MIME ? plansModule.PLAN_MIME : 'application/x-immorterm-plan';
       dvSubs.push(dv.onUnhandledDragOver((e) => {
         if (mod.getPanelData()) return;                       // internal tile move
         const dt = e.nativeEvent && e.nativeEvent.dataTransfer;
-        if (dt && dt.types && dt.types.includes(SESSION_MIME)) e.accept();  // → styled overlay (§3)
+        if (!dt || !dt.types) return;
+        if (dt.types.includes(SESSION_MIME) || dt.types.includes(PLAN_MIME)) e.accept(); // → styled overlay (§3)
       }));
       dvSubs.push(dv.onDidDrop((e) => {
         if (mod.getPanelData()) return;                       // internal move — dockview handled it
         const dt = e.nativeEvent && e.nativeEvent.dataTransfer;
-        const name = dt && dt.getData(SESSION_MIME);
+        if (!dt) return;
+        const position = { referenceGroup: e.group && e.group.id, direction: mod.positionToDirection(e.position) };
+        const planId = _validPlanId(dt.getData(PLAN_MIME));
+        if (planId) {
+          // Dedupe: a plan may be tiled once. A duplicate plan tile is pure waste
+          // (two identical read-only bodies, both re-rendering on every update)
+          // with NO PTY/claim hazard — so collapse to a single tile, don't add a 2nd.
+          for (const [, en] of tilePanels) { if (en.planId === planId) return; }
+          addPlanTile(planId, position);
+          try { e.nativeEvent.preventDefault(); } catch (_) {}
+          return;
+        }
+        const name = dt.getData(SESSION_MIME);
         // Same exclusions as showAddTileMenu (:9884-9888): the primary already
         // owns activeSessionName's PTY, and a session already tiled must not get
         // a second tile — either would double registerClaim() the one PTY and
         // race two subscribe_raw streams (the failure enterSpace documents).
         if (!name || !sessions.get(name) || name === activeSessionName) return;
         for (const [, en] of tilePanels) { if (en.sessionName === name) return; }
-        addSessionTile(name, undefined, { referenceGroup: e.group && e.group.id, direction: mod.positionToDirection(e.position) });
+        addSessionTile(name, undefined, position);
         try { e.nativeEvent.preventDefault(); } catch (_) {}
       }));
 
@@ -9806,6 +9892,8 @@
           const binding = (rec.tiles && rec.tiles[panel.id]) || {};
           if (binding.kind === 'primary') {
             buildPrimaryTile(host, panel.id);
+          } else if (binding.kind === 'plan') {
+            buildPlanTile(host, panel.id, { kind: 'plan', planId: binding.planId, panelId: panel.id });
           } else {
             buildSessionTile(host, panel.id, { kind: 'session', sessionName: binding.sessionName, panelId: panel.id });
           }
@@ -9881,6 +9969,19 @@
       if (panel) { const e = tilePanels.get(id) || {}; e.panel = panel; tilePanels.set(id, e); wirePanelHooks(panel); }
       scheduleSpaceSave();
     }
+    // §6B — add a plan tile (drag-drop from the PLANS sidebar; mirrors addSessionTile).
+    function addPlanTile(planId, position) {
+      if (!dv) return;
+      const id = 'panel_' + Math.random().toString(36).slice(2, 8);
+      const rec = getPlanRecord(planId);
+      dv.addPanel({ id, component: 'plan',
+        title: (rec && rec.title) || planId,
+        params: { kind: 'plan', planId, panelId: id },
+        position: position || undefined });
+      const panel = dv.panels.find((p) => p.id === id);
+      if (panel) { const e = tilePanels.get(id) || {}; e.panel = panel; tilePanels.set(id, e); wirePanelHooks(panel); }
+      scheduleSpaceSave();
+    }
     function showAddTileMenu(e, referencePanelId) {
       const old = document.querySelector('.sb-context-menu'); if (old) old.remove();
       const menu = el('div', 'sb-context-menu');
@@ -9913,7 +10014,7 @@
       const tiles = {};
       for (const [id, e] of tilePanels) {
         const prev = (rec.tiles && rec.tiles[id]) || {};
-        tiles[id] = { kind: e.kind, sessionName: e.sessionName, locked: !!prev.locked };
+        tiles[id] = { kind: e.kind, sessionName: e.sessionName, planId: e.planId, locked: !!prev.locked };
       }
       rec.tiles = tiles;
     }
@@ -14529,6 +14630,7 @@
     let pomodoro = null; // initialized in wasm-init handler (gpu-terminal-pomodoro.js)
     let tasksPanel = null; // initialized in wasm-init handler (gpu-terminal-tasks.js)
     let plansPanel = null; // initialized in wasm-init handler (gpu-terminal-plans.js)
+    let plansModule = null; // gpu-terminal-plans.js — hoisted so buildPlanTile can call sanitizePlanDoc/renderPlanBodyInto
     let filesModule = null; // gpu-terminal-files.js module (floating menu + factory)
     let browserModule = null; // gpu-terminal-browser.js — workshop surface + controller factory
     let browserMortAvatarUrl = null; // resolved URL for the Mort sticker PNG
@@ -15369,7 +15471,7 @@
           // Import plans module (sidebar plans section — S4)
           if (msg.plansUri && !plansPanel) {
             try {
-              const plansModule = await import(msg.plansUri);
+              plansModule = await import(msg.plansUri);
               plansPanel = plansModule.createPlansPanel({
                 plansHeaderEl: document.getElementById('plans-header'),
                 plansListEl: document.getElementById('plans-list'),
@@ -15383,6 +15485,7 @@
                 // S5a single-writer rule: the module reports content, the
                 // accordion (applySectionLayout) owns display.
                 onHasContent: (has) => sectionSetHasContent('plans', has),
+                enableGridDrag: true, // §6B — drag a plan row into the Spaces grid
               });
               vscode.postMessage({ type: 'get-plans' });
               // Standalone cross-session freshness stopgap: plan_changed only
@@ -15735,7 +15838,9 @@
           if (pomodoro) pomodoro.loadState(msg.data);
           break;
         case 'plans-load':
+          plansData = Array.isArray(msg.plans) ? msg.plans : [];
           if (plansPanel) plansPanel.setPlans(msg.plans);
+          refreshPlanTiles();
           break;
         case 'spaces-load':
           loadSpacesIndex(msg.index);

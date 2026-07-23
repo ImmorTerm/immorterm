@@ -195,7 +195,7 @@ export function normalizeSpaceRecord(rec) {
   const validName = (n) => (typeof n === 'string' && /^[a-zA-Z0-9._-]{1,128}$/.test(n)) ? n : undefined;
   for (const id in src) {
     const t = src[id] || {};
-    tiles[id] = { kind: t.kind || 'session', sessionName: validName(t.sessionName), locked: !!t.locked };
+    tiles[id] = { kind: t.kind || 'session', sessionName: validName(t.sessionName), planId: validName(t.planId), locked: !!t.locked };
   }
   return {
     name: r.name || 'Space',

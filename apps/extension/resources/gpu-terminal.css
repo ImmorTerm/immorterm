@@ -533,7 +533,7 @@ body.with-tab-bar #container {
 /* Dragged session: smooth lift + tilt so the gesture reads as "picked up",
  * not just "faded". Transition on .session-item itself (below) drives the
  * fade-in/out when the .dragging class is toggled. */
-.session-item.dragging {
+.session-item.dragging, .plan-item.dragging {
   opacity: 0.55;
   cursor: grabbing !important;
   transform: scale(1.03) rotate(-0.8deg);
@@ -2286,6 +2286,9 @@ body.with-tab-bar #container {
   height: 22px; box-sizing: border-box;
   padding: 0 8px; cursor: pointer; font-size: 12px;
   color: var(--sidebar-text, #cdd6f4);
+  /* tween the .dragging lift (§6A grip drag), mirroring .session-item L441 */
+  transition: background 0.1s ease, opacity 0.12s ease, transform 0.12s ease, box-shadow 0.12s ease;
+  will-change: transform;
 }
 .plan-item:hover { background: var(--sidebar-hover, #1e1e2e); }
 .plan-item.superseded { opacity: 0.45; }
@@ -3673,6 +3676,13 @@ body.with-tab-bar #container {
   user-select: none;
 }
 #spaces-dv-root .tile-header:hover .tile-grip { color: var(--sidebar-accent, #b482ff); }
+/* Plan tile body: the branded plan renders in a shadow host that fills the
+   tile body and scrolls independently. Scoped under #spaces-dv-root so the
+   sidebar overlay's own .plan-body-host is untouched. */
+#spaces-dv-root .tile-body > .plan-body-host { position: absolute; inset: 0; overflow: auto; }
+/* §6B plans-row grip — drag handle into the Spaces grid */
+.plan-item .plan-grip { margin-right: 2px; }
+.plan-item:hover .plan-grip { color: var(--sidebar-accent, #b482ff); }
 /* §6A session-row grip — drag handle into the Spaces grid */
 .session-item .session-grip { margin-right: 2px; }
 .session-item:hover .session-grip { color: var(--sidebar-accent, #b482ff); }
@@ -3779,7 +3789,7 @@ body.with-tab-bar #container {
   #spaces-dv-root .dv-drop-target-anchor-container-changed { animation: none !important; }
   #spaces-dv-root .dv-drop-target-anchor,
   #spaces-dv-root .dv-drop-target-selection { transition: none !important; }
-  .session-item.dragging { transform: none; }
+  .session-item.dragging, .plan-item.dragging { transform: none; }
   .drop-indicator { transition: none; animation: none; }
 }
 /* ════════════════════════════════════════════════════════════════════ */

@@ -16,6 +16,11 @@
 
 const STATUSES = ['draft', 'active', 'decided', 'superseded', 'done'];
 
+// §6B wire MIME for PLANS-row → Spaces-grid native drag-in. Single source of
+// truth (mirrors utils.SESSION_MIME): the drop handler in gpu-terminal.html
+// reads it as `plansModule.PLAN_MIME`.
+export const PLAN_MIME = 'application/x-immorterm-plan';
+
 // ── Plan-html sanitizer ──────────────────────────────────────────────
 // Plan html is untrusted (any vendor/agent authors it) and renders in a
 // shadow root with NO CSP backstop on the hub (standalone/Tauri) path.
@@ -33,7 +38,7 @@ const PLAN_URL_ATTRS = [
   'data', 'background', 'poster', 'ping',
 ];
 const PLAN_SAFE_DATA_IMG = /^data:image\/(png|jpe?g|gif|webp)[;,]/;
-function sanitizePlanDoc(doc) {
+export function sanitizePlanDoc(doc) {
   // Whole document (head + body): a leading <style> is routed to <head> and
   // carried across, so head must be scrubbed too.
   doc.querySelectorAll(PLAN_BLOCK_TAGS).forEach((n) => n.remove());
@@ -119,6 +124,21 @@ const OVERLAY_SHADOW_CSS =
   + 'border-radius:6px;padding:5px 14px;cursor:pointer;font:inherit;font-size:12px}'
   + '.plan-submit-btn:disabled{opacity:.4;cursor:default}';
 
+/** Mount an already-sanitized plan doc's body into a fresh shadow root on
+ *  `shadowHost`, in the PROJECT's brand. Shared by the sidebar overlay and the
+ *  Spaces plan tile. Caller runs sanitizePlanDoc(doc) first (the overlay injects
+ *  comment slots into doc.body between sanitize and mount). attachShadow is
+ *  single-shot — pass a fresh host each render. Returns the shadow root. */
+export function renderPlanBodyInto(shadowHost, doc) {
+  const bodyShadow = shadowHost.attachShadow({ mode: 'open' });
+  const slotStyle = document.createElement('style');
+  slotStyle.textContent = COMMENT_SLOT_CSS;
+  bodyShadow.appendChild(slotStyle); // first → author's <style> wins ties (repo brand primary)
+  for (const st of doc.head.querySelectorAll('style')) bodyShadow.appendChild(st);
+  while (doc.body.firstChild) bodyShadow.appendChild(doc.body.firstChild);
+  return bodyShadow;
+}
+
 /** Compact wake summary typed into the agent's input box — cap ~300 chars;
  *  comment texts are referenced by count, the agent reads the record. */
 // Security: planId, decision ids, and option labels are free-form MCP args
@@ -151,7 +171,7 @@ function buildWakeSummary(planId, selections, nComments) {
  * wakeAgent(sessionName, text) — types `text` into the plan's attached (or
  *   active) Claude session; returns true if a session was woken.
  */
-export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, getPlansMode, onHasContent, submitPlan, wakeAgent }) {
+export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, getPlansMode, onHasContent, submitPlan, wakeAgent, enableGridDrag }) {
   let _plans = [];
   const _submittedIds = new Set(); // plans submitted with no live agent to wake
   let _pendingSubmit = null;       // { planId, onResult } for the open overlay
@@ -180,6 +200,33 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
     const row = el('div', 'plan-item' + (status === 'superseded' ? ' superseded' : ''));
     row.dataset.planId = plan.id;
     row.title = plan.summary || plan.title || '';
+
+    // §6B drag SOURCE — a native-drag grip carrying PLAN_MIME, so a plan row
+    // drops into the Spaces grid as a plan tile. Mirrors utils §6A. The grip's
+    // mousedown/click stopPropagation keeps a grip drag from opening the overlay.
+    if (enableGridDrag) {
+      const grip = el('span', 'tile-grip plan-grip');
+      grip.setAttribute('aria-hidden', 'true');
+      grip.textContent = '⠿';
+      grip.draggable = true;
+      grip.addEventListener('mousedown', (e) => e.stopPropagation());
+      grip.addEventListener('click', (e) => e.stopPropagation()); // grip click must not open the overlay
+      grip.addEventListener('dragstart', (e) => {
+        e.dataTransfer.setData(PLAN_MIME, plan.id);
+        e.dataTransfer.effectAllowed = 'copy';
+        row.classList.add('dragging');
+        const ghost = row.cloneNode(true);
+        ghost.style.cssText = 'position:absolute;top:-9999px;left:-9999px;width:200px;opacity:0.9;'
+          + 'transform:scale(1.03) rotate(-0.8deg);border-radius:6px;'
+          + 'box-shadow:0 8px 18px rgba(0,0,0,0.45),0 0 0 1px var(--sidebar-accent,#b482ff);'
+          + 'background:var(--sidebar-bg,#181825);pointer-events:none';
+        document.body.appendChild(ghost);
+        try { e.dataTransfer.setDragImage(ghost, 16, 12); } catch (_) { /* jsdom */ }
+        setTimeout(() => ghost.remove(), 0);
+      });
+      grip.addEventListener('dragend', () => row.classList.remove('dragging'));
+      row.appendChild(grip); // first child → leftmost
+    }
 
     row.appendChild(el('span', 'plan-title', plan.title || plan.id));
 
@@ -262,15 +309,7 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
     // clobbered by the ImmorTerm decision-form chrome below. The design
     // contract: body = project brand, chrome = ImmorTerm frame.
     const bodyHost = el('div', 'plan-body-host');
-    const bodyShadow = bodyHost.attachShadow({ mode: 'open' });
-    const slotStyle = document.createElement('style');
-    slotStyle.textContent = COMMENT_SLOT_CSS;
-    bodyShadow.appendChild(slotStyle); // first → the body's own <style> wins ties (repo brand is primary)
-    // DOMParser routes a leading <style>/<link> into <head>; carry the
-    // author's <style> across (external <link> deliberately dropped — no
-    // remote CSS from untrusted plan html), else a rich body renders bare.
-    for (const st of doc.head.querySelectorAll('style')) bodyShadow.appendChild(st);
-    while (doc.body.firstChild) bodyShadow.appendChild(doc.body.firstChild);
+    renderPlanBodyInto(bodyHost, doc); // doc sanitized above; section comment slots already inserted
     wrapper.appendChild(bodyHost);
 
     // ── Decision form (from structured decisions[], never plan html) ──

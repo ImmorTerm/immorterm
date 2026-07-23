@@ -671,7 +671,7 @@ describe('normalizeSpaceRecord — space persistence round-trip', () => {
     expect(n.name).toBe('Space');
     expect(n.layout).toBe(null);
     expect(n.gridLocked).toBe(false);
-    expect(n.tiles.p).toEqual({ kind: 'session', sessionName: undefined, locked: false });
+    expect(n.tiles.p).toEqual({ kind: 'session', sessionName: undefined, planId: undefined, locked: false });
   });
 
   it('tolerates null/garbage input without throwing', () => {
