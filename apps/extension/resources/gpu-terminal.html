@@ -3463,7 +3463,9 @@
       panel: 'right',
       header: document.getElementById('spaces-header'),
       body: [document.getElementById('spaces-list')],
-      hasContent: true,
+      // Always visible (like Sessions) — NOT content-gated: the "+ New Space"
+      // button must be reachable with zero spaces, else the section (and the
+      // whole feature) is invisible until a space somehow exists.
     });
 
     registerView('sessions', {
