@@ -394,6 +394,11 @@ export async function createTerminalTile({
   return {
     el,
     suspend, wake, destroy,
+    // Post-move/resize WebGPU surface kick (double-rAF → term.resize). The
+    // docking engine (SP2) calls this on onDidDimensionsChange/onDidLocationChange
+    // — a cross-container reparent can leave the surface stale in a way the
+    // ResizeObserver alone misses, esp. in WKWebView.
+    reconfigure: reconfigureSurface,
     focus: () => { if (!destroyed) capture.focus({ preventScroll: true }); },
     setTheme: (name) => {
       if (destroyed || !name) return;

@@ -9287,6 +9287,73 @@
     function toggleSpaces2() { if (spacesTile) exitSpaces2(); else enterSpaces2(); }
     try { window.__spaces2 = toggleSpaces2; } catch (_) { /* best effort */ }
 
+    // ── SP2 gating proof: reparent the LIVE primary canvas into a dockview
+    //    panel and back, proving the WebGPU context survives the DOM move.
+    //    Temporary harness (window.__dvProof / __dvProofExit) — removed once
+    //    the real enterSpace lands. Reconfigure = the same post-compositor
+    //    double-rAF used at init (~8278).
+    let _dvProof = null;
+    function reconfigurePrimarySurface() {
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (terminal && wasmReady && canvas.width > 0 && canvas.height > 0) {
+          terminal.resize(canvas.width, canvas.height);
+        }
+      }));
+    }
+    async function __dvProof() {
+      if (_dvProof) return 'already mounted';
+      // Resolve against the page URL (NOT import.meta — the inline module is
+      // syntax-checked as a plain Script in tests). Standalone-only proof; the
+      // real enterSpace uses the dockviewUri passed in wasm-init like tileModuleUrl.
+      const dvUrl = new URL('vendor/dockview/dockview-core.esm.js', document.baseURI).href;
+      const cssUrl = new URL('vendor/dockview/dockview.css', document.baseURI).href;
+      if (!document.querySelector('link[data-dockview]')) {
+        const link = document.createElement('link');
+        link.rel = 'stylesheet'; link.href = cssUrl; link.setAttribute('data-dockview', '1');
+        document.head.appendChild(link);
+      }
+      const dv = await import(dvUrl);
+      const area = document.getElementById('terminal-area');
+      const root = document.createElement('div');
+      root.id = 'dv-proof-root';
+      root.style.cssText = 'position:absolute;inset:0;z-index:2';
+      root.classList.add('dockview-theme-dark');
+      area.appendChild(root);
+      const canvasParent = canvas.parentElement; // remember to restore
+      const api = dv.createDockview(root, {
+        createComponent: () => {
+          const element = document.createElement('div');
+          element.className = 'tile-body';
+          element.style.cssText = 'width:100%;height:100%;position:relative';
+          return { element, init() {} };
+        },
+      });
+      const p1 = api.addPanel({ id: 'primary', title: 'Primary (reparented)', component: 'default' });
+      api.addPanel({ id: 'side', title: 'Side', component: 'default', position: { referencePanel: 'primary', direction: 'right' } });
+      const body = p1.view.content.element;
+      // THE gating move: appendChild of an attached node = a MOVE, not recreate.
+      body.appendChild(canvas);
+      body.appendChild(document.getElementById('kb-input'));
+      // wire dockview resize → surface reconfigure
+      const sub = p1.api.onDidDimensionsChange(() => reconfigurePrimarySurface());
+      _dvProof = { api, root, canvasParent, sub };
+      reconfigurePrimarySurface();
+      return 'mounted — primary reparented into dockview';
+    }
+    function __dvProofExit() {
+      if (!_dvProof) return 'not mounted';
+      const { api, root, canvasParent, sub } = _dvProof;
+      try { sub.dispose(); } catch (_) {}
+      canvasParent.appendChild(canvas);            // move canvas back
+      canvasParent.appendChild(document.getElementById('kb-input'));
+      try { api.dispose(); } catch (_) {}
+      root.remove();
+      _dvProof = null;
+      reconfigurePrimarySurface();
+      return 'exited — primary restored to classic';
+    }
+    try { window.__dvProof = __dvProof; window.__dvProofExit = __dvProofExit; } catch (_) {}
+
     // Tiny indirection so the security-warning grep doesn't flag the
     // workshop+overlay path twice — the `new Function()` call lives in a
     // single shared helper, mirroring runScriptInOverlay above.
