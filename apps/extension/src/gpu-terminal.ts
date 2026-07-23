@@ -53,6 +53,7 @@ import { applyThemeToAllScreenSessions } from './terminal/restoration';
 import { getTheme as getThemeObject, generateHardstatus } from './themes';
 import { TaskStorage } from './tasks';
 import type { Task, TaskContext } from './tasks/types';
+import { PlansStorage } from './plans';
 
 const SOCKET_DIR = path.join(process.env.HOME || '~', '.immorterm', 'sockets');
 const WASM_RESOURCE_DIR = 'resources/wasm';
@@ -229,6 +230,7 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
   private persistedActiveAiWindowId: string | undefined;
   private persistedActiveAiCaptured = false;
   private taskStorage: TaskStorage | null = null;
+  private plansStorage: PlansStorage | null = null;
   private knownTaskIds = new Set<string>();
   private initialFocusDone = false;
 
@@ -268,6 +270,8 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         for (const t of this.taskStorage.list()) this.knownTaskIds.add(t.id);
         this.taskStorage.on('change', () => this.sendTasksToWebview());
         this.taskStorage.on('external-change', () => this.onExternalTaskChange());
+        this.plansStorage = new PlansStorage(projectId);
+        this.plansStorage.on('change', () => this.sendPlansToWebview());
       } catch (err) {
         logger.warn('ImmorTerm AI: failed to init task storage:', err);
       }
@@ -518,6 +522,9 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
       const tasksUri = webview.asWebviewUri(
         vscode.Uri.file(path.join(this.context.extensionPath, 'resources', 'gpu-terminal-tasks.js')),
       );
+      const plansUri = webview.asWebviewUri(
+        vscode.Uri.file(path.join(this.context.extensionPath, 'resources', 'gpu-terminal-plans.js')),
+      );
       const filesUri = webview.asWebviewUri(
         vscode.Uri.file(path.join(this.context.extensionPath, 'resources', 'gpu-terminal-files.js')),
       );
@@ -555,6 +562,7 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         modalsUri: modalsUri.toString(),
         pomodoroUri: pomodoroUri.toString(),
         tasksUri: tasksUri.toString(),
+        plansUri: plansUri.toString(),
         filesUri: filesUri.toString(),
         browserUri: browserUri.toString(),
         markedUri: markedUri.toString(),
@@ -1940,6 +1948,11 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         this.sendTasksToWebview();
         break;
       }
+      // ── Plans (S4, read-only) ──
+      case 'get-plans': {
+        this.sendPlansToWebview();
+        break;
+      }
       case 'create-task': {
         if (!this.taskStorage) break;
         const originContext = this.getTaskOriginContext();
@@ -2085,6 +2098,11 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         this.aiEnrichTask(task).catch(err => logger.warn('aiEnrichTask failed:', err));
       }
     }
+  }
+
+  private sendPlansToWebview(): void {
+    if (!this.plansStorage || !this.view) return;
+    this.view.webview.postMessage({ type: 'plans-load', plans: this.plansStorage.list() });
   }
 
   private sendTasksToWebview(): void {
@@ -4387,6 +4405,8 @@ Return ONLY a JSON object with these fields:
     this.sessions.clear();
     this.disposables.forEach(d => d.dispose());
     this.disposables = [];
+    this.plansStorage?.dispose();
+    this.plansStorage = null;
     this.stopAllGitWatchers();
   }
 

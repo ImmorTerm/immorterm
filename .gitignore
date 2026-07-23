@@ -6,6 +6,10 @@ out/
 *.js
 *.js.map
 !src/templates/**/*.js
+# Webview resource modules are source, not build output — without this
+# negation, new gpu-terminal-*.js files silently vanish from commits
+# (siblings were historically force-added one by one).
+!apps/extension/resources/*.js
 dist/
 .next/
 build/

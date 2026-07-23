@@ -6,6 +6,7 @@ pub mod digest_api;
 pub mod files_api;
 pub mod legacy;
 pub mod modal_api;
+pub mod plans;
 pub mod registry;
 pub mod remote_api;
 pub mod tasks;
@@ -68,6 +69,8 @@ pub fn api_routes() -> Router {
         .route("/files/create", post(files_api::files_create))
         // Markdown + fenced-code highlight (port of `marked` + `shiki`)
         .route("/markdown", post(crate::markdown::render_markdown))
+        // Plans (read-only — the daemon's immorterm_plan MCP tools write)
+        .route("/plans", get(plans::list_plans))
         // Tasks (mirrors extension TaskStorage)
         .route("/tasks", get(tasks::list_tasks).post(tasks::create_task))
         .route("/tasks/reorder", post(tasks::reorder_tasks))

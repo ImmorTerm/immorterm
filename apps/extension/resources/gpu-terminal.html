@@ -1412,6 +1412,12 @@
         </span>
       </div>
       <div id="workshops-list" style="display:none"></div>
+      <div id="plans-header" style="display:none">
+        <span class="tasks-header-spacer"></span>
+        <span id="plans-title" class="tasks-title-clickable" title="Plans are AI-authored visual briefs for this project">Plans</span>
+        <span class="tasks-header-spacer"></span>
+      </div>
+      <div id="plans-list" style="display:none"></div>
     </div>
     <!-- Activity rail (right): toggles for the stacked sidebar sections
          (Sessions / Tasks / Workshops). Mirror of #rail-left; buttons
@@ -2262,6 +2268,7 @@
                 modalsUri: './gpu-terminal-modals.js',
                 pomodoroUri: './gpu-terminal-pomodoro.js',
                 tasksUri: './gpu-terminal-tasks.js',
+                plansUri: './gpu-terminal-plans.js',
                 filesUri: './gpu-terminal-files.js',
                 browserUri: './gpu-terminal-browser.js',
                 projectName: _projectName,
@@ -2629,6 +2636,16 @@
             // Write/action endpoints — hub stubs return 501 or no-op today.
             // Wired later once the hub has mutable service/license/wizard state.
             console.log('[standalone] action (stub):', msg.type, msg);
+            break;
+          // ── Plans → hub API (read-only; daemon MCP tools write) ──
+          case 'get-plans':
+            // ponytail: no /remotes/{name}/plans proxy yet — remote tabs get
+            // an empty list; add a proxy route when remote plans matter.
+            if (_remoteName) { sendToWebview({ type: 'plans-load', plans: [] }); break; }
+            fetch('/api/v1/plans?project_dir=' + encodeURIComponent(_projectDir || ''))
+              .then(r => r.json())
+              .then(d => sendToWebview({ type: 'plans-load', plans: Array.isArray(d.plans) ? d.plans : [] }))
+              .catch(err => console.error('[standalone] get-plans:', err));
             break;
           // ── Tasks → hub API ──
           case 'get-tasks':
@@ -3163,6 +3180,32 @@
       hide: () => { sidebar.classList.remove('revealed'); sidebarExpandBtn.classList.add('visible'); },
     });
 
+    // ── Plans (S4): read-only sidebar section fed by ~/.immorterm/plans.
+    // Registered BEFORE 'sessions' so railOrder() puts its icon topmost on
+    // the right rail. Module (gpu-terminal-plans.js) loads lazily in wasm-init.
+    let plansMode = 'show';
+    function applyPlansMode(mode) {
+      plansMode = mode;
+      const prev = vscode.getState() || {};
+      vscode.setState({ ...prev, 'viewMode.plans': mode });
+      if (mode === 'hidden') {
+        const h = document.getElementById('plans-header');
+        const l = document.getElementById('plans-list');
+        if (h) h.style.display = 'none';
+        if (l) l.style.display = 'none';
+      } else if (plansPanel) {
+        plansPanel.applyVisibility(); // has-content rule decides
+      }
+      syncRails();
+    }
+    registerView('plans', {
+      kind: 'view', rail: 'right', icon: 'codicon-map', title: 'Plans',
+      states: ['show', 'hidden'], defaultState: 'show', offState: 'hidden',
+      prefKey: 'viewMode.plans', persist: 'preference', container: 'sessions',
+      get: () => plansMode, apply: applyPlansMode,
+      activeWhen: (m) => m !== 'hidden',
+    });
+
     registerView('sessions', {
       kind: 'view', rail: 'right', icon: 'codicon-terminal', title: 'Sessions',
       states: ['show', 'auto-reveal', 'collapsed'], defaultState: 'show', offState: 'collapsed',
@@ -3451,10 +3494,11 @@
     // drag-and-drop is P4; this is a re-render of the same table.
     function openRailContextMenu(ev, name) {
       ev.preventDefault();
-      const onLeft = railOrder().left.includes(name);
-      const other = onLeft ? 'right' : 'left';
+      // Founder call (2026-07-23): no cross-rail move item until moving the
+      // icon also re-homes the view's CONTENT to the other side's panel stack
+      // (lands with the P4 grid engine). An icon-only "move" reads as broken.
+      // mutateRailLayout still supports { side } for when that day comes.
       openWorkshopContextMenu(ev, [
-        { label: 'Move to ' + other + ' rail', onClick: () => mutateRailLayout(name, { side: other }) },
         { label: 'Move up', onClick: () => mutateRailLayout(name, { delta: -1 }) },
         { label: 'Move down', onClick: () => mutateRailLayout(name, { delta: +1 }) },
         // ponytail: no un-hide UI yet — clearing the railLayout pref (or a
@@ -8206,7 +8250,8 @@
           // Persistent webview pane lifecycle (open_workshop / update_workshop /
           // eval_in_workshop / close_workshop MCP tools). Same Shadow-DOM
           // execution model as draw_html — only the lifecycle differs.
-          if (msg.data && typeof msg.data.event === 'string' && typeof msg.data.name === 'string') {
+          if (msg.data && typeof msg.data.event === 'string'
+              && (typeof msg.data.name === 'string' || msg.data.event === 'plan_changed')) {
             handleWorkshopEvent(msg.data);
           }
           break;
@@ -8340,6 +8385,12 @@
             renderWorkshopsList();
             syncWorkshopVisibility();
           }
+          break;
+        case 'plan_changed':
+          // S4: a plan file changed on disk — re-pull the list. No project
+          // filter: refresh is cheap and cross-project events are rare
+          // (daemon notifies the writing session only, mcp.rs:5338).
+          if (plansPanel) plansPanel.refresh();
           break;
         default:
           dbg('unknown workshop event: ' + data.event);
@@ -13466,6 +13517,7 @@
     let modals = null; // initialized in wasm-init handler
     let pomodoro = null; // initialized in wasm-init handler (gpu-terminal-pomodoro.js)
     let tasksPanel = null; // initialized in wasm-init handler (gpu-terminal-tasks.js)
+    let plansPanel = null; // initialized in wasm-init handler (gpu-terminal-plans.js)
     let filesModule = null; // gpu-terminal-files.js module (floating menu + factory)
     let browserModule = null; // gpu-terminal-browser.js — workshop surface + controller factory
     let browserMortAvatarUrl = null; // resolved URL for the Mort sticker PNG
@@ -14271,6 +14323,31 @@
               reportError('gpu-terminal-tasks', e);
             }
           }
+          // Import plans module (sidebar plans section — S4)
+          if (msg.plansUri && !plansPanel) {
+            try {
+              const plansModule = await import(msg.plansUri);
+              plansPanel = plansModule.createPlansPanel({
+                plansHeaderEl: document.getElementById('plans-header'),
+                plansListEl: document.getElementById('plans-list'),
+                getPlansMode: () => plansMode,
+                requestPlans: () => vscode.postMessage({ type: 'get-plans' }),
+              });
+              vscode.postMessage({ type: 'get-plans' });
+              // Standalone cross-session freshness stopgap: plan_changed only
+              // reaches the WRITING session's webview (daemon single-session
+              // notify), so refetch on tab focus. VS Code host doesn't need
+              // this — its fs.watch pushes to every window.
+              if (IS_STANDALONE) {
+                document.addEventListener('visibilitychange', () => {
+                  if (!document.hidden) vscode.postMessage({ type: 'get-plans' });
+                });
+              }
+              dbg('wasm-init: plans module loaded');
+            } catch (e) {
+              reportError('gpu-terminal-plans', e);
+            }
+          }
           // Import files module (left-side file browser)
           if (msg.filesUri && !fileBrowserPanel) {
             try {
@@ -14599,6 +14676,9 @@
           break;
         case 'pomodoro-load-state':
           if (pomodoro) pomodoro.loadState(msg.data);
+          break;
+        case 'plans-load':
+          if (plansPanel) plansPanel.setPlans(msg.plans);
           break;
         case 'tasks-load': {
           if (tasksPanel) tasksPanel.setTasks(msg.tasks);

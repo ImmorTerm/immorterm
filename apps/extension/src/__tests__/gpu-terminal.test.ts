@@ -465,6 +465,12 @@ describe('GPU Terminal — Message Protocol', () => {
     expect(js).toContain("type: 'theme-changed'");
   });
 
+  it('handles plans messages (S4)', () => {
+    expect(js).toContain("case 'plans-load'");
+    expect(js).toContain("type: 'get-plans'");
+    expect(js).toContain("case 'plan_changed'");
+  });
+
   it('sends error messages', () => {
     expect(js).toContain("type: 'error'");
   });
@@ -549,6 +555,13 @@ describe('GPU Terminal — Extension Message Handlers', () => {
   it('ignores save-preference with unknown key', () => {
     messageHandler({ type: 'save-preference', key: 'unknownKey', value: true });
     expect(mockUpdateAppearance).not.toHaveBeenCalled();
+  });
+
+  it('responds to get-plans with a plans-load array (S4)', () => {
+    messageHandler({ type: 'get-plans' });
+    const call = mockPostMessage.mock.calls.find(c => c[0]?.type === 'plans-load');
+    expect(call).toBeDefined();
+    expect(Array.isArray(call![0].plans)).toBe(true);
   });
 
   it('handles error messages from webview', async () => {
