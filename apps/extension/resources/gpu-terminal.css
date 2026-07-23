@@ -3748,6 +3748,18 @@ body.with-tab-bar #container {
   background: color-mix(in srgb, var(--sidebar-accent, #b482ff) 45%, transparent);
 }
 
+/* #3.5 Tile entrance — a tile eases UP into place instead of popping. dockview
+   mints one .dv-tile-host per panel at create time (add or fromJSON restore) and
+   never on sash-resize, so this fires exactly on the entrance moments. Compositor
+   translate+fade only (a hair of scale) → a live WebGPU canvas inside is only
+   visually nudged, its backing store untouched; `both` holds frame 0 so there's
+   no pre-paint flash. */
+@keyframes tile-enter {
+  from { opacity: 0; transform: translateY(9px) scale(0.988); }
+  to   { opacity: 1; transform: none; }
+}
+#spaces-dv-root .dv-tile-host { animation: tile-enter 0.28s var(--tile-ease-out) both; }
+
 /* #4 Lock = tactile clunk. Fired from JS (class swap alone won't re-run a
    keyframe). Inert at rest. */
 @keyframes lock-pop {
@@ -3786,6 +3798,7 @@ body.with-tab-bar #container {
   .tile-lock.lock-pop,
   .tile.tile-clunk,
   #spaces-dv-root.grid-clunk::after,
+  #spaces-dv-root .dv-tile-host,
   #spaces-dv-root .dv-drop-target-anchor-container-changed { animation: none !important; }
   #spaces-dv-root .dv-drop-target-anchor,
   #spaces-dv-root .dv-drop-target-selection { transition: none !important; }
