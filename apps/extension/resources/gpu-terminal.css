@@ -3492,6 +3492,66 @@ body.with-tab-bar #container {
   background: transparent; color: transparent; caret-color: transparent;
   outline: none; overflow: hidden; white-space: pre; cursor: text;
 }
+/* ── SP1 Spaces: TerminalTile (a live GPU terminal in a flex cell) ──
+   #spaces-root is inserted as a flex sibling of #terminal-area; both keep
+   flex:1 so the row splits 50/50. The tile fills the cell as a flex column
+   (header + body). Chrome mirrors the scratch panel's tokens; no floating
+   panel geometry. */
+#spaces-root {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column;
+}
+.tile {
+  flex: 1; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column;
+  overflow: hidden;
+  border-left: 1px solid var(--sidebar-border, #313244);
+  background: var(--vscode-terminal-background, #000);
+}
+.tile-header {
+  display: flex; align-items: center; gap: 6px;
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--sidebar-border, #313244);
+  background: var(--sidebar-bg, #181825);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+}
+.tile-title {
+  font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+  color: var(--sidebar-accent, #b482ff);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tile-status {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 1px 5px; border-radius: 6px;
+  color: var(--sidebar-text-dim, #7f849c);
+  background: var(--sb-popup-hover, rgba(255,255,255,0.06));
+}
+.tile-status[data-state="live"] { color: #a6e3a1; }
+.tile-status[data-state="disconnected"] { color: #f38ba8; }
+.tile-spacer { flex: 1; }
+.tile-header button {
+  background: none; border: none; cursor: pointer;
+  color: var(--sidebar-text, #cdd6f4);
+  font-size: 12px; line-height: 1;
+  padding: 3px 6px; border-radius: 4px;
+  opacity: 0.6; transition: opacity 0.15s, background 0.15s;
+}
+.tile-header button:hover { opacity: 1; background: var(--sb-popup-hover, rgba(255,255,255,0.06)); }
+.tile-body {
+  flex: 1; min-height: 0;
+  position: relative;
+}
+.tile-body canvas {
+  width: 100%; height: 100%; display: block;
+}
+.tile-capture {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  margin: 0; padding: 0; border: 0; resize: none;
+  background: transparent; color: transparent; caret-color: transparent;
+  outline: none; overflow: hidden; white-space: pre; cursor: text;
+}
 /* Inline close confirmation (✕ / trash) — dims the body, centered card.
    Sits above the canvas + capture textarea (z 5/6) within the panel. */
 .scratch-confirm {

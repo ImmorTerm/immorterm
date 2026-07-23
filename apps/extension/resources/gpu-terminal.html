@@ -3049,6 +3049,10 @@
         // (activeElement resolves to the workshop card whose shadow root holds
         // the frame img; snapping back to kbInput would kill browser typing.)
         if (ae && ae.closest && ae.closest('.workshop-content[data-workshop-name="🦕 Browser"]')) return;
+        // A click on a tile header / gutter lands on a <div>; without this the
+        // snap-back below would steal focus from the active tile back to the
+        // primary kbInput. (SP1 Spaces — #spaces-root is the tile container.)
+        if (ae && ae.closest && ae.closest('#spaces-root')) return;
         // Accordion section headers are keyboard-focusable (Enter/Space
         // toggles) — snapping focus back would make Tab-to-header impossible.
         // NARROW: the header element itself only. Matching descendants would
@@ -7548,7 +7552,9 @@
         onOpen: (ws) => {
           // Send actual viewport dimensions BEFORE subscribing, so the daemon
           // knows the correct PTY size before it sends the initial snapshot.
-          if (terminal && wasmReady) {
+          // Skip sessions a Spaces tile owns — the tile sizes their PTY (SP1);
+          // the primary's socket must not stomp it on (re)connect.
+          if (terminal && wasmReady && !claimedTileSessions.has(sessionName)) {
             const dims = terminal.dimensions();
             if (dims[0] > 0 && dims[1] > 0) {
               ws.send(JSON.stringify({ type: 'resize', cols: dims[0], rows: dims[1] }));
@@ -7794,6 +7800,17 @@
 
     function switchSession(sessionName) {
       if (sessionName === activeSessionName) return;
+      // A Spaces tile OWNS its session's PTY sizing (SP1). If the primary
+      // switched INTO a claimed session, the primary would resize that
+      // session's local grid while the tile-exemption skips its PTY
+      // broadcast → grid/PTY dim divergence → primary corruption. Enforce
+      // the "claimed ≠ active" invariant DURABLY at the one chokepoint every
+      // switch routes through (Shift+↑↓, sidebar clicks, restore). The
+      // session is already visible in the tile; close the tile to reclaim it.
+      if (typeof claimedTileSessions !== 'undefined' && claimedTileSessions.has(sessionName)) {
+        dbg('switchSession: refused — ' + sessionName + ' is claimed by a Spaces tile');
+        return;
+      }
       const session = sessions.get(sessionName);
       if (!session) return;
       // Persist last-active focus per-tab so the next reload restores it
@@ -8026,7 +8043,9 @@
       setupWsHandlers(ws, sessionName, session, {
         connectStatus: 'Reconnected',
         onOpen: (ws) => {
-          if (terminal && wasmReady) {
+          // Same tile-claim skip as the initial connect (SP1): a claimed
+          // background session's PTY is the tile's to size, not the primary's.
+          if (terminal && wasmReady && !claimedTileSessions.has(sessionName)) {
             const dims = terminal.dimensions();
             if (dims[0] > 0 && dims[1] > 0) {
               ws.send(JSON.stringify({ type: 'resize', cols: dims[0], rows: dims[1] }));
@@ -9201,6 +9220,73 @@
       }
     }
 
+    // ── SP1 Spaces dev demo — two live GPU terminals side by side ──
+    // Gated behind a dev toggle (Cmd/Ctrl+Alt+Shift+2, or window.__spaces2()).
+    // Classic single-terminal layout is the default and untouched; this only
+    // runs when the toggle fires. It inserts ONE TerminalTile as a flex sibling
+    // right after #terminal-area (each keeps flex:1 → 50/50). The primary needs
+    // ZERO code change to reflow: its ResizeObserver already sources width from
+    // #terminal-area.clientWidth and observes #terminal-area, so shrinking it
+    // fires that RO and the primary reflows to its new half-width. The §2
+    // claimedTileSessions exemption keeps the two PTYs from stomping each other.
+    async function enterSpaces2() {
+      if (spacesTile || !wasmReady || !tileModuleUrl) return;
+      // Pick the first NON-active session (exclusivity: a tile must bind a
+      // background session, never the primary's active one — else two
+      // subscribe_raw streams race and the resize claim can't be honored for
+      // the active session the primary keeps resizing).
+      let pickedName = null;
+      for (const [name] of sessions) { if (name !== activeSessionName) { pickedName = name; break; } }
+      if (!pickedName) {
+        // ponytail: SP1 requires 2 pre-existing sessions; auto-creating one is SP2.
+        if (showTransientPopover) {
+          const anchor = document.getElementById('terminal-canvas');
+          showTransientPopover('Open a second session to demo Spaces (SP1 needs two).', anchor, 4000);
+        }
+        return;
+      }
+      const picked = sessions.get(pickedName);
+      const root = document.createElement('div');
+      root.id = 'spaces-root';
+      document.getElementById('terminal-area').after(root);
+      try {
+        if (!tileModule) tileModule = await import(tileModuleUrl);
+        spacesTile = await tileModule.createTerminalTile({
+          wasmModule,
+          sessionName: pickedName,
+          wsPort: picked.wsPort,
+          resolveWsPort: () => resolveCurrentWsPort(pickedName),
+          mountEl: root,
+          registerClaim: () => claimedTileSessions.add(pickedName),
+          releaseClaim: () => claimedTileSessions.delete(pickedName),
+          displayName: picked.displayName || pickedName,
+          fontData, fontName, fontSize, lineHeight, fontWeight,
+          applyColors: applyVSCodeTerminalColors,
+          themeName: activeThemeName,
+          openLink: (link) => openTerminalLink(link, undefined),
+          linkHover: terminalLinkHoverHook,
+          linkHoverEnd: terminalLinkHoverEndHook,
+          fallbackCwd: () => picked.cwd || undefined,
+          onStatus: () => { /* SP1: header chip is enough */ },
+          onDestroy: () => {
+            spacesTile = null;
+            const r = document.getElementById('spaces-root');
+            if (r) r.remove(); // #terminal-area snaps back to full flex:1 → primary reflows
+          },
+        });
+      } catch (e) {
+        spacesTile = null;
+        root.remove();
+        reportError('spaces-tile', e);
+      }
+    }
+    function exitSpaces2() {
+      if (!spacesTile) return;
+      spacesTile.destroy(); // releases claim, frees GPU/WS/RO/rAF/input; onDestroy removes #spaces-root
+    }
+    function toggleSpaces2() { if (spacesTile) exitSpaces2(); else enterSpaces2(); }
+    try { window.__spaces2 = toggleSpaces2; } catch (_) { /* best effort */ }
+
     // Tiny indirection so the security-warning grep doesn't flag the
     // workshop+overlay path twice — the `new Function()` call lives in a
     // single shared helper, mirroring runScriptInOverlay above.
@@ -9798,6 +9884,15 @@
         rerenderActiveBacklog();
         return;
       }
+      // Cmd/Ctrl+Alt+Shift+2 → SP1 Spaces dev demo: toggle a second live GPU
+      // terminal tile side by side. Dev-only entry; classic layout is default.
+      if ((e.metaKey || e.ctrlKey) && e.altKey && e.shiftKey
+          && (e.code === 'Digit2' || e.key === '2' || e.key === '@')) {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleSpaces2();
+        return;
+      }
       // Alt+Shift+` → toggle Pomodoro modal (document-level so it works regardless of focus)
       if (e.shiftKey && e.altKey && !e.ctrlKey && !e.metaKey && (e.key === '`' || e.key === 'Dead')) {
         e.preventDefault();
@@ -9809,9 +9904,14 @@
       // Keystrokes inside a scratch panel belong to ITS terminal — don't
       // steal Shift+Up/Down (keyboard selection there) for session switching.
       if (e.target && e.target.closest && e.target.closest('.scratch-panel')) return;
+      // Same for a Spaces tile (SP1): its keystrokes belong to ITS terminal.
+      if (e.target && e.target.closest && e.target.closest('#spaces-root')) return;
       if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey
           && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
-        const names = sessionOrder.length > 0 ? [...sessionOrder] : Array.from(sessions.keys());
+        // Skip sessions owned by a Spaces tile — switchSession refuses them,
+        // so cycling must step OVER them, not stall on one.
+        const names = (sessionOrder.length > 0 ? [...sessionOrder] : Array.from(sessions.keys()))
+          .filter(n => !claimedTileSessions.has(n));
         if (names.length > 1 && activeSessionName) {
           const idx = names.indexOf(activeSessionName);
           if (idx !== -1) {
@@ -13689,8 +13789,17 @@
     const browserControllers = new Map(); // owning sessionName → controller (drives its workshop card's shadow DOM)
     let scratchModuleUrl = null; // gpu-terminal-scratch.js URL (derived in wasm-init, imported lazily)
     let scratchModule = null; // gpu-terminal-scratch.js — floating scratch-terminal panel
+    let tileModuleUrl = null; // gpu-terminal-tile.js URL (derived in wasm-init, imported lazily)
+    let tileModule = null; // gpu-terminal-tile.js — SP1 Spaces TerminalTile factory
+    let spacesTile = null; // the single SP1 dev-demo TerminalTile (null when classic layout)
     const scratchControllers = new Map(); // owning sessionName → live scratch panel controller
     const scratchOpenPending = new Set(); // sessionNames with scratch_open awaiting scratch_info
+    // Sessions whose PTY dims a TerminalTile owns (SP1 Spaces). The primary's
+    // sendResize broadcast MUST skip these — the tile sizes them to its own
+    // cell via its own debounced ResizeObserver; without the skip, every
+    // window/panel resize stomps the tile's PTY back to the primary's dims and
+    // the tile's RO stomps it forward again (SIGWINCH ping-pong).
+    const claimedTileSessions = new Set();
     // Status-bar theme fan-out: apply to the main terminal AND every live
     // scratch panel. The theme's accent drives the selection highlight
     // (renderer paints ALL selections with pseudo_selection) — a scratch
@@ -14076,7 +14185,8 @@
         // Send resize to ALL connected sessions — background sessions also need
         // correct PTY dimensions so their data doesn't arrive at stale sizes.
         let sent = false;
-        for (const [, sess] of sessions) {
+        for (const [name, sess] of sessions) {
+          if (claimedTileSessions.has(name)) continue; // tile owns this session's PTY dims
           if (sess.ws && sess.ws.readyState === WebSocket.OPEN) {
             sess.ws.send(resizeMsg);
             sent = true;
@@ -14587,6 +14697,12 @@
             scratchModuleUrl = msg.scratchUri;
           } else if (msg.browserUri) {
             scratchModuleUrl = msg.browserUri.replace(/[^/]+$/, 'gpu-terminal-scratch.js');
+          }
+          // SP1 Spaces tile module — same static dir, derived by filename swap.
+          if (scratchModuleUrl) {
+            tileModuleUrl = scratchModuleUrl.replace(/[^/]+$/, 'gpu-terminal-tile.js');
+          } else if (msg.browserUri) {
+            tileModuleUrl = msg.browserUri.replace(/[^/]+$/, 'gpu-terminal-tile.js');
           }
           // Kick off actual WASM compilation NOW, regardless of session
           // count. Previously this only fired inside `case 'add-session':`
