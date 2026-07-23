@@ -1168,14 +1168,8 @@ export function createTasksPanel({ taskListEl, tasksHeaderEl, postMessage, onDra
     render();
     // Re-render board modal if open
     if (_boardRenderFn) _boardRenderFn();
-    // Respect tasks mode — don't override display if hidden or auto-reveal
-    const mode = typeof getTasksMode === 'function' ? getTasksMode() : 'show';
-    if (mode === 'show') {
-      if (tasksHeaderEl) tasksHeaderEl.style.display = '';
-      const hasContent = _tasks.length > 0;
-      if (taskListEl) taskListEl.style.display = hasContent ? '' : 'none';
-    }
-    // In 'hidden' and 'auto-reveal' modes, applyTasksMode controls visibility
+    // Section visibility is owned by the S5a accordion (applySectionLayout
+    // in gpu-terminal.html) — this module never touches style.display.
   }
 
   function _finishAnimation(taskId) {
@@ -1210,10 +1204,11 @@ export function createTasksPanel({ taskListEl, tasksHeaderEl, postMessage, onDra
     });
   }
 
-  // Wire up clickable Tasks title → full board modal
-  const tasksTitle = tasksHeaderEl?.querySelector('#tasks-title');
-  if (tasksTitle) {
-    tasksTitle.addEventListener('click', (e) => {
+  // Board opens from the header's hover action icon — the header itself
+  // toggles the accordion section (S5a B2).
+  const boardBtn = tasksHeaderEl?.querySelector('#task-board-btn');
+  if (boardBtn) {
+    boardBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       showTaskBoard('active');
     });

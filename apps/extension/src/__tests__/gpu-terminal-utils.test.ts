@@ -544,7 +544,8 @@ describe('createRenderSidebar', () => {
 
     const badge = sessionListEl.querySelector('.lock-badge');
     expect(badge).toBeTruthy();
-    expect(badge!.textContent).toBe('\uD83D\uDD12');
+    // S5a: lock is a codicon glyph (font ::before), not emoji text
+    expect(badge!.classList.contains('codicon-lock')).toBe(true);
   });
 
   it('does not show lock badge when titleLocked is false', () => {

@@ -1311,16 +1311,14 @@
          sidebar (right) — same three visibility modes (show / auto-reveal /
          collapsed), persisted width, static across session switches. -->
     <div id="file-browser">
-      <div id="file-browser-header">
-        <span>Files</span>
-        <span class="fbh-right">
-          <span id="file-browser-actions">
-            <button id="file-browser-newfile" title="New File"><svg viewBox="0 0 16 16" fill="none"><path d="M9.5 1.5H4a1 1 0 0 0-1 1v11a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V5l-3.5-3.5Z" stroke="currentColor" stroke-width="1.1"/><path d="M9 1.5V5h3.5M8 7.5v4M6 9.5h4" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg></button>
-            <button id="file-browser-newfolder" title="New Folder"><svg viewBox="0 0 16 16" fill="none"><path d="M1.5 4.5a1 1 0 0 1 1-1H6l1.5 1.5h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-7Z" stroke="currentColor" stroke-width="1.1"/><path d="M11.5 7v3M10 8.5h3" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg></button>
-            <button id="file-browser-collapse-all" title="Collapse All"><svg viewBox="0 0 16 16" fill="none"><path d="M3 5.5 5.5 8 3 10.5M8 4.5h5M8 8h5M8 11.5h5" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-            <button id="file-browser-refresh" title="Refresh"><svg viewBox="0 0 16 16" fill="none"><path d="M13 8a5 5 0 1 1-1.5-3.55M13 2v3h-3" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-          </span>
-          <button id="file-browser-toggle" title="Hide file browser"><svg viewBox="0 0 16 16" fill="none"><path d="M10 3.5 5.5 8l4.5 4.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <div id="file-browser-header" class="sec-header">
+        <span class="codicon codicon-chevron-right sec-chevron"></span>
+        <span class="sec-title">Files</span>
+        <span class="sec-actions">
+          <button class="sec-action codicon codicon-new-file" id="file-browser-newfile" title="New File"></button>
+          <button class="sec-action codicon codicon-new-folder" id="file-browser-newfolder" title="New Folder"></button>
+          <button class="sec-action codicon codicon-collapse-all" id="file-browser-collapse-all" title="Collapse All"></button>
+          <button class="sec-action codicon codicon-refresh" id="file-browser-refresh" title="Refresh"></button>
         </span>
       </div>
       <div id="file-search-wrap">
@@ -1387,37 +1385,38 @@
     </div>
     <div id="sidebar">
       <div id="sidebar-resize-handle"></div>
-      <div id="sidebar-header">
-        <button id="sidebar-toggle" title="Toggle sidebar">&rsaquo;</button>
-        <span>Sessions</span>
-        <button id="new-session-btn" title="New Session">+</button>
+      <div id="sidebar-header" class="sec-header">
+        <span class="codicon codicon-chevron-right sec-chevron"></span>
+        <span class="sec-title">Sessions</span>
+        <span class="sec-actions">
+          <button class="sec-action codicon codicon-add" id="new-session-btn" title="New Session"></button>
+        </span>
       </div>
       <div id="session-list"></div>
-      <div id="tasks-resize-handle" style="display:none"></div>
-      <div id="tasks-header" style="display:none">
-        <span class="tasks-header-spacer"></span>
-        <span id="tasks-title" class="tasks-title-clickable" title="Open task board">Tasks</span>
-        <span class="tasks-header-actions">
-          <button id="archive-tasks-btn" title="Archived tasks" style="display:none">&#x1F4E6;</button>
-          <button id="new-task-btn" title="New Task">+</button>
+      <div id="tasks-header" class="sec-header">
+        <span class="codicon codicon-chevron-right sec-chevron"></span>
+        <span class="sec-title">Tasks</span>
+        <span class="sec-actions">
+          <button class="sec-action codicon codicon-table" id="task-board-btn" title="Open task board"></button>
+          <button class="sec-action codicon codicon-archive" id="archive-tasks-btn" title="Archived tasks" style="display:none"></button>
+          <button class="sec-action codicon codicon-add" id="new-task-btn" title="New Task"></button>
         </span>
       </div>
-      <div id="task-list" style="display:none"></div>
-      <div id="workshops-resize-handle" style="display:none"></div>
-      <div id="workshops-header" style="display:none">
-        <span class="tasks-header-spacer"></span>
-        <span id="workshops-title" class="tasks-title-clickable" title="Workshops are persistent AI-authored UI panes. Right-click for show/hide.">Workshops</span>
-        <span class="tasks-header-actions">
-          <button id="new-workshop-btn" title="Workshops are AI-authored — ask Claude to open one">+</button>
+      <div id="task-list"></div>
+      <div id="workshops-header" class="sec-header">
+        <span class="codicon codicon-chevron-right sec-chevron"></span>
+        <span class="sec-title" title="Workshops are persistent AI-authored UI panes. Right-click for show/hide.">Workshops</span>
+        <span class="sec-actions">
+          <button class="sec-action codicon codicon-add" id="new-workshop-btn" title="Workshops are AI-authored — ask Claude to open one"></button>
         </span>
       </div>
-      <div id="workshops-list" style="display:none"></div>
-      <div id="plans-header" style="display:none">
-        <span class="tasks-header-spacer"></span>
-        <span id="plans-title" class="tasks-title-clickable" title="Plans are AI-authored visual briefs for this project">Plans</span>
-        <span class="tasks-header-spacer"></span>
+      <div id="workshops-list"></div>
+      <div id="plans-header" class="sec-header">
+        <span class="codicon codicon-chevron-right sec-chevron"></span>
+        <span class="sec-title" title="Plans are AI-authored visual briefs for this project">Plans</span>
+        <span class="sec-actions"></span>
       </div>
-      <div id="plans-list" style="display:none"></div>
+      <div id="plans-list"></div>
     </div>
     <!-- Activity rail (right): toggles for the stacked sidebar sections
          (Sessions / Tasks / Workshops). Mirror of #rail-left; buttons
@@ -2647,6 +2646,35 @@
               .then(d => sendToWebview({ type: 'plans-load', plans: Array.isArray(d.plans) ? d.plans : [] }))
               .catch(err => console.error('[standalone] get-plans:', err));
             break;
+          case 'plans-submit':
+            // One batched write: resolutions + comments in a single
+            // flock-guarded hub POST (mirrors the create-task pattern).
+            if (_remoteName) {
+              // ponytail: plans are already empty on remote tabs; wire the
+              // /remotes/{name}/ proxy when remote plans ship.
+              sendToWebview({ type: 'plans-submit-result', ok: false, planId: msg.planId, error: 'Plan submit is not available on remote tabs' });
+              break;
+            }
+            fetch('/api/v1/plans/submit', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                project_dir: _projectDir || '',
+                plan_id: msg.planId,
+                resolutions: msg.resolutions || [],
+                comments: msg.comments || [],
+              }),
+            })
+              .then(r => r.json().then(d => ({ ok: r.ok, d })))
+              .then(({ ok, d }) => {
+                sendToWebview({ type: 'plans-submit-result', ok: ok && !d.error, planId: msg.planId, plan: d.plan, error: d.error });
+                handleHostMessage({ type: 'get-plans' });
+              })
+              .catch(err => {
+                console.error('[standalone] plans-submit:', err);
+                sendToWebview({ type: 'plans-submit-result', ok: false, planId: msg.planId, error: String(err) });
+              });
+            break;
           // ── Tasks → hub API ──
           case 'get-tasks':
             fetch(tasksUrl('', 'project_dir=' + encodeURIComponent(_projectDir || '')))
@@ -3021,6 +3049,12 @@
         // (activeElement resolves to the workshop card whose shadow root holds
         // the frame img; snapping back to kbInput would kill browser typing.)
         if (ae && ae.closest && ae.closest('.workshop-content[data-workshop-name="🦕 Browser"]')) return;
+        // Accordion section headers are keyboard-focusable (Enter/Space
+        // toggles) — snapping focus back would make Tab-to-header impossible.
+        // NARROW: the header element itself only. Matching descendants would
+        // park focus on clicked action icons forever and silently eat
+        // terminal keystrokes.
+        if (ae && ae.classList && ae.classList.contains('sec-header')) return;
         if (!ae) { kbInput.focus({ preventScroll: true }); return; }
         // If a modal is visible, leave focus where it is.
         const mc = document.getElementById('modal-container');
@@ -3043,7 +3077,6 @@
     const sessionListEl = document.getElementById('session-list');
     const newSessionBtn = document.getElementById('new-session-btn');
     const sidebar = document.getElementById('sidebar');
-    const sidebarToggle = document.getElementById('sidebar-toggle');
     const sidebarExpandBtn = document.getElementById('sidebar-expand-btn');
     const resizeHandle = document.getElementById('sidebar-resize-handle');
 
@@ -3097,6 +3130,184 @@
     function toggleView(name) {
       const v = VIEWS[name];
       setViewMode(name, v.activeWhen(v.get()) ? v.offState : 'show');
+    }
+
+    // ── S5a accordion sections ──
+    // VS Code-identical collapse/expand of the stacked sidebar sections.
+    // spec = { panel:'right'|'left', header:HTMLElement, body:HTMLElement[],
+    //          defaultWeight?, hasContent?, visibleWhen? }
+    // body[0] gets the flex sizing (the scrolling list); extra body entries
+    // (e.g. the Files search box) just show/hide with expansion.
+    // Single-writer rule: applySectionLayout is the ONLY writer of
+    // style.display for section headers/bodies/dividers. Content modules
+    // report content via sectionSetHasContent(name, bool) — never display.
+    const SECTIONS = Object.create(null);
+    const SECTION_ORDER = { right: [], left: [] };
+    function registerSection(name, spec) {
+      if (spec.hasContent) spec._has = false; // hidden until content reported
+      SECTIONS[name] = spec;
+      const order = SECTION_ORDER[spec.panel];
+      order.push(name);
+      // Visual order = DOM order, regardless of registration order.
+      order.sort((a, b) =>
+        (SECTIONS[a].header.compareDocumentPosition(SECTIONS[b].header)
+          & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1);
+    }
+
+    let sectionState = { expanded: {}, sizes: {} }; // single pref blob (B5)
+
+    function isSectionExpanded(n) {
+      const e = sectionState.expanded ? sectionState.expanded[n] : undefined;
+      return e !== undefined ? e : true;
+    }
+    function setSectionExpanded(name, expanded, persist = true) {
+      sectionState.expanded[name] = expanded;
+      applySectionLayout(SECTIONS[name].panel);
+      if (persist) persistSectionState();
+    }
+    function persistSectionState() {
+      const prev = vscode.getState() || {};
+      vscode.setState({ ...prev, sectionState });
+      vscode.postMessage({ type: 'save-preference', key: 'sectionState', value: sectionState });
+    }
+    function sectionSetHasContent(name, has) {
+      const s = SECTIONS[name];
+      if (!s || s._has === has) return;
+      s._has = has;
+      applySectionLayout(s.panel);
+    }
+
+    function applySectionLayout(panel) {
+      // Weight seeding: stored sizes are px (hundreds); a never-dragged
+      // section's defaultWeight (~1) would starve next to them. Seed
+      // missing weights with the mean of stored px so a freshly expanded
+      // section claims a proportional share.
+      const stored = Object.entries(sectionState.sizes || {})
+        .filter(([n]) => SECTION_ORDER[panel].includes(n))
+        .map(([, px]) => px);
+      const seed = stored.length ? stored.reduce((a, b) => a + b, 0) / stored.length : 0;
+      // Divider rule (VS Code sash): visible only when an EXPANDED section
+      // exists both above and below the boundary — between collapsed
+      // headers it would be a dead cursor plus a 4px gap.
+      const states = SECTION_ORDER[panel].map((n) => {
+        const s = SECTIONS[n];
+        const v = VIEWS[n];
+        const off = v && v.kind === 'view' && v.container && !v.activeWhen(v.get());
+        const visible = !off
+          && (s.visibleWhen ? s.visibleWhen() : true)
+          && (s.hasContent ? s._has === true : true);
+        return { n, s, visible, expanded: visible && isSectionExpanded(n) };
+      });
+      let expandedAbove = false;
+      states.forEach((st, i) => {
+        const { n, s, visible, expanded } = st;
+        s.header.style.display = visible ? '' : 'none';
+        s.header.classList.toggle('expanded', expanded);
+        s.header.setAttribute('aria-expanded', String(expanded));
+        for (const b of s.body) b.style.display = expanded ? '' : 'none';
+        const w = (sectionState.sizes && sectionState.sizes[n]) || seed || s.defaultWeight || 1;
+        // flex sizing lives on body[0]; grow weight = last-drag px (share
+        // restores proportionally on a different panel height — R6).
+        s.body[0].style.flex = expanded ? (w + ' 1 0px') : '';
+        s.body[0].style.minHeight = expanded ? '40px' : '';
+        if (s.divider) {
+          const expandedBelow = states.slice(i).some((x) => x.expanded);
+          s.divider.style.display = (expandedAbove && expandedBelow) ? '' : 'none';
+        }
+        if (expanded) expandedAbove = true;
+      });
+    }
+
+    function wireSectionHeader(name) {
+      const h = SECTIONS[name].header;
+      h.tabIndex = 0; h.setAttribute('role', 'button'); // B6
+      h.addEventListener('click', (e) => {
+        if (e.target.closest('.sec-action')) return; // B2: actions don't toggle
+        setSectionExpanded(name, !isSectionExpanded(name));
+        focusInput();
+      });
+      h.addEventListener('keydown', (e) => {
+        // Same guard as click: a focused action icon (Tab reaches them)
+        // activates ITSELF on Enter/Space — swallowing it here would make
+        // every keyboard activation collapse the section instead.
+        if (e.target !== h && e.target.closest && e.target.closest('.sec-action')) return;
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          setSectionExpanded(name, !isSectionExpanded(name));
+        }
+      });
+    }
+
+    // Divider drag — VS Code neighbor-only sash. On mousedown every expanded
+    // body is frozen at its current px (as a grow weight over basis 0, which
+    // resolves to exactly that px), then only the nearest expanded neighbors
+    // above/below trade space. mouseup persists all px as weights.
+    function initSections() {
+      let drag = null;
+      document.addEventListener('mousemove', (e) => {
+        if (!drag) return;
+        const span = drag.startAbove + drag.startBelow;
+        const above = Math.min(span - 40, Math.max(40, drag.startAbove + (e.clientY - drag.startY)));
+        drag.above.style.flex = above + ' 1 0px';
+        drag.below.style.flex = (span - above) + ' 1 0px';
+      });
+      document.addEventListener('mouseup', () => {
+        if (!drag) return;
+        drag.divider.classList.remove('dragging');
+        document.body.style.userSelect = '';
+        document.body.style.cursor = '';
+        for (const n of SECTION_ORDER[drag.panel]) {
+          const s = SECTIONS[n];
+          if (s.header.style.display !== 'none' && isSectionExpanded(n)) {
+            sectionState.sizes[n] = s.body[0].offsetHeight;
+          }
+        }
+        drag = null;
+        persistSectionState();
+      });
+      for (const panel of ['right', 'left']) {
+        const names = SECTION_ORDER[panel];
+        names.forEach((name, i) => {
+          wireSectionHeader(name);
+          if (i === 0) return;
+          const s = SECTIONS[name];
+          const div = document.createElement('div');
+          div.className = 'sec-divider';
+          s.header.parentNode.insertBefore(div, s.header);
+          s.divider = div;
+          div.addEventListener('mousedown', (e) => {
+            const expandedVisible = (n) => {
+              const x = SECTIONS[n];
+              return x.header.style.display !== 'none' && isSectionExpanded(n)
+                && x.body[0].style.display !== 'none';
+            };
+            const aboveName = names.slice(0, i).reverse().find(expandedVisible);
+            const belowName = names.slice(i).find(expandedVisible);
+            if (!aboveName || !belowName) return;
+            e.preventDefault();
+            // Freeze every expanded body at its current px so non-neighbors
+            // stay pinned while the two neighbors trade space.
+            for (const n of names) {
+              if (expandedVisible(n)) {
+                const b = SECTIONS[n].body[0];
+                b.style.flex = b.offsetHeight + ' 1 0px';
+              }
+            }
+            const above = SECTIONS[aboveName].body[0];
+            const below = SECTIONS[belowName].body[0];
+            drag = {
+              panel, divider: div, above, below,
+              startY: e.clientY,
+              startAbove: above.offsetHeight,
+              startBelow: below.offsetHeight,
+            };
+            div.classList.add('dragging');
+            document.body.style.userSelect = 'none';
+            document.body.style.cursor = 'ns-resize';
+          });
+        });
+        applySectionLayout(panel);
+      }
     }
 
     // Rail icons mirror the panel modes. Runs at the end of every apply*Mode
@@ -3156,13 +3367,6 @@
       syncRails();
     }
 
-    // Toggle button inside sidebar header → collapse. Routed through
-    // setViewMode so the collapse also persists via save-preference (it
-    // previously only wrote webview state).
-    sidebarToggle.addEventListener('click', () => {
-      setViewMode('sessions', 'collapsed');
-    });
-
     // Floating expand button → show
     sidebarExpandBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -3188,14 +3392,7 @@
       plansMode = mode;
       const prev = vscode.getState() || {};
       vscode.setState({ ...prev, 'viewMode.plans': mode });
-      if (mode === 'hidden') {
-        const h = document.getElementById('plans-header');
-        const l = document.getElementById('plans-list');
-        if (h) h.style.display = 'none';
-        if (l) l.style.display = 'none';
-      } else if (plansPanel) {
-        plansPanel.applyVisibility(); // has-content rule decides
-      }
+      applySectionLayout('right'); // mode gate + has-content rule decide
       syncRails();
     }
     registerView('plans', {
@@ -3204,6 +3401,12 @@
       prefKey: 'viewMode.plans', persist: 'preference', container: 'sessions',
       get: () => plansMode, apply: applyPlansMode,
       activeWhen: (m) => m !== 'hidden',
+    });
+    registerSection('plans', {
+      panel: 'right',
+      header: document.getElementById('plans-header'),
+      body: [document.getElementById('plans-list')],
+      hasContent: true,
     });
 
     registerView('sessions', {
@@ -3214,6 +3417,12 @@
       activeWhen: (m) => m === 'show',
       hoverReveal: () => { if (sidebarMode === 'auto-reveal') sidebar.classList.add('revealed'); },
     });
+    registerSection('sessions', {
+      panel: 'right',
+      header: document.getElementById('sidebar-header'),
+      body: [sessionListEl],
+      defaultWeight: 3,
+    });
 
     // ── File Browser: Mode / Resize / Persist ──
     // Mirror of the sessions sidebar machinery, flipped to the left edge.
@@ -3222,7 +3431,6 @@
     // peek) | 'hidden' (gone). Every reveal except 'show' overlaps the
     // terminal so it never reflows. Width + mode persist per-project.
     const fileBrowser = document.getElementById('file-browser');
-    const fileBrowserToggle = document.getElementById('file-browser-toggle');
     const fileBrowserExpandBtn = document.getElementById('file-browser-expand-btn');
     const fileBrowserResizeHandle = document.getElementById('file-browser-resize-handle');
     let fileBrowserMode = 'show';
@@ -3302,11 +3510,6 @@
       }
     }
 
-    // Toggle button inside header → collapse
-    fileBrowserToggle.addEventListener('click', () => {
-      setViewMode('files', 'collapsed');
-    });
-
     // Reveal the panel as an OVERLAY (absolute, over the terminal) so the
     // terminal never reflows. Used for both collapsed (click) and
     // auto-reveal (hover) — only the always-on 'show' mode is a flex child
@@ -3356,6 +3559,13 @@
       get: () => fileBrowserMode, apply: applyFileBrowserMode,
       activeWhen: (m) => m === 'show',
       hoverReveal: () => { if (fileBrowserMode === 'auto-reveal') openFileBrowserOverlay(); },
+    });
+    // body[0] = #file-tree gets the flex sizing; the search box just
+    // shows/hides with expansion. Panel tri-state modes untouched (B7).
+    registerSection('files', {
+      panel: 'left',
+      header: document.getElementById('file-browser-header'),
+      body: [document.getElementById('file-tree'), document.getElementById('file-search-wrap')],
     });
 
     registerView('search', {
@@ -3550,6 +3760,16 @@
       let wsFlagHidden = false;
       try { wsFlagHidden = localStorage.getItem(WORKSHOP_PANEL_HIDDEN_KEY) === '1'; } catch (_) {}
       if (!saved.workshopsMode && wsFlagHidden) saved.workshopsMode = 'hidden';
+      // Accordion state restores BEFORE the apply loop so the first
+      // applySectionLayout (initSections) already sees it. Absent →
+      // all sections expanded with default weights (R7).
+      if (saved.sectionState) {
+        sectionState = {
+          expanded: saved.sectionState.expanded || {},
+          sizes: saved.sectionState.sizes || {},
+        };
+      }
+      initSections();
       for (const name in VIEWS) {
         const v = VIEWS[name];
         if (v.kind !== 'view') continue;
@@ -3567,81 +3787,21 @@
     let tasksMode = 'show';
     let tasksRevealed = false;
 
-    // Get tasks zone elements (cached after first call)
-    function getTasksEls() {
-      return {
-        header: document.getElementById('tasks-header'),
-        list: document.getElementById('task-list'),
-        resize: document.getElementById('tasks-resize-handle'),
-      };
-    }
-
+    // Auto-reveal toggles section VISIBILITY; accordion expanded state still
+    // governs whether the body shows when revealed (R4). Instant toggle —
+    // VS Code sections don't animate, and nothing may transition layout
+    // adjacent to the GPU canvas (R5).
     function setTasksVisible(visible) {
-      const els = getTasksEls();
       tasksRevealed = visible;
-      if (visible) {
-        // Show elements first (display: '' so layout computes), then add revealed class
-        // The rAF ensures the browser computes the initial state before transitioning
-        // 1. Set display so elements enter layout
-        if (els.header) { els.header.style.display = ''; }
-        if (els.list && tasksPanel) { els.list.style.display = ''; }
-        if (els.resize) { els.resize.style.display = ''; }
-        // 2. Force layout reflow so browser computes the initial (hidden) state
-        //    before transitioning to the revealed state. Without this, the browser
-        //    batches display + class into one paint and skips the transition.
-        if (els.header) void els.header.offsetHeight;
-        // 3. Now add revealed class → triggers CSS transition
-        if (els.header) els.header.classList.add('tasks-revealed');
-        if (els.list) els.list.classList.add('tasks-revealed');
-        if (els.resize) els.resize.classList.add('tasks-revealed');
-      } else {
-        // Remove revealed → CSS transitions opacity to 0 + slides down
-        if (els.header) els.header.classList.remove('tasks-revealed');
-        if (els.list) els.list.classList.remove('tasks-revealed');
-        if (els.resize) els.resize.classList.remove('tasks-revealed');
-        // After transition ends, set display: none
-        const onEnd = () => {
-          if (!tasksRevealed) {
-            if (els.header) els.header.style.display = 'none';
-            if (els.list) els.list.style.display = 'none';
-            if (els.resize) els.resize.style.display = 'none';
-          }
-        };
-        if (els.header) {
-          els.header.addEventListener('transitionend', onEnd, { once: true });
-          setTimeout(onEnd, 400); // fallback
-        } else {
-          onEnd();
-        }
-      }
+      applySectionLayout('right');
     }
 
     function applyTasksMode(mode) {
       tasksMode = mode;
-      const els = getTasksEls();
-      // Clean up animation classes
-      const autoRevealClass = 'tasks-auto-reveal';
-
-      if (mode === 'hidden') {
-        tasksRevealed = false;
-        for (const e of [els.header, els.list, els.resize]) {
-          if (e) { e.style.display = 'none'; e.classList.remove('tasks-revealed', autoRevealClass); }
-        }
-      } else if (mode === 'auto-reveal') {
-        tasksRevealed = false;
-        // Add base class for CSS transitions, start hidden
-        for (const e of [els.header, els.list, els.resize]) {
-          if (e) { e.classList.add(autoRevealClass); e.classList.remove('tasks-revealed'); e.style.display = 'none'; }
-        }
-      } else {
-        // 'show' — remove all animation classes, make visible immediately
-        for (const e of [els.header, els.list, els.resize]) {
-          if (e) { e.classList.remove('tasks-revealed', autoRevealClass); e.style.display = ''; }
-        }
-        tasksRevealed = true;
-      }
+      tasksRevealed = mode === 'show';
       const prev = vscode.getState() || {};
       vscode.setState({ ...prev, tasksMode });
+      applySectionLayout('right');
       syncRails();
     }
 
@@ -3657,10 +3817,9 @@
         if (tasksMode !== 'auto-reveal') return;
         const rect = sidebar.getBoundingClientRect();
         const bottomDist = rect.bottom - e.clientY;
-        const els = getTasksEls();
 
-        // Check if mouse is inside the tasks zone (header + list + resize)
-        const taskTarget = e.target.closest('#tasks-header, #task-list, #tasks-resize-handle');
+        // Check if mouse is inside the tasks zone (header + list)
+        const taskTarget = e.target.closest('#tasks-header, #task-list');
         if (taskTarget || bottomDist < REVEAL_ZONE) {
           // Mouse is in reveal zone or inside tasks — keep visible
           clearTimeout(hideTimer); hideTimer = null;
@@ -3685,7 +3844,7 @@
       });
 
       // When mouse enters the tasks elements directly, cancel hide
-      for (const id of ['tasks-header', 'task-list', 'tasks-resize-handle']) {
+      for (const id of ['tasks-header', 'task-list']) {
         const el = document.getElementById(id);
         if (el) {
           el.addEventListener('mouseenter', () => {
@@ -3713,6 +3872,13 @@
       prefKey: 'tasksMode', persist: 'preference', container: 'sessions',
       get: () => tasksMode, apply: applyTasksMode,
       activeWhen: (m) => m !== 'hidden',
+    });
+    registerSection('tasks', {
+      panel: 'right',
+      header: document.getElementById('tasks-header'),
+      body: [document.getElementById('task-list')],
+      // auto-reveal proximity machinery gates section visibility (R4)
+      visibleWhen: () => tasksMode !== 'auto-reveal' || tasksRevealed,
     });
 
     // Drag-resize sidebar
@@ -8429,17 +8595,10 @@
       try { syncWorkshopVisibility(); } catch (_) {}
       const prev = vscode.getState() || {};
       vscode.setState({ ...prev, workshopsMode });
-      // Also keep the sidebar header + list hidden/shown so they don't
-      // leak into the Sessions sidebar when workshops are off.
-      const header = document.getElementById('workshops-header');
-      const list = document.getElementById('workshops-list');
-      const resize = document.getElementById('workshops-resize-handle');
-      if (mode === 'hidden') {
-        for (const e of [header, list, resize]) if (e) e.style.display = 'none';
-      }
-      // 'show' / 'auto-reveal' fall through to renderWorkshopsList which
-      // decides visibility based on whether the active session has any.
+      // Sidebar section visibility: applySectionLayout owns display —
+      // the mode gate ('hidden') + has-content rule both live there.
       try { renderWorkshopsList(); } catch (_) {}
+      applySectionLayout('right');
       syncRails();
     }
     registerView('workshops', {
@@ -8448,6 +8607,12 @@
       prefKey: 'workshopsMode', persist: 'preference', container: 'sessions',
       get: () => workshopsMode, apply: applyWorkshopsMode,
       activeWhen: (m) => m !== 'hidden',
+    });
+    registerSection('workshops', {
+      panel: 'right',
+      header: document.getElementById('workshops-header'),
+      body: [document.getElementById('workshops-list')],
+      hasContent: true,
     });
     function wireWorkshopChromeOnce() {
       if (_workshopChromeWired) return;
@@ -8734,33 +8899,17 @@
 
     function renderWorkshopsList() {
       const list = document.getElementById('workshops-list');
-      const header = document.getElementById('workshops-header');
-      const handle = document.getElementById('workshops-resize-handle');
-      if (!list || !header) return;
-      // Mode guard: 'hidden' wins over content. Without this, any caller with
-      // workshops present re-shows the section applyWorkshopsMode just hid
-      // (open/close events, syncWorkshopVisibility, the apply itself).
-      if (workshopsMode === 'hidden') {
-        header.style.display = 'none';
-        list.style.display = 'none';
-        if (handle) handle.style.display = 'none';
-        return;
-      }
+      if (!list) return;
       const ours = [];
       for (const [name, w] of workshops) {
         if (w.sessionName === activeSessionName) ours.push({ name, w });
       }
-      if (ours.length === 0) {
-        header.style.display = 'none';
-        list.style.display = 'none';
-        if (handle) handle.style.display = 'none';
-        return;
-      }
-      header.style.display = '';
-      list.style.display = '';
-      if (handle) handle.style.display = '';
-      wireWorkshopsHeaderOnce();
+      // Single-writer rule: visibility (mode gate + has-content) is
+      // applySectionLayout's job — this renderer only builds rows.
+      sectionSetHasContent('workshops', ours.length > 0);
       list.replaceChildren();
+      if (ours.length === 0) return;
+      wireWorkshopsHeaderOnce();
       for (const { name, w } of ours) {
         // Reuse `.session-item` class so workshop rows inherit session-row
         // styling exactly (padding, font, hover, active state, height). The
@@ -8771,15 +8920,12 @@
         const glyph = document.createElement('span');
         glyph.className = 'glyph';
         glyph.textContent = '⚒'; // ⚒
-        glyph.style.cssText = 'width:10px;display:inline-flex;align-items:center;justify-content:center;font-size:11px;flex-shrink:0;opacity:0.85';
         const lbl = document.createElement('span');
         lbl.className = 'name';
         lbl.textContent = name;
         lbl.title = name;
         row.appendChild(glyph);
         row.appendChild(lbl);
-        row.addEventListener('mouseenter', () => { row.style.background = '#313244'; });
-        row.addEventListener('mouseleave', () => { row.style.background = ''; });
         row.addEventListener('click', () => {
           // Focus this workshop in the panel (also expands if collapsed).
           _activeWorkshopName = name;
@@ -10792,6 +10938,25 @@
       }
       const quoted = /\s/.test(p) ? `"${p}"` : p;
       return claudeActive ? `@${quoted}` : quoted;
+    }
+
+    // Plan-submit wake: type a compact summary into the plan's attached
+    // Claude session (📎, plan.sessionName), falling back to the active
+    // session. NEVER types when claudeRaw is null — the PTY would hand the
+    // text to a shell. Delivery is the terminal's own input channel with the
+    // daemon's anti-paste-heuristic timing (daemon.rs:3728): bracketed-paste
+    // text first, then a discrete Enter after ~120ms.
+    function wakePlanAgent(sessionName, text) {
+      let target = sessionName ? sessions.get(sessionName) : null;
+      if (!(target && target.ws && target.connected && target.claudeRaw)) {
+        const active = sessions.get(activeSessionName);
+        target = (active && active.ws && active.connected && active.claudeRaw) ? active : null;
+      }
+      if (!target) return false;
+      const ws = target.ws;
+      ws.send(JSON.stringify({ type: 'input', data: '\x1b[200~' + text + '\x1b[201~' }));
+      setTimeout(() => ws.send(JSON.stringify({ type: 'input', data: '\r' })), 120);
+      return true;
     }
 
     // Send text to the active PTY as keyboard input, replacing any live
@@ -13570,6 +13735,16 @@
       }
       if (msg.railsEnabled !== undefined) applyRailsPref(msg.railsEnabled);
       if (msg.railLayout) { railLayout = msg.railLayout; renderRails(); }
+      // S5a accordion state — authoritative echo from the host config
+      // (raw/unmerged: absent means webview state wins). Apply-only.
+      if (msg.sectionState) {
+        sectionState = {
+          expanded: msg.sectionState.expanded || {},
+          sizes: msg.sectionState.sizes || {},
+        };
+        applySectionLayout('right');
+        applySectionLayout('left');
+      }
       // Status bar mode — backward compat for old boolean statusBar
       if (msg.statusBarMode !== undefined) prefs.statusBarMode = msg.statusBarMode;
       else if (msg.statusBar !== undefined) prefs.statusBarMode = msg.statusBar ? 'always' : 'hidden';
@@ -14287,37 +14462,8 @@
               });
               // Request task data from host
               vscode.postMessage({ type: 'get-tasks' });
-
-              // Wire up resize handle between sessions and tasks
-              const resizeHandle = document.getElementById('tasks-resize-handle');
-              const sessionListEl = document.getElementById('session-list');
-              const taskListEl = document.getElementById('task-list');
-              if (resizeHandle && sessionListEl && taskListEl) {
-                resizeHandle.style.display = '';
-                let resizing = false;
-                let startY = 0;
-                let startSessionH = 0;
-                resizeHandle.addEventListener('mousedown', (re) => {
-                  re.preventDefault();
-                  resizing = true;
-                  startY = re.clientY;
-                  startSessionH = sessionListEl.offsetHeight;
-                  resizeHandle.classList.add('dragging');
-                });
-                document.addEventListener('mousemove', (re) => {
-                  if (!resizing) return;
-                  const dy = re.clientY - startY;
-                  const newH = Math.max(40, startSessionH + dy);
-                  sessionListEl.style.maxHeight = newH + 'px';
-                  sessionListEl.style.flexShrink = '0';
-                });
-                document.addEventListener('mouseup', () => {
-                  if (!resizing) return;
-                  resizing = false;
-                  resizeHandle.classList.remove('dragging');
-                });
-              }
-
+              // (Vertical resize between sections is owned by the S5a
+              // accordion dividers — no per-module handle wiring.)
               dbg('wasm-init: tasks module loaded');
             } catch (e) {
               reportError('gpu-terminal-tasks', e);
@@ -14332,6 +14478,14 @@
                 plansListEl: document.getElementById('plans-list'),
                 getPlansMode: () => plansMode,
                 requestPlans: () => vscode.postMessage({ type: 'get-plans' }),
+                submitPlan: (p) => vscode.postMessage({
+                  type: 'plans-submit', planId: p.planId,
+                  resolutions: p.resolutions, comments: p.comments,
+                }),
+                wakeAgent: wakePlanAgent,
+                // S5a single-writer rule: the module reports content, the
+                // accordion (applySectionLayout) owns display.
+                onHasContent: (has) => sectionSetHasContent('plans', has),
               });
               vscode.postMessage({ type: 'get-plans' });
               // Standalone cross-session freshness stopgap: plan_changed only
@@ -14679,6 +14833,9 @@
           break;
         case 'plans-load':
           if (plansPanel) plansPanel.setPlans(msg.plans);
+          break;
+        case 'plans-submit-result':
+          if (plansPanel) plansPanel.handleSubmitResult(msg);
           break;
         case 'tasks-load': {
           if (tasksPanel) tasksPanel.setTasks(msg.tasks);

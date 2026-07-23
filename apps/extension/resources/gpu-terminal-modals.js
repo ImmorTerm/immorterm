@@ -278,6 +278,77 @@ export function createModalSystem({
       }
     }
 
+    // ── Planning discipline (plans.enforce) — interim home until the S5b
+    // gear. Tri-state: project override On/Off, or inherit the global
+    // default. Persists via the hub's shallow-merge project-config PUT
+    // (plans: {} clears the override); read at hook RUNTIME so it applies
+    // at next session start with no hook reinstall. Values load async from
+    // GET /api/v1/config (plansEnforce keys) — same flow as the digest
+    // modal; the section stays hidden if the hub predates those keys.
+    {
+      // Empty position-holder; populated ONLY when the hub reports the
+      // plans keys — so no stray .modal-segmented exists before then (the
+      // status-bar control must stay the first segmented for tests/UX).
+      const pdWrap = el('div');
+      section.appendChild(pdWrap);
+
+      let pdProjectDir = null;
+      fetch(HUB + '/api/info')
+        .then(r => r.json())
+        .catch(() => ({}))
+        .then(info => {
+          pdProjectDir = (info && (info.projectDir || info.project_dir)) || null;
+          const qs = pdProjectDir ? 'project_dir=' + encodeURIComponent(pdProjectDir) : '';
+          return fetch(configReadUrl(qs));
+        })
+        .then(r => r.json())
+        .then(cfg => {
+          // Hub without the plans keys → leave the section hidden (deploy-
+          // ordering guard: modals.js can ship before the hub binary).
+          if (!cfg || typeof cfg.plansEnforce === 'undefined' || !pdProjectDir) return;
+          const pdHeader = el('div', 'modal-section-header', 'Planning');
+          pdHeader.style.cssText = 'margin-bottom:4px;font-weight:600;font-size:11px;text-transform:uppercase;opacity:0.6';
+          pdWrap.appendChild(pdHeader);
+          const pdHint = el('div', 'modal-row-detail',
+            'Instructs AI agents to keep a live plan with tagged decisions and comment anchors. Applies at next session start.');
+          pdHint.style.cssText = 'margin-bottom:8px;font-size:11px;opacity:0.7';
+          pdWrap.appendChild(pdHint);
+          const pdRow = el('div', 'modal-row');
+          pdRow.appendChild(el('span', 'modal-row-label', 'Plan Discipline'));
+          const pdSeg = el('div', 'modal-segmented');
+          pdRow.appendChild(pdSeg);
+          pdWrap.appendChild(pdRow);
+          const globalDefault = !!cfg.globalPlansEnforce;
+          const raw = (typeof cfg.projectPlansEnforce === 'boolean') ? cfg.projectPlansEnforce : null;
+          const choices = [
+            { value: null, label: 'Default (' + (globalDefault ? 'On' : 'Off') + ')' },
+            { value: true, label: 'On' },
+            { value: false, label: 'Off' },
+          ];
+          for (const c of choices) {
+            const btn = document.createElement('button');
+            btn.textContent = c.label;
+            if (c.value === raw) btn.classList.add('active');
+            btn.addEventListener('click', () => {
+              pdSeg.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+              btn.classList.add('active');
+              fetch(configProjectWriteUrl(), {
+                method: 'PUT',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({
+                  projectDir: pdProjectDir,
+                  // Shallow hub merge: {} replaces the whole plans object →
+                  // key absent → inherit global default.
+                  plans: c.value === null ? {} : { enforce: c.value },
+                }),
+              }).catch(err => console.error('[plans-enforce] save failed', err));
+            });
+            pdSeg.appendChild(btn);
+          }
+        })
+        .catch(err => console.warn('[plans-enforce] config load failed', err));
+    }
+
     // Border toggle
     addToggleRow('Border', prefs.borderEnabled, (v) => {
       setPrefs({ borderEnabled: v });

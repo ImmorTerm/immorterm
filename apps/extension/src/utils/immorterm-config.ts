@@ -142,6 +142,9 @@ export interface AppearanceConfig {
   // Namespaced modes for views registered after S2 ('viewMode.<id>' prefs) —
   // new views need zero host-side key plumbing.
   viewModes?: Record<string, string>;
+  // S5a accordion: per-section expanded state + drag-sized flex weights.
+  // Optional (no default) — while unset, the webview's own state wins.
+  sectionState?: { expanded?: Record<string, boolean>; sizes?: Record<string, number> };
   backgroundControlMode: boolean;
 }
 
@@ -152,6 +155,9 @@ export interface GlobalConfig {
   appearance?: AppearanceConfig;
   defaults: {
     terminalMode?: 'regular' | 'ai' | 'both';
+    /** Global default for plans.enforce (planning discipline hook block).
+     * Absent = false (opt-in — the block costs ~200 tokens/session). */
+    plans?: { enforce: boolean };
     services: {
       memory: ServiceConfig;
       mcpGateway: ServiceConfig;
@@ -211,6 +217,10 @@ export interface ProjectConfig {
    * Falls through to "default" when absent. Per-session overrides live in
    * the Rust daemon's registry.json, not here. */
   speakMode?: string;
+  /** Planning discipline. enforce tri-state: true/false = project override,
+   * absent = inherit global default (defaults.plans.enforce). Read at hook
+   * RUNTIME (SessionStart script) — toggling never regenerates hooks. */
+  plans?: { enforce?: boolean };
   terminalMode?: 'regular' | 'ai' | 'both';
   services: {
     memory: MemoryServiceConfig;
@@ -258,7 +268,9 @@ function defaultGlobalConfig(): GlobalConfig {
       textAnimations: true,
       sidebarMode: 'show' as const,
       tasksMode: 'show' as const,
-      railsEnabled: false,
+      // Founder decision (2026-07-23, plan workbench-refactor/rails-default):
+      // rails ship ON now that Plans gives the right rail its payoff.
+      railsEnabled: true,
       backgroundControlMode: true,
     },
     defaults: {
@@ -661,7 +673,9 @@ const DEFAULT_APPEARANCE: AppearanceConfig = {
   textAnimations: true,
   sidebarMode: 'show',
   tasksMode: 'show',
-  railsEnabled: false,
+  // Founder decision (2026-07-23): rails default ON — see plan
+  // workbench-refactor, decision rails-default.
+  railsEnabled: true,
   backgroundControlMode: true,
 };
 

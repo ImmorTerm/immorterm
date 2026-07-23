@@ -345,11 +345,10 @@ export function createRenderSidebar({
       nameEl.title = name;
       item.appendChild(nameEl);
 
-      // Title lock indicator
+      // Title lock indicator \u2014 small right-aligned codicon (S5a L2)
       if (session.titleLocked) {
         const lock = document.createElement('span');
-        lock.className = 'lock-badge';
-        lock.textContent = '\uD83D\uDD12';
+        lock.className = 'codicon codicon-lock lock-badge';
         lock.title = 'Title locked \u2014 Claude cannot rename this tab';
         item.appendChild(lock);
       }
@@ -357,8 +356,7 @@ export function createRenderSidebar({
       // Bell indicator (program needs attention)
       if (session.bell) {
         const bell = document.createElement('span');
-        bell.className = 'bell-badge';
-        bell.textContent = '\uD83D\uDD14';
+        bell.className = 'codicon codicon-bell bell-badge';
         bell.title = 'Needs attention';
         item.appendChild(bell);
       }

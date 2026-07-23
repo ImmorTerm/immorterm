@@ -636,6 +636,7 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         railsEnabled: appearance.railsEnabled,
         railLayout: rawAppearance.railLayout,
         viewModes: rawAppearance.viewModes,
+        sectionState: rawAppearance.sectionState,
         backgroundControlMode: appearance.backgroundControlMode,
       });
 
@@ -1759,6 +1760,7 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
           railsEnabled: prefs.railsEnabled,
           railLayout: prefs.railLayout,
           viewModes: prefs.viewModes,
+          sectionState: getRawAppearance().sectionState,
           backgroundControlMode: prefs.backgroundControlMode,
         });
         break;
@@ -1796,6 +1798,7 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
           workshopsMode: 'workshopsMode',
           railsEnabled: 'railsEnabled',
           railLayout: 'railLayout',
+          sectionState: 'sectionState',
           backgroundControlMode: 'backgroundControlMode',
         };
         const appearanceKey = appearanceKeyMap[key];
@@ -1948,9 +1951,41 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         this.sendTasksToWebview();
         break;
       }
-      // ── Plans (S4, read-only) ──
+      // ── Plans (S4 read; S6 submit) ──
       case 'get-plans': {
         this.sendPlansToWebview();
+        break;
+      }
+      case 'plans-submit': {
+        // One Rust write path: the hub's flock-guarded submit route (Node has
+        // no flock; the hub sidecar is guaranteed running — extension.ts
+        // ensures it at activation). fs.watch pushes the refreshed list.
+        const { planId, resolutions, comments } = msg as {
+          planId: string; resolutions: unknown[]; comments: unknown[]; type: string;
+        };
+        fetch(`http://127.0.0.1:${HUB_PORT}/api/v1/plans/submit`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            project_dir: this.projectPath || '',
+            plan_id: planId,
+            resolutions: resolutions || [],
+            comments: comments || [],
+          }),
+        })
+          .then(async (r) => {
+            const d = await r.json().catch(() => ({})) as { plan?: unknown; error?: string };
+            this.view?.webview.postMessage({
+              type: 'plans-submit-result',
+              ok: r.ok && !d.error, planId, plan: d.plan, error: d.error,
+            });
+          })
+          .catch((err) => {
+            logger.warn(`ImmorTerm AI: plans-submit failed: ${err}`);
+            this.view?.webview.postMessage({
+              type: 'plans-submit-result', ok: false, planId, error: String(err),
+            });
+          });
         break;
       }
       case 'create-task': {

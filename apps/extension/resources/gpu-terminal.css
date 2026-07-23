@@ -342,11 +342,12 @@ body.with-tab-bar #container {
   overflow: hidden; /* prevent content bleed during width transition */
   transition: width 0.15s ease;
 }
-/* Collapsed: fully hidden */
+/* Collapsed: fully hidden. Panel modes hide/show the CONTAINER's children
+   wholesale; per-section display is owned exclusively by the S5a accordion's
+   applySectionLayout (inline styles), which these rules must never fight —
+   when no rule below matches, the accordion's inline state simply reapplies. */
 #sidebar.collapsed { width: 0; min-width: 0; border-left: none; }
-#sidebar.collapsed #sidebar-header { display: none; }
-#sidebar.collapsed #session-list { display: none; }
-#sidebar.collapsed #sidebar-resize-handle { display: none; }
+#sidebar.collapsed > * { display: none; }
 
 /* Auto-reveal: overlays terminal, doesn't affect layout */
 #sidebar.auto-reveal {
@@ -356,16 +357,11 @@ body.with-tab-bar #container {
   box-shadow: -4px 0 12px rgba(0, 0, 0, 0.3);
   transition: width 0.15s ease;
 }
-#sidebar.auto-reveal #sidebar-header { display: none; }
-#sidebar.auto-reveal #session-list { display: none; }
-#sidebar.auto-reveal #sidebar-resize-handle { display: none; }
+#sidebar.auto-reveal:not(.revealed) > * { display: none; }
 #sidebar.auto-reveal.revealed {
   width: 160px; min-width: 120px;
   border-left: 1px solid var(--sidebar-border, #313244);
 }
-#sidebar.auto-reveal.revealed #sidebar-header { display: flex; }
-#sidebar.auto-reveal.revealed #session-list { display: block; }
-#sidebar.auto-reveal.revealed #sidebar-resize-handle { display: block; }
 
 /* Floating expand button — toggled via JS, not CSS :has() */
 #sidebar-expand-btn {
@@ -404,30 +400,41 @@ body.with-tab-bar #container {
 #sidebar-resize-handle:hover::after,
 #sidebar-resize-handle.active::after { background: var(--sidebar-accent, rgba(180, 130, 255, 0.4)); }
 
-#sidebar-header {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--sidebar-border, #313244);
-  color: var(--sidebar-muted, #a6adc8); font-size: 11px; text-transform: uppercase;
-  letter-spacing: 0.5px;
-  gap: 4px;
+/* ── S5a accordion section headers (one system, both panels — L1) ── */
+.sec-header {
+  display: flex; align-items: center;
+  height: 22px; flex: 0 0 22px; box-sizing: border-box;
+  padding: 0 8px 0 2px; gap: 2px;
+  color: var(--sidebar-text, #cdd6f4);
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;
+  cursor: pointer; user-select: none;
 }
-#sidebar-header button {
-  background: none; border: none; color: var(--sidebar-muted, #a6adc8);
-  cursor: pointer; font-size: 16px; line-height: 1;
-  padding: 0 4px; border-radius: 3px;
-  flex-shrink: 0;
+.sec-header:focus-visible { outline: 1px solid var(--sidebar-accent, #b482ff); outline-offset: -1px; } /* B6 */
+.sec-chevron { font-size: 16px; width: 16px; flex: 0 0 16px; transition: transform 0.1s ease; color: var(--sidebar-muted, #a6adc8); }
+.sec-header.expanded .sec-chevron { transform: rotate(90deg); } /* B1 */
+.sec-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.sec-actions { display: flex; align-items: center; gap: 2px; opacity: 0; transition: opacity 0.12s; }
+.sec-header:hover .sec-actions, .sec-header:focus-within .sec-actions { opacity: 1; } /* L4 */
+.sec-action {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; padding: 0; border: none; border-radius: 3px;
+  background: none; color: var(--sidebar-muted, #a6adc8); font-size: 16px; cursor: pointer;
 }
-#sidebar-header button:hover { background: var(--sidebar-border, #313244); color: var(--sidebar-text, #cdd6f4); }
-#sidebar-toggle { font-size: 12px !important; }
+.sec-action:hover { background: color-mix(in srgb, var(--sidebar-text, #cdd6f4) 12%, transparent); color: var(--sidebar-text, #cdd6f4); }
+.sec-divider { height: 4px; flex: 0 0 4px; cursor: ns-resize; position: relative; }
+.sec-divider:hover::after, .sec-divider.dragging::after {
+  content: ''; position: absolute; inset: 1px 0; background: var(--sidebar-accent, #b482ff); opacity: 0.4;
+}
 
 #session-list {
-  flex: 1; overflow-y: auto;
+  flex: 1; overflow-y: auto; min-height: 0;
   padding: 4px 0;
 }
+#task-list, #plans-list, #workshops-list { overflow-y: auto; min-height: 0; }
 .session-item {
   display: flex; align-items: center; gap: 6px;
-  padding: 4px 8px; cursor: pointer;
+  height: 22px; box-sizing: border-box;
+  padding: 0 8px; cursor: pointer; font-size: 12px;
   border-left: 2px solid transparent;
   /* Animate background for hover AND opacity/transform for drag lift.
    * Without these the .dragging class pops in with no tween. */
@@ -437,8 +444,7 @@ body.with-tab-bar #container {
 .session-item:hover { background: var(--sidebar-hover, #1e1e2e); }
 .session-item.active {
   background: var(--sidebar-active-bg, #1e1e2e);
-  border-left: 3px solid var(--sidebar-accent, #b482ff);
-  box-shadow: inset 0 0 12px var(--sidebar-active-glow, rgba(180, 130, 255, 0.08));
+  border-left: 2px solid var(--sidebar-accent, #b482ff);
 }
 .session-item.active .name {
   color: var(--sb-popup-text, #cdd6f4);
@@ -489,21 +495,30 @@ body.with-tab-bar #container {
   flex-shrink: 0; line-height: 1;
 }
 .session-item:hover .drawing-badge { opacity: 0.85; }
+/* L2: lock is a small right-aligned codicon, quiet metadata */
 .session-item .lock-badge {
-  font-size: 10px; opacity: 0.5; margin-left: 2px;
+  font-size: 12px; opacity: 0.5; margin-left: 2px;
+  color: var(--sidebar-muted, #a6adc8);
   flex-shrink: 0; line-height: 1;
 }
 .session-item:hover .lock-badge { opacity: 0.75; }
 .session-item .bell-badge {
-  font-size: 11px; opacity: 0.85; margin-left: 2px;
+  font-size: 12px; opacity: 0.85; margin-left: 2px;
+  color: var(--sidebar-muted, #a6adc8);
   flex-shrink: 0; line-height: 1; display: inline-block;
   animation: bell-shake 2.5s ease-in-out infinite;
   transform-origin: top center;
 }
 .session-item .speaker-badge {
-  font-size: 11px; opacity: 0.95; margin-left: 2px;
+  font-size: 11px; opacity: 0.6; margin-left: 2px;
   flex-shrink: 0; line-height: 1; display: inline-block;
   cursor: help;
+}
+/* Workshop rows reuse .session-item; glyph mimics .dot's footprint
+   (was inline cssText + hardcoded hover — L3 violation, now themed) */
+.workshop-entry .glyph {
+  width: 10px; display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; flex-shrink: 0; opacity: 0.85;
 }
 @keyframes bell-shake {
   0% { transform: rotate(0deg); }
@@ -2259,71 +2274,36 @@ body.with-tab-bar #container {
 }
 
 /* ── Tasks Panel ───────────────────────────────────────────── */
+/* Section headers: shared .sec-header system (S5a). Vertical space is
+   owned by accordion flex weights — no max-height caps. */
 
-#tasks-header,
-#workshops-header,
-#plans-header {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 6px 8px;
-  border-top: 1px solid var(--sidebar-border, #313244);
-  color: var(--sidebar-muted, #a6adc8);
-  font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
-  gap: 4px;
-  margin-top: 4px;
-}
-#tasks-header .tasks-title-clickable,
-#workshops-header .tasks-title-clickable,
-#plans-header .tasks-title-clickable {
-  flex: 1; text-align: center;
-}
-/* Left spacer mirrors right actions width so title is truly centered */
-#tasks-header .tasks-header-spacer,
-#workshops-header .tasks-header-spacer,
-#plans-header .tasks-header-spacer {
-  flex: 0 0 auto;
-  width: 24px; /* matches + button width */
-}
-#tasks-header .tasks-header-actions,
-#workshops-header .tasks-header-actions {
-  flex: 0 0 auto;
-}
-#tasks-header button,
-#workshops-header button {
-  background: none; border: none; color: var(--sidebar-muted, #a6adc8);
-  cursor: pointer; font-size: 16px; line-height: 1;
-  padding: 0 4px; border-radius: 4px;
-  flex-shrink: 0;
-}
-#tasks-header button:hover,
-#workshops-header button:hover { background: var(--sidebar-border, #313244); color: var(--sidebar-text, #cdd6f4); }
-
-#task-list {
-  overflow-y: auto;
-  padding: 0 0 8px 0;
-  max-height: 50vh;
-}
+#task-list { padding: 0 0 8px 0; }
 
 /* ── Plans Panel (S4) ── */
-#plans-list { overflow-y: auto; padding: 0 0 8px 0; max-height: 40vh; }
+#plans-list { padding: 0 0 8px 0; }
 .plan-item {
   display: flex; align-items: center; gap: 6px;
-  padding: 4px 8px; cursor: pointer; font-size: 12px;
+  height: 22px; box-sizing: border-box;
+  padding: 0 8px; cursor: pointer; font-size: 12px;
   color: var(--sidebar-text, #cdd6f4);
 }
-.plan-item:hover { background: var(--sidebar-border, #313244); }
+.plan-item:hover { background: var(--sidebar-hover, #1e1e2e); }
 .plan-item.superseded { opacity: 0.45; }
 .plan-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Flattened pill: colored uppercase text only (L2 quiet metadata) */
 .plan-status-pill {
   flex: 0 0 auto; font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px;
-  padding: 1px 6px; border-radius: 8px;
-  background: var(--sidebar-border, #313244); color: var(--sidebar-muted, #a6adc8);
+  color: var(--sidebar-muted, #a6adc8);
 }
-.plan-status-pill.status-active { background: color-mix(in srgb, var(--sidebar-accent, #b482ff) 25%, transparent); color: var(--sidebar-accent, #b482ff); }
-.plan-status-pill.status-done { background: color-mix(in srgb, #a6e3a1 22%, transparent); color: #a6e3a1; }
-.plan-status-pill.status-decided { background: color-mix(in srgb, #89b4fa 22%, transparent); color: #89b4fa; }
+.plan-status-pill.status-active { color: var(--sidebar-accent, #b482ff); }
+/* Theme-variable colors only (L3): done reads as quiet/finished, decided
+ * shares the accent family — no hardcoded palette. */
+.plan-status-pill.status-done { color: var(--sidebar-muted, #a6adc8); }
+.plan-status-pill.status-decided { color: var(--sidebar-accent, #b482ff); }
 .plan-decisions-badge {
   flex: 0 0 auto; font-size: 9px; padding: 1px 5px; border-radius: 8px;
-  background: color-mix(in srgb, #f9e2af 20%, transparent); color: #f9e2af;
+  background: color-mix(in srgb, var(--sidebar-accent, #b482ff) 20%, transparent);
+  color: var(--sidebar-accent, #b482ff);
 }
 .plan-updated { flex: 0 0 auto; font-size: 9px; color: var(--sidebar-muted, #a6adc8); opacity: 0.7; }
 /* Full-size plan overlay — same scrim skin as .task-board-overlay */
@@ -2368,7 +2348,8 @@ body.with-tab-bar #container {
 /* Task items */
 .task-item {
   display: flex; align-items: center; gap: 6px;
-  padding: 3px 8px; cursor: pointer;
+  height: 22px; box-sizing: border-box;
+  padding: 0 8px; cursor: pointer;
   font-size: 12px; color: var(--sidebar-text, #cdd6f4);
   transition: background 0.1s;
   border-left: 3px solid transparent;
@@ -2648,24 +2629,6 @@ body.with-tab-bar #container {
   color: var(--sidebar-text, #cdd6f4);
 }
 
-/* Clickable Tasks title */
-.tasks-title-clickable {
-  cursor: pointer; user-select: none;
-  transition: color 0.15s;
-}
-.tasks-title-clickable:hover {
-  color: var(--sidebar-accent, #b482ff);
-}
-
-/* Header action buttons (archive + new) grouped right */
-.tasks-header-actions {
-  display: flex; align-items: center; gap: 2px;
-  margin-left: auto;
-}
-#archive-tasks-btn {
-  font-size: 12px !important;
-}
-
 /* ── Task board modal ──────────────────────────────────────── */
 .task-board-overlay {
   position: fixed; inset: 0; z-index: 10000;
@@ -2816,19 +2779,6 @@ body.with-tab-bar #container {
   border-radius: 6px; margin: 4px 0;
 }
 
-/* Resize handle between sessions and tasks */
-#tasks-resize-handle {
-  height: 4px; cursor: ns-resize;
-  background: transparent; position: relative; flex-shrink: 0;
-}
-#tasks-resize-handle::after {
-  content: ''; position: absolute; left: 25%; right: 25%; top: 1px;
-  height: 2px; border-radius: 1px;
-  background: var(--sidebar-fg, #cdd6f4); opacity: 0.2;
-}
-#tasks-resize-handle:hover::after,
-#tasks-resize-handle.dragging::after { opacity: 0.5; }
-
 /* DnD: reorder indicator within task list */
 .task-drop-indicator {
   position: absolute;
@@ -2919,18 +2869,8 @@ body.with-tab-bar #container {
   background: var(--sb-popup-separator, #313244);
 }
 
-/* Sidebar collapse: hide tasks too */
-#sidebar.collapsed #tasks-header { display: none; }
-#sidebar.collapsed #task-list { display: none; }
-#sidebar.collapsed #tasks-resize-handle { display: none; }
-#sidebar.collapsed #plans-header { display: none; }
-#sidebar.collapsed #plans-list { display: none; }
-#sidebar.auto-reveal #tasks-header { display: none; }
-#sidebar.auto-reveal #task-list { display: none; }
-#sidebar.auto-reveal #tasks-resize-handle { display: none; }
-#sidebar.auto-reveal.revealed #tasks-header { display: flex; }
-#sidebar.auto-reveal.revealed #task-list { display: block; }
-#sidebar.auto-reveal.revealed #tasks-resize-handle { display: block; }
+/* Sidebar collapse/auto-reveal: container child rules near #sidebar
+   (top of file) hide everything; the accordion owns per-section display. */
 
 /* ── Task Modal (create / edit) ── */
 .task-modal-overlay {
@@ -3045,24 +2985,6 @@ body.with-tab-bar #container {
 }
 .task-modal-save:hover {
   background: color-mix(in srgb, var(--sb-popup-active, var(--sidebar-accent, #b482ff)) 45%, transparent);
-}
-
-/* ── Tasks Auto-reveal Animation ── */
-/* Base: transition on opacity + transform so both reveal and hide animate */
-#tasks-header.tasks-auto-reveal,
-#task-list.tasks-auto-reveal,
-#tasks-resize-handle.tasks-auto-reveal {
-  transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1),
-              transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  opacity: 0; transform: translateY(12px);
-}
-/* Revealed state: slide up + fade in */
-#tasks-header.tasks-auto-reveal.tasks-revealed,
-#task-list.tasks-auto-reveal.tasks-revealed,
-#tasks-resize-handle.tasks-auto-reveal.tasks-revealed {
-  opacity: 1; transform: translateY(0);
-  transition: opacity 0.3s cubic-bezier(0.34, 1.56, 0.64, 1),
-              transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 /* ── Task Hover Actions ── */
@@ -3236,41 +3158,8 @@ body.with-tab-bar #container {
 #file-browser-resize-handle:hover::after,
 #file-browser-resize-handle.active::after { background: var(--sidebar-accent, rgba(180, 130, 255, 0.4)); }
 
-/* Header — height + chrome matched to #sidebar-header (SESSIONS) so the two
-   bars align pixel-for-pixel. The action toolbar fades in on hover. */
-#file-browser-header {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 4px 8px;
-  min-height: 29px; box-sizing: border-box;
-  border-bottom: 1px solid var(--sidebar-border, #313244);
-  color: var(--sidebar-muted, #a6adc8); font-size: 11px; text-transform: uppercase;
-  letter-spacing: 0.6px; font-weight: 600;
-  gap: 4px;
-  flex-shrink: 0;
-}
-#file-browser-header > span:first-child { opacity: 0.9; }
-.fbh-right { display: flex; align-items: center; gap: 2px; }
-#file-browser-actions {
-  display: flex; align-items: center; gap: 1px;
-  /* Dimmed at rest so the actions are DISCOVERABLE (you can see they exist),
-     full-strength on hover. */
-  opacity: 0.45;
-  transition: opacity 0.14s ease;
-}
-#file-browser:hover #file-browser-actions,
-#file-browser.revealed #file-browser-actions { opacity: 1; }
-#file-browser-header button {
-  display: inline-flex; align-items: center; justify-content: center;
-  background: none; border: none; color: var(--sidebar-muted, #a6adc8);
-  cursor: pointer; width: 20px; height: 20px;
-  padding: 0; border-radius: 5px;
-  flex-shrink: 0; transition: background 0.12s ease, color 0.12s ease;
-}
-#file-browser-header button svg { width: 14px; height: 14px; }
-#file-browser-header button:hover {
-  background: color-mix(in srgb, var(--sidebar-accent, #b482ff) 18%, transparent);
-  color: var(--sidebar-text-active, #fff);
-}
+/* Header: shared .sec-header accordion system (S5a) — identical to the
+   right-panel sections (L1). */
 
 #file-search-wrap {
   padding: 6px 8px;
