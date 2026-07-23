@@ -178,6 +178,34 @@ export function createReportError({ postMessage, appendTo, autoDismissMs = 8000 
  * @param {Function} [opts.isRenaming] - returns true when a rename input is active (blocks re-renders)
  * @returns {Function} renderSidebar()
  */
+// ── SP2 Spaces: canonical persisted-record shape ──────────────────────
+// Pure normalizer for one space record from index.json. Used on load AND
+// covered by the toJSON→fromJSON binding+geometry+lock round-trip self-check
+// (arch §8): `layout` is dockview's opaque geometry blob (split ratios), kept
+// verbatim; `tiles` is our panelId→binding map; lock state is gridLocked +
+// per-tile `locked`. Normalizing on the way in means a hand-edited or
+// partial index can never crash the grid rebuild.
+export function normalizeSpaceRecord(rec) {
+  const r = rec || {};
+  const tiles = {};
+  const src = (r.tiles && typeof r.tiles === 'object') ? r.tiles : {};
+  // sessionName from a persisted index is untrusted and reaches DOM/renderers —
+  // bound it to session-id shape so a crafted index can't smuggle markup or
+  // path tricks. Non-conforming → dropped (tile renders as a "gone" placeholder).
+  const validName = (n) => (typeof n === 'string' && /^[a-zA-Z0-9._-]{1,128}$/.test(n)) ? n : undefined;
+  for (const id in src) {
+    const t = src[id] || {};
+    tiles[id] = { kind: t.kind || 'session', sessionName: validName(t.sessionName), locked: !!t.locked };
+  }
+  return {
+    name: r.name || 'Space',
+    createdMs: r.createdMs || 0,
+    layout: (r.layout !== undefined) ? r.layout : null,
+    tiles,
+    gridLocked: !!r.gridLocked,
+  };
+}
+
 export function createRenderSidebar({
   sessionListEl,
   sessions,

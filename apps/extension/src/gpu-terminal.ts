@@ -54,6 +54,7 @@ import { getTheme as getThemeObject, generateHardstatus } from './themes';
 import { TaskStorage } from './tasks';
 import type { Task, TaskContext } from './tasks/types';
 import { PlansStorage } from './plans';
+import { SpacesStorage } from './spaces';
 
 const SOCKET_DIR = path.join(process.env.HOME || '~', '.immorterm', 'sockets');
 const WASM_RESOURCE_DIR = 'resources/wasm';
@@ -231,6 +232,7 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
   private persistedActiveAiCaptured = false;
   private taskStorage: TaskStorage | null = null;
   private plansStorage: PlansStorage | null = null;
+  private spacesStorage: SpacesStorage | null = null;
   private knownTaskIds = new Set<string>();
   private initialFocusDone = false;
 
@@ -272,6 +274,10 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         this.taskStorage.on('external-change', () => this.onExternalTaskChange());
         this.plansStorage = new PlansStorage(projectId);
         this.plansStorage.on('change', () => this.sendPlansToWebview());
+        // SP2 spaces (docking grid) — webview owns the model; storage mirrors
+        // the file and pushes external edits (other window) back to the sidebar.
+        this.spacesStorage = new SpacesStorage(projectId);
+        this.spacesStorage.on('change', () => this.sendSpacesToWebview());
       } catch (err) {
         logger.warn('ImmorTerm AI: failed to init task storage:', err);
       }
@@ -537,6 +543,14 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
       const iroUri = webview.asWebviewUri(
         vscode.Uri.file(path.join(this.context.extensionPath, 'resources', 'vendor', 'iro.min.js')),
       );
+      // SP2 docking engine — vendored dockview-core ESM + its stylesheet.
+      // Same cspSource origin as every other vendored module (no CSP change).
+      const dockviewUri = webview.asWebviewUri(
+        vscode.Uri.file(path.join(this.context.extensionPath, 'resources', 'vendor', 'dockview', 'dockview-core.esm.js')),
+      );
+      const dockviewCssUri = webview.asWebviewUri(
+        vscode.Uri.file(path.join(this.context.extensionPath, 'resources', 'vendor', 'dockview', 'dockview.css')),
+      );
       // Read VS Code terminal settings
       const termConfig = vscode.workspace.getConfiguration('terminal.integrated');
       const editorConfig = vscode.workspace.getConfiguration('editor');
@@ -567,6 +581,8 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         browserUri: browserUri.toString(),
         markedUri: markedUri.toString(),
         iroUri: iroUri.toString(),
+        dockviewUri: dockviewUri.toString(),
+        dockviewCssUri: dockviewCssUri.toString(),
         // Hub URL for webview-side fetches/sockets. The VS Code webview
         // origin is the cdn (not the hub), so the HTML can't derive it from
         // location; we report it from the single TS-side source (HUB_PORT in
@@ -1956,6 +1972,16 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         this.sendPlansToWebview();
         break;
       }
+      case 'list-spaces': {
+        this.sendSpacesToWebview();
+        break;
+      }
+      case 'save-space': {
+        // The webview owns the whole spaces index and posts it on every
+        // debounced change (create/rename/reorder/delete/layout/lock).
+        this.spacesStorage?.save(msg.index);
+        break;
+      }
       case 'plans-submit': {
         // One Rust write path: the hub's flock-guarded submit route (Node has
         // no flock; the hub sidecar is guaranteed running — extension.ts
@@ -2138,6 +2164,11 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
   private sendPlansToWebview(): void {
     if (!this.plansStorage || !this.view) return;
     this.view.webview.postMessage({ type: 'plans-load', plans: this.plansStorage.list() });
+  }
+
+  private sendSpacesToWebview(): void {
+    if (!this.spacesStorage || !this.view) return;
+    this.view.webview.postMessage({ type: 'spaces-load', index: this.spacesStorage.load() });
   }
 
   private sendTasksToWebview(): void {
@@ -4442,6 +4473,8 @@ Return ONLY a JSON object with these fields:
     this.disposables = [];
     this.plansStorage?.dispose();
     this.plansStorage = null;
+    this.spacesStorage?.dispose();
+    this.spacesStorage = null;
     this.stopAllGitWatchers();
   }
 

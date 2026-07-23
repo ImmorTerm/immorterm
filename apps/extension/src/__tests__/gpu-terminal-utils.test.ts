@@ -14,6 +14,7 @@ import {
   clearEl,
   createReportError,
   createRenderSidebar,
+  normalizeSpaceRecord,
 } from '../../resources/gpu-terminal-utils.js';
 
 // ── Pure Function Tests ──────────────────────────────────────────
@@ -609,5 +610,73 @@ describe('createRenderSidebar', () => {
     renderSidebar();
     const names = [...sessionListEl.querySelectorAll('.name')];
     expect(names.map(n => n.textContent)).toEqual(['X', 'Y', 'Z']);
+  });
+});
+
+// ── SP2 Spaces: persisted-record round-trip (arch §8 self-check) ──────────
+// The one new algorithm SP2 adds is the tiles binding-map + lock rebuild. This
+// asserts a toJSON→fromJSON round-trip preserves panel→binding mapping, the
+// opaque dockview geometry blob, AND lock state (grid + per-tile) exactly. The
+// live WebGPU geometry survival is proven separately in the real WKWebView.
+describe('normalizeSpaceRecord — space persistence round-trip', () => {
+  const record = {
+    name: 'Backend',
+    createdMs: 1737600000000,
+    // dockview.toJSON() geometry blob — opaque to us; split ratios live here.
+    layout: {
+      grid: {
+        root: {
+          type: 'branch',
+          data: [
+            { type: 'leaf', data: { views: ['panel_primary'], id: 'g1' }, size: 640 },
+            { type: 'leaf', data: { views: ['panel_2'], id: 'g2' }, size: 360 },
+          ],
+          size: 900,
+        },
+        width: 1000, height: 900, orientation: 'HORIZONTAL',
+      },
+      panels: { panel_primary: { id: 'panel_primary' }, panel_2: { id: 'panel_2' } },
+    },
+    tiles: {
+      panel_primary: { kind: 'primary', locked: false },
+      panel_2: { kind: 'session', sessionName: 'immorterm-ai-7f3a', locked: true },
+    },
+    gridLocked: true,
+  };
+
+  it('is idempotent', () => {
+    expect(normalizeSpaceRecord(normalizeSpaceRecord(record)))
+      .toEqual(normalizeSpaceRecord(record));
+  });
+
+  it('round-trips bindings + geometry + lock state through JSON exactly', () => {
+    const canonical = normalizeSpaceRecord(record);
+    // Persist → reload (what save-space + spaces-load do across the wire/disk).
+    const reloaded = normalizeSpaceRecord(JSON.parse(JSON.stringify(canonical)));
+    expect(reloaded).toEqual(canonical);
+    // Geometry blob survives byte-for-byte (split ratios 640/360 preserved).
+    expect(reloaded.layout).toEqual(record.layout);
+    expect(reloaded.layout.grid.root.data[0].size).toBe(640);
+    // Bindings: panelId → kind/sessionName preserved.
+    expect(reloaded.tiles.panel_2.sessionName).toBe('immorterm-ai-7f3a');
+    expect(reloaded.tiles.panel_primary.kind).toBe('primary');
+    // Lock state: whole-grid + per-tile preserved.
+    expect(reloaded.gridLocked).toBe(true);
+    expect(reloaded.tiles.panel_2.locked).toBe(true);
+    expect(reloaded.tiles.panel_primary.locked).toBe(false);
+  });
+
+  it('coerces a partial/hand-edited record to the canonical shape', () => {
+    const n = normalizeSpaceRecord({ tiles: { p: {} } });
+    expect(n.name).toBe('Space');
+    expect(n.layout).toBe(null);
+    expect(n.gridLocked).toBe(false);
+    expect(n.tiles.p).toEqual({ kind: 'session', sessionName: undefined, locked: false });
+  });
+
+  it('tolerates null/garbage input without throwing', () => {
+    expect(() => normalizeSpaceRecord(null)).not.toThrow();
+    expect(normalizeSpaceRecord(null).tiles).toEqual({});
+    expect(normalizeSpaceRecord({ tiles: 'nope' }).tiles).toEqual({});
   });
 });

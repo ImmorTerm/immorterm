@@ -9,6 +9,7 @@ pub mod modal_api;
 pub mod plans;
 pub mod registry;
 pub mod remote_api;
+pub mod spaces;
 pub mod tasks;
 pub mod vendors_api;
 
@@ -73,6 +74,10 @@ pub fn api_routes() -> Router {
         // flock-parity with the daemon's immorterm_plan MCP tools)
         .route("/plans", get(plans::list_plans))
         .route("/plans/submit", post(plans::submit_plan))
+        // Spaces (SP2 docking grid) — webview owns the model, so the hub
+        // both lists AND saves (flock-parity with plans).
+        .route("/spaces", get(spaces::list_spaces))
+        .route("/spaces/save", post(spaces::save_space))
         // Tasks (mirrors extension TaskStorage)
         .route("/tasks", get(tasks::list_tasks).post(tasks::create_task))
         .route("/tasks/reorder", post(tasks::reorder_tasks))

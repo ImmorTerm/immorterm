@@ -1393,6 +1393,15 @@
         </span>
       </div>
       <div id="session-list"></div>
+      <div id="spaces-header" class="sec-header">
+        <span class="codicon codicon-chevron-right sec-chevron"></span>
+        <span class="sec-title" title="Spaces are docking grids — arrange terminals (and more) side by side">Spaces</span>
+        <span class="sec-actions">
+          <button class="sec-action codicon codicon-lock" id="lock-grid-btn" title="Lock the active grid (freeze all splits + moves)" style="display:none"></button>
+          <button class="sec-action codicon codicon-add" id="new-space-btn" title="New Space"></button>
+        </span>
+      </div>
+      <div id="spaces-list"></div>
       <div id="tasks-header" class="sec-header">
         <span class="codicon codicon-chevron-right sec-chevron"></span>
         <span class="sec-title">Tasks</span>
@@ -2270,6 +2279,8 @@
                 plansUri: './gpu-terminal-plans.js',
                 filesUri: './gpu-terminal-files.js',
                 browserUri: './gpu-terminal-browser.js',
+                dockviewUri: './vendor/dockview/dockview-core.esm.js',
+                dockviewCssUri: './vendor/dockview/dockview.css',
                 projectName: _projectName,
                 projectDir: _projectDir,
                 fontData: fnt && fnt.data ? fnt.data : null,
@@ -2674,6 +2685,22 @@
                 console.error('[standalone] plans-submit:', err);
                 sendToWebview({ type: 'plans-submit-result', ok: false, planId: msg.planId, error: String(err) });
               });
+            break;
+          // ── Spaces → hub API (webview owns the model; hub lists + saves) ──
+          case 'list-spaces':
+            if (_remoteName) { sendToWebview({ type: 'spaces-load', index: null }); break; }
+            fetch('/api/v1/spaces?project_dir=' + encodeURIComponent(_projectDir || ''))
+              .then(r => r.json())
+              .then(d => sendToWebview({ type: 'spaces-load', index: d.index || null }))
+              .catch(err => console.error('[standalone] list-spaces:', err));
+            break;
+          case 'save-space':
+            if (_remoteName) break; // ponytail: no remote-spaces proxy yet
+            fetch('/api/v1/spaces/save', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ project_dir: _projectDir || '', index: msg.index }),
+            }).catch(err => console.error('[standalone] save-space:', err));
             break;
           // ── Tasks → hub API ──
           case 'get-tasks':
@@ -3413,6 +3440,32 @@
       hasContent: true,
     });
 
+    // ── Spaces (SP2): docking-grid section, peer to Plans/Sessions. Reuses the
+    // S2 view registry + S5a accordion — zero host plumbing. enterSpace (the
+    // grid mode switch) + create/rename/reorder/delete live in the Spaces
+    // engine block; renderSpaces is a 2nd createRenderSidebar instance.
+    let spacesViewMode = 'show';
+    function applySpacesMode(mode) {
+      spacesViewMode = mode;
+      const prev = vscode.getState() || {};
+      vscode.setState({ ...prev, 'viewMode.spaces': mode });
+      applySectionLayout('right');
+      syncRails();
+    }
+    registerView('spaces', {
+      kind: 'view', rail: 'right', icon: 'codicon-layout', title: 'Spaces',
+      states: ['show', 'hidden'], defaultState: 'show', offState: 'hidden',
+      prefKey: 'viewMode.spaces', persist: 'preference', container: 'sessions',
+      get: () => spacesViewMode, apply: applySpacesMode,
+      activeWhen: (m) => m !== 'hidden',
+    });
+    registerSection('spaces', {
+      panel: 'right',
+      header: document.getElementById('spaces-header'),
+      body: [document.getElementById('spaces-list')],
+      hasContent: true,
+    });
+
     registerView('sessions', {
       kind: 'view', rail: 'right', icon: 'codicon-terminal', title: 'Sessions',
       states: ['show', 'auto-reveal', 'collapsed'], defaultState: 'show', offState: 'collapsed',
@@ -3944,6 +3997,9 @@
     let markedPromise = null; // lazy-loaded marked UMD bundle
     let iroUri = null;
     let iroPromise = null; // lazy-loaded iro.js color-picker UMD bundle
+    let dockviewUri = null;      // vendor/dockview/dockview-core.esm.js (wasm-init, both hosts)
+    let dockviewCssUri = null;   // vendor/dockview/dockview.css
+    let dockviewModule = null;   // lazy-loaded dockview-core ESM (SP2 docking engine)
     const loadIro = () => {
       if (iroPromise) return iroPromise;
       if (!iroUri) return Promise.resolve(null);
@@ -8283,6 +8339,10 @@
           }
         });
       });
+
+      // Full-fidelity Spaces restore (§2): if a space was active on last
+      // reload, re-enter it now that WASM/GPU are live. No-op in classic.
+      try { maybeRestoreSpace(); } catch (_) { /* spaces engine may load later */ }
     }
 
     // ── Server Message Handling ──
@@ -9287,12 +9347,11 @@
     function toggleSpaces2() { if (spacesTile) exitSpaces2(); else enterSpaces2(); }
     try { window.__spaces2 = toggleSpaces2; } catch (_) { /* best effort */ }
 
-    // ── SP2 gating proof: reparent the LIVE primary canvas into a dockview
-    //    panel and back, proving the WebGPU context survives the DOM move.
-    //    Temporary harness (window.__dvProof / __dvProofExit) — removed once
-    //    the real enterSpace lands. Reconfigure = the same post-compositor
-    //    double-rAF used at init (~8278).
-    let _dvProof = null;
+    // ── SP2 Spaces docking engine ──────────────────────────────────────
+    //  The primary is REPARENTED into a dockview panel (never re-inited): an
+    //  appendChild of an attached node is a MOVE, so the WebGPU device/surface
+    //  survive. Generalized from the proven __dvProof harness; reconfigure =
+    //  the same post-compositor double-rAF used at init (~8278).
     function reconfigurePrimarySurface() {
       requestAnimationFrame(() => requestAnimationFrame(() => {
         if (terminal && wasmReady && canvas.width > 0 && canvas.height > 0) {
@@ -9300,59 +9359,586 @@
         }
       }));
     }
-    async function __dvProof() {
-      if (_dvProof) return 'already mounted';
-      // Resolve against the page URL (NOT import.meta — the inline module is
-      // syntax-checked as a plain Script in tests). Standalone-only proof; the
-      // real enterSpace uses the dockviewUri passed in wasm-init like tileModuleUrl.
-      const dvUrl = new URL('vendor/dockview/dockview-core.esm.js', document.baseURI).href;
-      const cssUrl = new URL('vendor/dockview/dockview.css', document.baseURI).href;
-      if (!document.querySelector('link[data-dockview]')) {
+
+    // ── Spaces state ──
+    let spaceMode = null;              // null = classic single-terminal; else entered spaceId
+    let activeSpaceId = null;          // persisted `active` — the entered space (null in classic)
+    const spaceOrder = [];             // spaceId[] display order (mirrors sessionOrder)
+    const spacesMap = new Map();       // spaceId -> session-shaped pseudo-row for createRenderSidebar
+    let spacesIndex = { version: 1, order: [], active: null, spaces: {} }; // full persisted model
+    let _renamingSpace = null;
+    let renderSpaces = () => {};       // replaced with a createRenderSidebar instance when utils loads
+    // Live dockview instance while a space is shown:
+    let dv = null;                     // dockview api
+    let dvRoot = null;                 // absolute overlay mount inside #terminal-area
+    let dvSubs = [];                   // dockview disposables (torn down on leave)
+    const tilePanels = new Map();      // panelId -> { kind, sessionName?, panel, el, bodyEl, tileHandle }
+    const _builtPanels = new Set();    // panelIds whose content is built — idempotency guard so the
+                                       // async createComponent.init and the fromJSON reconcile pass
+                                       // can't both build the same panel (double-tile). Cleared with tilePanels.
+    let primaryPanelBodyEl = null;     // .tile-body of the reparented primary — the RO width/height source
+    let primaryCanvasHome = null;      // where to reparent the canvas back to on leave (#terminal-area)
+    let _savedStatusBarMode = null;    // classic statusBarMode stashed while a space hides it
+    let _spaceSaveTimer = null;
+    let _tearingDown = false;          // true during leaveSpace so tile onDestroy doesn't re-enter removePanel
+    // The canvas + every canvas-anchored overlay move TOGETHER so they keep a
+    // shared coordinate system (offset parent = the panel body). PROOF #2.
+    const PRIMARY_MOVE_IDS = ['terminal-canvas', 'kb-input', 'title-tooltip', 'link-tooltip',
+      'emoji-overlays', 'comment-pills', 'comment-editor', 'explore-popup', 'task-wizard',
+      'comment-compose', 'cursor-mask', 'phantom-cursor', 'dictation-pulse', 'composition-view', 'ai-overlay'];
+    function reparentPrimaryInto(target) {
+      for (const id of PRIMARY_MOVE_IDS) {
+        const n = document.getElementById(id);
+        if (n) target.appendChild(n);   // appendChild of an attached node = MOVE
+      }
+    }
+
+    async function loadDockview() {
+      if (dockviewModule) return dockviewModule;
+      if (!dockviewUri) return null;
+      // Inject the vendored stylesheet once. Resolve against document.baseURI
+      // so the passed relative (hub) or absolute (asWebviewUri) href both work
+      // — never import.meta (the inline module is syntax-checked as a Script).
+      if (dockviewCssUri && !document.querySelector('link[data-dockview]')) {
         const link = document.createElement('link');
-        link.rel = 'stylesheet'; link.href = cssUrl; link.setAttribute('data-dockview', '1');
+        link.rel = 'stylesheet';
+        link.href = new URL(dockviewCssUri, document.baseURI).href;
+        link.setAttribute('data-dockview', '1');
         document.head.appendChild(link);
       }
-      const dv = await import(dvUrl);
-      const area = document.getElementById('terminal-area');
-      const root = document.createElement('div');
-      root.id = 'dv-proof-root';
-      root.style.cssText = 'position:absolute;inset:0;z-index:2';
-      root.classList.add('dockview-theme-dark');
-      area.appendChild(root);
-      const canvasParent = canvas.parentElement; // remember to restore
-      const api = dv.createDockview(root, {
-        createComponent: () => {
-          const element = document.createElement('div');
-          element.className = 'tile-body';
-          element.style.cssText = 'width:100%;height:100%;position:relative';
-          return { element, init() {} };
+      try {
+        dockviewModule = await import(new URL(dockviewUri, document.baseURI).href);
+      } catch (e) { reportError('dockview-load', e); return null; }
+      return dockviewModule;
+    }
+
+    // dockview createComponent — one renderer per panel kind. The element it
+    // returns is the panel CONTENT; we fill it with the unified .tile chrome.
+    function makeRenderer(options) {
+      const element = document.createElement('div');
+      element.className = 'dv-tile-host';
+      return {
+        element,
+        init(parameters) {
+          const p = (parameters && parameters.params) || {};
+          const panelId = p.panelId || (options && options.id) || 'panel';
+          if ((options && options.name) === 'primary' || p.kind === 'primary') {
+            buildPrimaryTile(element, panelId);
+          } else {
+            buildSessionTile(element, panelId, p);
+          }
         },
+      };
+    }
+
+    function primaryTileHtml() {
+      return '<div class="tile">'
+        + '<div class="tile-header">'
+        + '<span class="tile-title">Primary</span>'
+        + '<span class="tile-status" data-state="live">primary</span>'
+        + '<span class="tile-spacer"></span>'
+        + '<button class="tile-lock codicon codicon-unlock" type="button" title="Lock this tile (pin its size)"></button>'
+        + '<button class="tile-addtile codicon codicon-add" type="button" title="Add a session tile"></button>'
+        + '</div>'
+        + '<div class="tile-body" style="position:relative"></div>'
+        + '</div>';
+    }
+
+    function buildPrimaryTile(element, panelId) {
+      if (_builtPanels.has(panelId)) return; // init or reconcile already built it
+      _builtPanels.add(panelId);
+      element.innerHTML = primaryTileHtml();
+      const body = element.querySelector('.tile-body');
+      primaryPanelBodyEl = body;
+      reparentPrimaryInto(body);                 // ⚠ PROOF #1 — the gating move
+      const lockBtn = element.querySelector('.tile-lock');
+      if (lockBtn) {
+        lockBtn.addEventListener('mousedown', (e) => e.preventDefault());
+        lockBtn.addEventListener('click', () => toggleTileLock(panelId));
+      }
+      const addBtn = element.querySelector('.tile-addtile');
+      if (addBtn) {
+        addBtn.addEventListener('mousedown', (e) => e.preventDefault());
+        addBtn.addEventListener('click', (e) => showAddTileMenu(e, panelId));
+      }
+      tilePanels.set(panelId, { kind: 'primary', panel: null, el: element, bodyEl: body });
+    }
+
+    async function buildSessionTile(element, panelId, params) {
+      if (_builtPanels.has(panelId)) return; // init or reconcile already built it
+      _builtPanels.add(panelId);
+      const name = params.sessionName;
+      const sess = sessions.get(name);
+      tilePanels.set(panelId, { kind: 'session', sessionName: name, panel: null, el: element });
+      if (!sess) {
+        // Build with DOM APIs, never innerHTML — `name` comes from a persisted
+        // spaces index (untrusted); textContent neutralizes any markup (the
+        // source is also validated in normalizeSpaceRecord, defense in depth).
+        const tile = document.createElement('div'); tile.className = 'tile';
+        const hdr = document.createElement('div'); hdr.className = 'tile-header';
+        const title = document.createElement('span'); title.className = 'tile-title';
+        title.textContent = name || 'session';
+        const status = document.createElement('span'); status.className = 'tile-status';
+        status.setAttribute('data-state', 'disconnected'); status.textContent = 'gone';
+        hdr.append(title, status); tile.appendChild(hdr);
+        const body = document.createElement('div'); body.className = 'tile-body';
+        tile.appendChild(body);
+        element.replaceChildren(tile);
+        return;
+      }
+      try {
+        if (!tileModule) tileModule = await import(tileModuleUrl);
+        const handle = await tileModule.createTerminalTile({
+          wasmModule, sessionName: name, wsPort: sess.wsPort,
+          resolveWsPort: () => resolveCurrentWsPort(name),
+          mountEl: element,
+          registerClaim: () => claimedTileSessions.add(name),
+          releaseClaim: () => claimedTileSessions.delete(name),
+          displayName: sess.displayName || name,
+          fontData, fontName, fontSize, lineHeight, fontWeight,
+          applyColors: applyVSCodeTerminalColors, themeName: activeThemeName,
+          openLink: (link) => openTerminalLink(link, undefined),
+          linkHover: terminalLinkHoverHook, linkHoverEnd: terminalLinkHoverEndHook,
+          fallbackCwd: () => sess.cwd || undefined,
+          onStatus: () => { /* header chip is enough */ },
+          onDestroy: () => {
+            // The tile ✕ freed the engine; drop the now-empty dockview panel
+            // and persist. Skipped during leaveSpace (whole grid is disposing).
+            if (_tearingDown) return;
+            const p = dv && dv.panels.find((x) => x.id === panelId);
+            if (p) { try { dv.removePanel(p); } catch (_) {} }
+            tilePanels.delete(panelId);
+            scheduleSpaceSave();
+          },
+        });
+        const entry = tilePanels.get(panelId) || { kind: 'session', sessionName: name };
+        entry.tileHandle = handle; entry.el = element;
+        entry.bodyEl = handle.el.querySelector('.tile-body');
+        tilePanels.set(panelId, entry);
+        // Mount/restore can leave the WebGPU surface stale (black) until a
+        // dimension change — kick it once the panel size has settled. The
+        // tile's RO fires on mount but can race a not-yet-final panel size on
+        // fromJSON restore; this guarantees a paint. Idempotent for fresh tiles.
+        if (handle.reconfigure) {
+          requestAnimationFrame(() => requestAnimationFrame(() => { try { handle.reconfigure(); } catch (_) {} }));
+        }
+        injectTileLockButton(handle.el, panelId);
+        const rec = spaceMode && spacesIndex.spaces[spaceMode];
+        if (rec && rec.tiles && rec.tiles[panelId] && rec.tiles[panelId].locked) {
+          toggleTileLock(panelId, true, true);
+        }
+      } catch (e) { reportError('spaces-tile', e); }
+    }
+
+    function injectTileLockButton(tileEl, panelId) {
+      const header = tileEl.querySelector('.tile-header');
+      if (!header || header.querySelector('.tile-lock')) return;
+      const btn = document.createElement('button');
+      btn.className = 'tile-lock codicon codicon-unlock';
+      btn.type = 'button'; btn.title = 'Lock this tile (pin its size)';
+      btn.addEventListener('mousedown', (e) => e.preventDefault());
+      btn.addEventListener('click', () => toggleTileLock(panelId));
+      const closeBtn = header.querySelector('.tile-close');
+      if (closeBtn) header.insertBefore(btn, closeBtn); else header.appendChild(btn);
+    }
+
+    // ── LOCK (per-tile) — pin the panel's size via dockview constraints, and
+    //  flag it non-draggable. dockview 7.0.4 has NO public per-panel DnD
+    //  toggle (only the grid-wide `disableDnd`), and SP2 exposes no intra-grid
+    //  drag surface anyway (that's SP3), so pinning the size IS the robust
+    //  "can't be moved/resized while others still can": a sash bordering a
+    //  size-pinned panel can't move it, other sashes stay free. When SP3 adds
+    //  drag, the same `locked` flag gates the drag source.
+    function toggleTileLock(panelId, force, silent) {
+      const entry = tilePanels.get(panelId);
+      const rec = spaceMode && spacesIndex.spaces[spaceMode];
+      if (!entry || !rec) return;
+      rec.tiles = rec.tiles || {};
+      const t = rec.tiles[panelId] || (rec.tiles[panelId] = { kind: entry.kind, sessionName: entry.sessionName });
+      const locked = (force !== undefined) ? force : !t.locked;
+      t.locked = locked;
+      applyTileConstraint(entry, locked);
+      const btn = entry.el && entry.el.querySelector('.tile-lock');
+      if (btn) {
+        btn.classList.toggle('codicon-lock', locked);
+        btn.classList.toggle('codicon-unlock', !locked);
+        btn.classList.toggle('active', locked);
+        btn.title = locked ? 'Unlock this tile' : 'Lock this tile (pin its size)';
+      }
+      const tileEl = entry.el && entry.el.querySelector('.tile');
+      if (tileEl) tileEl.classList.toggle('tile-locked', locked);
+      if (!silent) saveSpaces();
+    }
+
+    function applyTileConstraint(entry, locked) {
+      const panel = entry.panel;
+      if (!panel || !panel.api || !panel.api.setConstraints) return;
+      try {
+        if (locked) {
+          const host = entry.el;
+          const w = host ? host.clientWidth : 0;
+          const h = host ? host.clientHeight : 0;
+          panel.api.setConstraints({ minimumWidth: w, maximumWidth: w, minimumHeight: h, maximumHeight: h });
+        } else {
+          panel.api.setConstraints({
+            minimumWidth: 100, maximumWidth: Number.MAX_SAFE_INTEGER,
+            minimumHeight: 100, maximumHeight: Number.MAX_SAFE_INTEGER,
+          });
+        }
+      } catch (_) { /* best effort — padlock visual + persisted flag still hold */ }
+    }
+
+    // ── LOCK (whole grid) — freeze every split (sash) + every drag/drop. ──
+    function applyGridLock(locked) {
+      if (!dv) return;
+      // Both go through updateOptions — DockviewApi delegates it to the
+      // component, which honors 'locked' → gridview sashes disabled. Setting
+      // `dv.locked =` directly is an inert expando (verified in dockview 7.0.4),
+      // so grid lock would silently fail to freeze sash resizing.
+      try { dv.updateOptions({ locked, disableDnd: locked }); } catch (_) {}
+    }
+    function toggleGridLock(id) {
+      const rec = spacesIndex.spaces[id];
+      if (!rec) return;
+      rec.gridLocked = !rec.gridLocked;
+      if (spaceMode === id) applyGridLock(rec.gridLocked);
+      saveSpaces(); syncLockGridBtn(); renderSpaces();
+    }
+    function syncLockGridBtn() {
+      const btn = document.getElementById('lock-grid-btn');
+      if (!btn) return;
+      const rec = spaceMode && spacesIndex.spaces[spaceMode];
+      if (rec) {
+        btn.style.display = '';
+        const locked = !!rec.gridLocked;
+        btn.classList.remove('codicon-lock', 'codicon-unlock');
+        btn.classList.add(locked ? 'codicon-lock' : 'codicon-unlock');
+        btn.classList.toggle('active', locked);
+        btn.title = locked ? 'Unlock the active grid' : 'Lock the active grid (freeze splits + moves)';
+      } else {
+        btn.style.display = 'none';
+      }
+    }
+
+    function gateStatusBarForSpace(inSpace) {
+      if (!terminal) return;
+      if (inSpace) {
+        _savedStatusBarMode = prefs.statusBarMode;
+        try { terminal.set_status_bar_mode('hidden'); terminal.set_status_bar_reveal(0); } catch (_) {}
+        sbAnim.reveal = 0; sbAnim.target = 0;
+      } else {
+        const mode = _savedStatusBarMode || prefs.statusBarMode;
+        try { terminal.set_status_bar_mode(mode); } catch (_) {}
+        if (mode === 'always') { sbAnim.reveal = 1; sbAnim.target = 1; try { terminal.set_status_bar_reveal(1); } catch (_) {} }
+        else { sbAnim.reveal = 0; sbAnim.target = 0; }
+        _savedStatusBarMode = null;
+      }
+    }
+
+    function onPanelResize(panelId) {
+      const e = tilePanels.get(panelId);
+      if (!e) return;
+      if (e.kind === 'primary') reconfigurePrimarySurface();
+      else if (e.tileHandle) e.tileHandle.reconfigure();
+    }
+
+    function wirePanelHooks(panel) {
+      const id = panel.id;
+      try { dvSubs.push(panel.api.onDidDimensionsChange(() => onPanelResize(id))); } catch (_) {}
+      try { dvSubs.push(panel.api.onDidLocationChange(() => onPanelResize(id))); } catch (_) {}
+      // renderer:'always' keeps hidden tiles alive — suspend/wake bounds the GPU cost.
+      try {
+        dvSubs.push(panel.api.onDidVisibilityChange((ev) => {
+          const e = tilePanels.get(id);
+          if (!e || !e.tileHandle) return;
+          if (ev.isVisible) { e.tileHandle.wake(); e.tileHandle.reconfigure(); }
+          else e.tileHandle.suspend();
+        }));
+      } catch (_) {}
+    }
+
+    let _enteringSpace = false;
+    async function enterSpace(spaceId) {
+      // Synchronous re-entrancy guard: loadDockview() awaits a dynamic import
+      // that spans macrotasks on first entry — without this, a second call
+      // (fast click / restore racing a click) would start a parallel enter and
+      // mount two dockview roots / double-reparent the primary canvas.
+      if (_enteringSpace) return;
+      if (spaceMode) { if (spaceMode === spaceId) return; leaveSpace(); }
+      if (!wasmReady) return;
+      const rec = spacesIndex.spaces[spaceId];
+      if (!rec) return;
+      _enteringSpace = true;
+      let mod;
+      try {
+        mod = await loadDockview();
+      } finally {
+        _enteringSpace = false;
+      }
+      if (!mod) return;
+      if (spaceMode) return; // lost a race while awaiting — another enter won
+      spaceMode = spaceId; activeSpaceId = spaceId;
+      tilePanels.clear(); _builtPanels.clear();
+      if (emptyState) emptyState.style.display = 'none';
+      dvRoot = document.createElement('div');
+      dvRoot.id = 'spaces-dv-root';
+      dvRoot.style.cssText = 'position:absolute;inset:0;z-index:2';
+      dvRoot.className = document.documentElement.getAttribute('data-theme') === 'light'
+        ? 'dockview-theme-light' : 'dockview-theme-dark';
+      primaryCanvasHome = document.getElementById('terminal-area');
+      primaryCanvasHome.appendChild(dvRoot);
+      dv = mod.createDockview(dvRoot, { createComponent: makeRenderer, disableDnd: false });
+      // Build the grid: restore the saved geometry blob verbatim, else seed a
+      // fresh space with just the reparented primary. createComponent runs
+      // synchronously during fromJSON/addPanel and reparents the live canvas.
+      let restored = false;
+      if (rec.layout) {
+        try { dv.fromJSON(rec.layout); restored = true; }
+        catch (e) { reportError('spaces-restore', e); rec.layout = null; }
+      }
+      if (!restored) {
+        dv.addPanel({ id: 'panel_primary', component: 'primary', title: 'Primary',
+          params: { kind: 'primary', panelId: 'panel_primary' } });
+        rec.tiles = rec.tiles || {};
+        rec.tiles.panel_primary = rec.tiles.panel_primary || { kind: 'primary' };
+      }
+      // Reconcile restored panels: fromJSON recreates the panel HOSTS but does
+      // NOT reliably run our createComponent.init content-builder for every
+      // panel (observed: the non-primary panel's content host came back empty).
+      // The `tiles` binding map is the source of truth — build any empty host
+      // from it. Idempotent: panels init already filled are skipped.
+      if (restored) {
+        for (const panel of dv.panels) {
+          let host = null;
+          try { host = panel.view && panel.view.content && panel.view.content.element; } catch (_) {}
+          if (!host || host.childElementCount > 0) continue; // already built
+          const binding = (rec.tiles && rec.tiles[panel.id]) || {};
+          if (binding.kind === 'primary') {
+            buildPrimaryTile(host, panel.id);
+          } else {
+            buildSessionTile(host, panel.id, { kind: 'session', sessionName: binding.sessionName, panelId: panel.id });
+          }
+        }
+      }
+      // Link live panel objects + wire resize/visibility hooks.
+      for (const panel of dv.panels) {
+        const e = tilePanels.get(panel.id) || {};
+        e.panel = panel; tilePanels.set(panel.id, e);
+        wirePanelHooks(panel);
+      }
+      dvSubs.push(dv.onDidLayoutChange(() => scheduleSpaceSave()));
+      // RO width/height source flips to the primary panel body (§4.4).
+      if (primaryPanelBodyEl) { try { resizeObserver.observe(primaryPanelBodyEl); } catch (_) {} }
+      // Primary's WebGPU surface is stale (black) after a fromJSON restore:
+      // the canvas backing store is still at its pre-space full width until the
+      // RO re-sizes it to the half-width panel. reconfigurePrimarySurface alone
+      // resizes at the stale backing size — we must run the full RO→resize→
+      // reconfigure path. A synthetic resize is exactly what fixes it manually
+      // and is the app's own layout-change mechanism.
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        try { window.dispatchEvent(new Event('resize')); } catch (_) {}
+        reconfigurePrimarySurface();
+      }));
+      gateStatusBarForSpace(true);
+      applyGridLock(!!rec.gridLocked);
+      // Re-apply per-tile locks once a frame has settled the panel sizes.
+      requestAnimationFrame(() => {
+        for (const pid in (rec.tiles || {})) {
+          if (rec.tiles[pid] && rec.tiles[pid].locked) toggleTileLock(pid, true, true);
+        }
       });
-      const p1 = api.addPanel({ id: 'primary', title: 'Primary (reparented)', component: 'default' });
-      api.addPanel({ id: 'side', title: 'Side', component: 'default', position: { referencePanel: 'primary', direction: 'right' } });
-      const body = p1.view.content.element;
-      // THE gating move: appendChild of an attached node = a MOVE, not recreate.
-      body.appendChild(canvas);
-      body.appendChild(document.getElementById('kb-input'));
-      // wire dockview resize → surface reconfigure
-      const sub = p1.api.onDidDimensionsChange(() => reconfigurePrimarySurface());
-      _dvProof = { api, root, canvasParent, sub };
       reconfigurePrimarySurface();
-      return 'mounted — primary reparented into dockview';
+      saveSpaces(); renderSpaces(); syncLockGridBtn();
     }
-    function __dvProofExit() {
-      if (!_dvProof) return 'not mounted';
-      const { api, root, canvasParent, sub } = _dvProof;
-      try { sub.dispose(); } catch (_) {}
-      canvasParent.appendChild(canvas);            // move canvas back
-      canvasParent.appendChild(document.getElementById('kb-input'));
-      try { api.dispose(); } catch (_) {}
-      root.remove();
-      _dvProof = null;
+
+    function leaveSpace() {
+      if (!spaceMode) return;
+      captureLayout();                            // snapshot geometry + bindings before teardown
+      const home = primaryCanvasHome || document.getElementById('terminal-area');
+      reparentPrimaryInto(home);                  // ⚠ PROOF #1 — the return leg
+      if (primaryPanelBodyEl) { try { resizeObserver.unobserve(primaryPanelBodyEl); } catch (_) {} }
+      primaryPanelBodyEl = null;
+      gateStatusBarForSpace(false);
+      for (const s of dvSubs) { try { s.dispose(); } catch (_) {} }
+      dvSubs = [];
+      // dockview does NOT know about our tile handles — free each session
+      // tile's engine (WS/GPU/RO/rAF + claim) explicitly before disposing.
+      _tearingDown = true;
+      for (const [, e] of tilePanels) { if (e.tileHandle) { try { e.tileHandle.destroy(); } catch (_) {} } }
+      try { if (dv) dv.dispose(); } catch (_) {}
+      _tearingDown = false;
+      dv = null;
+      if (dvRoot) { dvRoot.remove(); dvRoot = null; }
+      tilePanels.clear(); _builtPanels.clear();
+      spaceMode = null; activeSpaceId = null;
+      if (emptyState) emptyState.style.display = sessions.size ? 'none' : '';
       reconfigurePrimarySurface();
-      return 'exited — primary restored to classic';
+      saveSpaces(); renderSpaces(); syncLockGridBtn();
     }
-    try { window.__dvProof = __dvProof; window.__dvProofExit = __dvProofExit; } catch (_) {}
+
+    // ── Add-tile affordance (SP2 is a picker; section→grid drag is SP3). ──
+    function addSessionTile(sessionName, referencePanelId) {
+      if (!dv) return;
+      const id = 'panel_' + Math.random().toString(36).slice(2, 8);
+      dv.addPanel({ id, component: 'session',
+        title: (sessions.get(sessionName) && sessions.get(sessionName).displayName) || sessionName,
+        params: { kind: 'session', sessionName, panelId: id },
+        position: referencePanelId ? { referencePanel: referencePanelId, direction: 'right' } : undefined });
+      const panel = dv.panels.find((p) => p.id === id);
+      if (panel) { const e = tilePanels.get(id) || {}; e.panel = panel; tilePanels.set(id, e); wirePanelHooks(panel); }
+      scheduleSpaceSave();
+    }
+    function showAddTileMenu(e, referencePanelId) {
+      const old = document.querySelector('.sb-context-menu'); if (old) old.remove();
+      const menu = el('div', 'sb-context-menu');
+      menu.style.left = e.clientX + 'px'; menu.style.top = e.clientY + 'px';
+      const tiled = new Set();
+      for (const [, en] of tilePanels) if (en.sessionName) tiled.add(en.sessionName);
+      // The primary tile carries kind:'primary' with no sessionName, so the
+      // active session isn't in `tiled` — add it explicitly, else it's offered
+      // as a tile and double-claims its own PTY (registerClaim conflict).
+      if (activeSessionName) tiled.add(activeSessionName);
+      let any = false;
+      for (const [name, s] of sessions) {
+        if (tiled.has(name)) continue; any = true;
+        const it = el('div', 'sb-context-menu-item', s.displayName || name);
+        it.addEventListener('click', () => { menu.remove(); addSessionTile(name, referencePanelId); });
+        menu.appendChild(it);
+      }
+      if (!any) { const it = el('div', 'sb-context-menu-item', 'No other sessions'); it.style.opacity = '0.6'; menu.appendChild(it); }
+      document.body.appendChild(menu);
+      const close = (ev) => { if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('mousedown', close, true); } };
+      setTimeout(() => document.addEventListener('mousedown', close, true), 0);
+    }
+
+    // ── Persistence — full-fidelity capture of geometry + bindings + locks. ──
+    function captureLayout() {
+      if (!dv || !spaceMode) return;
+      const rec = spacesIndex.spaces[spaceMode];
+      if (!rec) return;
+      try { rec.layout = dv.toJSON(); } catch (_) {}   // opaque geometry blob (split ratios etc.)
+      const tiles = {};
+      for (const [id, e] of tilePanels) {
+        const prev = (rec.tiles && rec.tiles[id]) || {};
+        tiles[id] = { kind: e.kind, sessionName: e.sessionName, locked: !!prev.locked };
+      }
+      rec.tiles = tiles;
+    }
+    function saveSpaces() {
+      spacesIndex.version = 1;
+      spacesIndex.order = [...spaceOrder];
+      spacesIndex.active = activeSpaceId;
+      vscode.postMessage({ type: 'save-space', index: spacesIndex });
+    }
+    function scheduleSpaceSave() {
+      captureLayout();
+      if (_spaceSaveTimer) clearTimeout(_spaceSaveTimer);
+      _spaceSaveTimer = setTimeout(() => { _spaceSaveTimer = null; saveSpaces(); }, 400);
+    }
+
+    function createSpace() {
+      const id = 'sp_' + Math.random().toString(36).slice(2, 8);
+      const rec = { name: 'Space ' + (spaceOrder.length + 1), createdMs: Date.now(),
+        layout: null, tiles: { panel_primary: { kind: 'primary' } }, gridLocked: false };
+      spacesIndex.spaces[id] = rec;
+      spaceOrder.push(id);
+      spacesMap.set(id, { name: id, displayName: rec.name, connected: true });
+      saveSpaces(); renderSpaces();
+      enterSpace(id);
+    }
+    function deleteSpace(id) {
+      if (spaceMode === id) leaveSpace();
+      delete spacesIndex.spaces[id];
+      const i = spaceOrder.indexOf(id); if (i !== -1) spaceOrder.splice(i, 1);
+      spacesMap.delete(id);
+      if (activeSpaceId === id) activeSpaceId = null;
+      saveSpaces(); renderSpaces();
+    }
+    // Clone of startSessionRename (:6878) — posts save-space instead of rename-session.
+    function startSpaceRename(id, space, nameEl) {
+      _renamingSpace = id;
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = space.displayName || id;
+      input.className = 'name';
+      input.style.cssText = 'background: #313244; border: 1px solid #b482ff; outline: none; padding: 0 2px; color: #cdd6f4; font: inherit; width: 100%;';
+      nameEl.replaceWith(input);
+      input.focus(); input.select();
+      const commit = () => {
+        _renamingSpace = null;
+        const newName = input.value.trim();
+        if (newName && newName !== space.displayName) {
+          space.displayName = newName;
+          if (spacesIndex.spaces[id]) spacesIndex.spaces[id].name = newName;
+          saveSpaces();
+        }
+        renderSpaces();
+      };
+      input.addEventListener('blur', commit);
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') { ev.preventDefault(); input.blur(); }
+        if (ev.key === 'Escape') { input.value = space.displayName || id; input.blur(); }
+      });
+    }
+    // Clone of showSessionContextMenu (:6906) — Enter / Rename / Lock Grid / Delete.
+    function showSpaceContextMenu(e, id) {
+      e.preventDefault(); e.stopPropagation();
+      clearDocumentSelection();
+      const old = document.querySelector('.sb-context-menu'); if (old) old.remove();
+      const menu = el('div', 'sb-context-menu');
+      menu.style.left = e.clientX + 'px'; menu.style.top = e.clientY + 'px';
+      const rec = spacesIndex.spaces[id];
+      const add = (label, fn) => {
+        const it = el('div', 'sb-context-menu-item', label);
+        it.addEventListener('click', () => { menu.remove(); fn(); });
+        menu.appendChild(it);
+      };
+      add(spaceMode === id ? 'Leave' : 'Enter', () => { if (spaceMode === id) leaveSpace(); else enterSpace(id); });
+      add('Rename', () => {
+        const nameEl = document.querySelector('#spaces-list .session-item[data-name="' + id + '"] .name');
+        const s = spacesMap.get(id);
+        if (nameEl && s) startSpaceRename(id, s, nameEl);
+      });
+      add(rec && rec.gridLocked ? 'Unlock Grid' : 'Lock Grid', () => toggleGridLock(id));
+      add('Delete', () => deleteSpace(id));
+      document.body.appendChild(menu);
+      const close = (ev) => { if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('mousedown', close, true); } };
+      setTimeout(() => document.addEventListener('mousedown', close, true), 0);
+    }
+
+    // Populate state from a persisted index.json (spaces-load) and, if a space
+    // was active on last reload, re-enter it once WASM is ready (§2 restore).
+    function loadSpacesIndex(index) {
+      if (!index || typeof index !== 'object') return;
+      spacesIndex = {
+        version: index.version || 1,
+        order: Array.isArray(index.order) ? index.order : [],
+        active: index.active || null,
+        spaces: (index.spaces && typeof index.spaces === 'object') ? index.spaces : {},
+      };
+      // Normalize each record to the canonical shape (utils, pure) so a
+      // hand-edited/partial index can't crash the grid rebuild.
+      if (utils && utils.normalizeSpaceRecord) {
+        for (const id in spacesIndex.spaces) {
+          spacesIndex.spaces[id] = utils.normalizeSpaceRecord(spacesIndex.spaces[id]);
+        }
+      }
+      spaceOrder.length = 0;
+      for (const id of spacesIndex.order) if (spacesIndex.spaces[id]) spaceOrder.push(id);
+      for (const id in spacesIndex.spaces) if (!spaceOrder.includes(id)) spaceOrder.push(id);
+      spacesMap.clear();
+      for (const id of spaceOrder) {
+        const rec = spacesIndex.spaces[id] || {};
+        spacesMap.set(id, { name: id, displayName: rec.name || id, connected: true });
+      }
+      activeSpaceId = (spacesIndex.active && spacesIndex.spaces[spacesIndex.active]) ? spacesIndex.active : null;
+      renderSpaces(); syncLockGridBtn();
+      maybeRestoreSpace();
+    }
+    function maybeRestoreSpace() {
+      if (!wasmReady || spaceMode) return;
+      if (activeSpaceId && spacesIndex.spaces[activeSpaceId]) enterSpace(activeSpaceId);
+    }
 
     // Tiny indirection so the security-warning grep doesn't flag the
     // workshop+overlay path twice — the `new Function()` call lives in a
@@ -13983,9 +14569,14 @@
         // element itself, not its parent. Fall back to the viewport math only
         // if terminal-area isn't measurable yet (very early init).
         const terminalAreaEl = document.getElementById('terminal-area');
-        const taW = terminalAreaEl ? terminalAreaEl.clientWidth : 0;
+        // In a Space the primary is a grid cell, not the whole area: source
+        // BOTH the CSS width AND height from its panel body so the reparented
+        // canvas fills exactly the cell (§4.4). Classic view is unchanged.
+        const inSpace = spaceMode && primaryPanelBodyEl;
+        const widthSrc = inSpace ? primaryPanelBodyEl : terminalAreaEl;
+        const taW = widthSrc ? widthSrc.clientWidth : 0;
         const cssW = taW > 0 ? taW : Math.max(0, vw - sidebarWidth - wsPanelWidth);
-        const cssH = vh;
+        const cssH = inSpace ? primaryPanelBodyEl.clientHeight : vh;
         // Clamp backing store to 4× viewport (defensive upper bound — no
         // legitimate DPR exceeds this on any shipping display).
         const MAX_BACK = Math.max(vw, vh) * 4;
@@ -14444,6 +15035,8 @@
           if (msg.fontName) fontName = msg.fontName;
           if (msg.markedUri) markedUri = msg.markedUri;
           if (msg.iroUri) iroUri = msg.iroUri;
+          if (msg.dockviewUri) dockviewUri = msg.dockviewUri;
+          if (msg.dockviewCssUri) dockviewCssUri = msg.dockviewCssUri;
           // Shared input pipeline (gpu-terminal-input.js) — same static dir
           // as the other sibling modules, derived by swapping the filename.
           if (msg.utilsUri) {
@@ -14501,6 +15094,39 @@
                 // },
                 getCharacterDefs: () => characterDefs,
               });
+              // ── Spaces sidebar list: a SECOND createRenderSidebar instance
+              // bound to the spaces list. Space pseudo-rows carry only a
+              // displayName (+ connected:true for a neutral dot); the working
+              // dot/bell/task-badge chrome simply doesn't render. Reused as-is.
+              renderSpaces = utils.createRenderSidebar({
+                sessionListEl: document.getElementById('spaces-list'),
+                sessions: spacesMap,
+                getActiveSessionName: () => activeSpaceId,
+                onSwitch: (id) => { if (spaceMode === id) leaveSpace(); else enterSpace(id); },
+                onRename: (id, s, nameEl) => startSpaceRename(id, s, nameEl),
+                onRemove: (id) => deleteSpace(id),
+                onContextMenu: (e, id) => showSpaceContextMenu(e, id),
+                isRenaming: () => _renamingSpace !== null,
+                getOrder: () => spaceOrder,
+                onReorder: (o) => { spaceOrder.length = 0; spaceOrder.push(...o); saveSpaces(); renderSpaces(); },
+                onShareContext: () => {},   // no-op: dragging a space onto the terminal is meaningless
+                onShareDragState: () => {}, // no-op
+              });
+              const newSpaceBtn = document.getElementById('new-space-btn');
+              if (newSpaceBtn) newSpaceBtn.addEventListener('click', () => createSpace());
+              const lockGridBtn = document.getElementById('lock-grid-btn');
+              if (lockGridBtn) lockGridBtn.addEventListener('click', () => { if (spaceMode) toggleGridLock(spaceMode); });
+              // Request the persisted spaces index (VS Code: extension fs;
+              // standalone/Tauri: hub GET /api/v1/spaces).
+              vscode.postMessage({ type: 'list-spaces' });
+              // Standalone cross-window freshness stopgap (mirrors plans): the
+              // hub has no push, so refetch on tab focus — but never while a
+              // space is entered (would clobber the live layout).
+              if (IS_STANDALONE) {
+                document.addEventListener('visibilitychange', () => {
+                  if (!document.hidden && !spaceMode) vscode.postMessage({ type: 'list-spaces' });
+                });
+              }
               dbg('wasm-init: utils module loaded');
             } catch (e) {
               reportError('gpu-terminal-utils', e);
@@ -15016,6 +15642,9 @@
           break;
         case 'plans-load':
           if (plansPanel) plansPanel.setPlans(msg.plans);
+          break;
+        case 'spaces-load':
+          loadSpacesIndex(msg.index);
           break;
         case 'plans-submit-result':
           if (plansPanel) plansPanel.handleSubmitResult(msg);

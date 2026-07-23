@@ -3593,6 +3593,35 @@ body.with-tab-bar #container {
   color: var(--sidebar-accent, #b482ff);
 }
 
+/* ── SP2 Spaces: dockview docking grid ───────────────────────────────
+   #spaces-dv-root is an absolute overlay mounted inside #terminal-area.
+   Each panel's content is a .dv-tile-host wrapping the unified .tile chrome
+   (header + body). We HIDE dockview's native tab bar and use our .tile-header
+   as the single, consistent chrome (WASM status bar reserved for classic).
+   Intra-grid tab-drag is SP3; SP2 uses the "add tile" picker + sash resize. */
+#spaces-dv-root { background: var(--vscode-terminal-background, #000); }
+#spaces-dv-root .dv-tabs-and-actions-container { display: none; }
+.dv-tile-host {
+  width: 100%; height: 100%;
+  display: flex; flex-direction: column;
+  position: relative; min-height: 0;
+}
+.dv-tile-host > .tile { flex: 1; min-height: 0; border-left: none; }
+/* Lock padlock in the tile header — mirrors the ✕ button styling. */
+.tile-lock, .tile-addtile {
+  background: none; border: none; cursor: pointer;
+  color: var(--sidebar-text, #cdd6f4);
+  font-size: 12px; line-height: 1;
+  padding: 3px 6px; border-radius: 4px;
+  opacity: 0.6; transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+.tile-lock:hover, .tile-addtile:hover {
+  opacity: 1; background: var(--sb-popup-hover, rgba(255,255,255,0.06));
+}
+.tile-lock.active { opacity: 1; color: var(--sidebar-accent, #b482ff); }
+/* A size-pinned (locked) tile: accent the whole frame so the lock reads. */
+.tile.tile-locked { outline: 1px solid var(--sidebar-accent, #b482ff); outline-offset: -1px; }
+
 /* ── Activity Rails (VS Code-style icon strips) ─────────────────────
    #rail-left / #rail-right: persistent vertical icon toggles at the
    container edges. Entire feature is gated on body.with-rails (same

@@ -471,6 +471,47 @@ describe('GPU Terminal — Message Protocol', () => {
     expect(js).toContain("case 'plan_changed'");
   });
 
+  it('handles spaces messages (SP2)', () => {
+    // Host → webview: the persisted docking-grid index.
+    expect(js).toContain("case 'spaces-load'");
+    // Webview → host: request + persist.
+    expect(js).toContain("type: 'list-spaces'");
+    expect(js).toContain("type: 'save-space'");
+  });
+
+  it('receives dockview URIs in wasm-init (both host paths)', () => {
+    // Path B self-init (standalone/Tauri) ships the relative vendor URLs...
+    expect(js).toContain('vendor/dockview/dockview-core.esm.js');
+    // ...and the webview stores whatever wasm-init carries (Path A asWebviewUri).
+    expect(js).toContain('msg.dockviewUri');
+    expect(js).toContain('msg.dockviewCssUri');
+  });
+
+  it('reparents the primary (never re-inits) and gates the status bar', () => {
+    // The gating move + surface reconfigure are the crux of the space container.
+    expect(js).toContain('function reconfigurePrimarySurface');
+    expect(js).toContain('function enterSpace');
+    expect(js).toContain('function leaveSpace');
+    expect(js).toContain('reparentPrimaryInto');
+    // WASM status bar hidden in a space, restored to classic on leave.
+    expect(js).toContain('gateStatusBarForSpace');
+    // Legacy proof harness bindings must be GONE (replaced by enterSpace/leaveSpace).
+    expect(js).not.toContain('window.__dvProof');
+    expect(js).not.toContain('function __dvProof');
+  });
+
+  it('implements both LOCK scopes (whole grid + per-tile)', () => {
+    // Whole grid: dockview locked state + drag/drop disable.
+    expect(js).toContain('dv.locked');
+    expect(js).toContain('disableDnd');
+    expect(js).toContain('applyGridLock');
+    // Per-tile: pin the panel size via dockview constraints.
+    expect(js).toContain('setConstraints');
+    expect(js).toContain('toggleTileLock');
+    // Lock state is part of the persisted record (full-fidelity restore).
+    expect(js).toContain('gridLocked');
+  });
+
   it('sends error messages', () => {
     expect(js).toContain("type: 'error'");
   });
@@ -535,6 +576,28 @@ describe('GPU Terminal — Extension Message Handlers', () => {
   it('persists save-preference for borderEnabled via updateAppearance', () => {
     messageHandler({ type: 'save-preference', key: 'borderEnabled', value: false });
     expect(mockUpdateAppearance).toHaveBeenCalledWith({ borderEnabled: false });
+  });
+
+  it('handles list-spaces / save-space (SP2 persistence)', () => {
+    // Swap in a fake storage to keep the round-trip off disk + deterministic.
+    const saved: unknown[] = [];
+    const fakeIndex = { version: 1, order: ['sp_x'], active: 'sp_x',
+      spaces: { sp_x: { name: 'T', tiles: {}, gridLocked: true } } };
+    (provider as unknown as { spacesStorage: unknown }).spacesStorage = {
+      load: () => fakeIndex,
+      save: (i: unknown) => saved.push(i),
+      dispose: () => {},
+    };
+
+    // save-space forwards the whole index blob to storage.
+    const outIndex = { version: 1, order: ['sp_a'], active: null, spaces: { sp_a: {} } };
+    messageHandler({ type: 'save-space', index: outIndex });
+    expect(saved).toEqual([outIndex]);
+
+    // list-spaces posts the persisted index back as spaces-load.
+    mockPostMessage.mockClear();
+    messageHandler({ type: 'list-spaces' });
+    expect(mockPostMessage).toHaveBeenCalledWith({ type: 'spaces-load', index: fakeIndex });
   });
 
   it('persists save-preference for borderOpacity via updateAppearance', () => {
