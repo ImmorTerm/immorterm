@@ -206,6 +206,10 @@ export function normalizeSpaceRecord(rec) {
   };
 }
 
+// §6 wire MIME for SESSIONS-row → Spaces-grid native drag-in. Single source of
+// truth: the drop handler in gpu-terminal.html reads it as `utils.SESSION_MIME`.
+export const SESSION_MIME = 'application/x-immorterm-session';
+
 export function createRenderSidebar({
   sessionListEl,
   sessions,
@@ -221,6 +225,7 @@ export function createRenderSidebar({
   onShareDragState,
   onShareModeSelect,
   getCharacterDefs,
+  enableGridDrag,   // §6A — sessions list only: add a native-drag grip per row
 }) {
   let _rendering = false;
   let _dragState = null; // { sessionName, startY, itemEl, dragging }
@@ -350,6 +355,33 @@ export function createRenderSidebar({
 
       const item = document.createElement('div');
       item.className = 'session-item' + (name === activeSessionName ? ' active' : '');
+
+      // §6A — dedicated native-drag grip: drag it into the Spaces grid to spawn
+      // a terminal tile (dockview's external-drop overlay accepts SESSION_MIME).
+      // Its mousedown stopPropagation() keeps the row's synthetic pointer
+      // reorder/share (below) from arming, so the two DnD systems never fight.
+      if (enableGridDrag) {
+        const grip = document.createElement('span');
+        grip.className = 'tile-grip session-grip'; grip.setAttribute('aria-hidden', 'true');
+        grip.textContent = '⠿';
+        grip.draggable = true;
+        grip.addEventListener('mousedown', (e) => e.stopPropagation());
+        grip.addEventListener('dragstart', (e) => {
+          e.dataTransfer.setData(SESSION_MIME, name);
+          e.dataTransfer.effectAllowed = 'copy';
+          item.classList.add('dragging');                    // reuse the existing lift
+          const ghost = item.cloneNode(true);
+          ghost.style.cssText = 'position:absolute;top:-9999px;left:-9999px;width:180px;opacity:0.9;'
+            + 'transform:scale(1.03) rotate(-0.8deg);border-radius:6px;'
+            + 'box-shadow:0 8px 18px rgba(0,0,0,0.45),0 0 0 1px var(--sidebar-accent,#b482ff);'
+            + 'background:var(--sidebar-bg,#181825);pointer-events:none';
+          document.body.appendChild(ghost);
+          try { e.dataTransfer.setDragImage(ghost, 16, 12); } catch (_) { /* jsdom */ }
+          setTimeout(() => ghost.remove(), 0);
+        });
+        grip.addEventListener('dragend', () => item.classList.remove('dragging'));
+        item.appendChild(grip);
+      }
 
       const dot = document.createElement('span');
       let dotClass = 'dot';

@@ -3599,8 +3599,36 @@ body.with-tab-bar #container {
    (header + body). We HIDE dockview's native tab bar and use our .tile-header
    as the single, consistent chrome (WASM status bar reserved for classic).
    Intra-grid tab-drag is SP3; SP2 uses the "add tile" picker + sash resize. */
-#spaces-dv-root { background: var(--vscode-terminal-background, #000); }
-#spaces-dv-root .dv-tabs-and-actions-container { display: none; }
+#spaces-dv-root {
+  background: var(--vscode-terminal-background, #000);
+  /* dockview's drop preview reads these vars from the active theme; we pass NO
+     theme (bespoke #spaces-dv-root chrome instead), so without this the vars are
+     unset and the drop overlay renders with an empty border/background = it's
+     invisible. Set them to accent here so BOTH render paths — the `anchor`
+     overlay (spaced themes) and the default `selection` quadrant (our case,
+     abyss) — light up in brand accent. One source, both paths (§3). */
+  --dv-drag-over-background-color: color-mix(in srgb, var(--sidebar-accent, #b482ff) 18%, transparent);
+  --dv-drag-over-border: 1px solid color-mix(in srgb, var(--sidebar-accent, #b482ff) 55%, transparent);
+  --dv-drag-over-border-color: var(--sidebar-accent, #b482ff);
+}
+/* SP3 §2A — the header IS the drag handle. dockview 7.0.4 only initiates a
+   native panel drag from its own tab element, so instead of hiding the tab
+   bar (SP2) we pin it as a TRANSPARENT overlay over the header's leading
+   region (grip + title). Grabbing the grip grabs the real dockview tab →
+   full native reparent + native drop overlay for free. The trailing ~64px
+   (lock / close / add buttons) stays uncovered so those remain clickable,
+   and the tab's own close action is removed so an invisible click can't
+   silently close the panel. Height is locked to --tile-header-h (set on the
+   real .tile-header too) so the two stay pixel-aligned regardless of theme. */
+#spaces-dv-root .dv-tabs-and-actions-container {
+  display: block; position: absolute; top: 0; left: 0;
+  width: calc(100% - 64px); height: var(--tile-header-h);
+  opacity: 0; z-index: 3; cursor: grab;
+}
+#spaces-dv-root .dv-tabs-container,
+#spaces-dv-root .dv-tab,
+#spaces-dv-root .dv-void-container { width: 100%; height: 100%; }
+#spaces-dv-root .dv-default-tab-action { display: none; } /* kill hidden close */
 .dv-tile-host {
   width: 100%; height: 100%;
   display: flex; flex-direction: column;
@@ -3621,6 +3649,140 @@ body.with-tab-bar #container {
 .tile-lock.active { opacity: 1; color: var(--sidebar-accent, #b482ff); }
 /* A size-pinned (locked) tile: accent the whole frame so the lock reads. */
 .tile.tile-locked { outline: 1px solid var(--sidebar-accent, #b482ff); outline-offset: -1px; }
+
+/* ══ SP3 — interaction + motion ═════════════════════════════════════════
+   Same motion language as the rest of the file (house spring + a standard
+   decel). transform/opacity ONLY — live WebGPU canvases must never re-lay-out
+   during a drag. Every animation is neutralized under prefers-reduced-motion
+   at the bottom of this block. */
+:root {
+  --tile-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --tile-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --tile-header-h: 28px;
+}
+
+/* #1 Grip affordance — the whole header reads as a handle; the grip is the
+   "this moves" marker. Header height is pinned so the §2A tab overlay aligns. */
+#spaces-dv-root .tile-header { height: var(--tile-header-h); box-sizing: border-box; cursor: grab; }
+.tile-grip {
+  flex: 0 0 auto;
+  font-size: 11px; line-height: 1;
+  color: color-mix(in srgb, var(--sidebar-text, #cdd6f4) 40%, transparent);
+  cursor: grab;
+  transition: color 0.15s ease;
+  user-select: none;
+}
+#spaces-dv-root .tile-header:hover .tile-grip { color: var(--sidebar-accent, #b482ff); }
+/* §6A session-row grip — drag handle into the Spaces grid */
+.session-item .session-grip { margin-right: 2px; }
+.session-item:hover .session-grip { color: var(--sidebar-accent, #b482ff); }
+/* buttons opt back out so they read as click targets, not drag */
+.tile-header button, .tile-status { cursor: pointer; }
+.tile.tile-lifting .tile-header, .tile.tile-lifting .tile-grip { cursor: grabbing; }
+
+/* #2 Lift on pickup — springy ~1.02 pop + elevated accent glow. transform +
+   box-shadow only → GPU-composited, the canvas never re-lays-out. */
+.tile.tile-lifting {
+  transform: scale(1.02) rotate(0.4deg);
+  box-shadow: 0 12px 28px rgba(0,0,0,0.5),
+              0 0 0 1px var(--sidebar-accent, #b482ff),
+              0 0 18px var(--sidebar-active-glow, rgba(180,130,255,0.4));
+  transition: transform 0.18s var(--tile-spring), box-shadow 0.18s var(--tile-ease-out);
+  z-index: 20;
+}
+/* Ghost drag-image (styled clone parked off-screen while the browser snapshots) */
+.tile-drag-ghost {
+  position: absolute; top: -9999px; left: -9999px; width: 220px;
+  opacity: 0.9; transform: scale(1.02) rotate(1deg);
+  border-radius: 6px; pointer-events: none;
+  background: var(--sidebar-bg, #181825);
+  box-shadow: 0 12px 28px rgba(0,0,0,0.5), 0 0 0 1px var(--sidebar-accent, #b482ff);
+}
+
+/* #3 Drop-zone preview — theme dockview's real overlay div. ID selector beats
+   the vendored 2-class default; the anchor is an empty overlay (no canvas), so
+   accent-tint + glow + an eased entrance + a commit snap are all safe. */
+#spaces-dv-root .dv-drop-target-anchor {
+  background: color-mix(in srgb, var(--sidebar-accent, #b482ff) 18%, transparent) !important;
+  border: 1px solid color-mix(in srgb, var(--sidebar-accent, #b482ff) 55%, transparent) !important;
+  box-shadow: inset 0 0 22px color-mix(in srgb, var(--sidebar-accent, #b482ff) 22%, transparent),
+              0 0 14px var(--sidebar-active-glow, rgba(180,130,255,0.4)) !important;
+  border-radius: 4px;
+  transition: all 0.16s var(--tile-ease-out) !important;
+}
+/* the "snap when it commits": brief scale settle as the anchor container flips */
+#spaces-dv-root .dv-drop-target-anchor-container-changed {
+  animation: dv-drop-snap 0.2s var(--tile-spring);
+}
+@keyframes dv-drop-snap { 0% { transform: scale(0.985); } 100% { transform: scale(1); } }
+/* Default (abyss, no `dndOverlayMounting`) renders the quadrant preview as
+   `.dv-drop-target-selection`, NOT the anchor above — this is the element that
+   actually shows in-app. Same accent glow + snappier spring re-position so the
+   preview glides to the hovered quadrant with the same delight as the anchor. */
+#spaces-dv-root .dv-drop-target-selection {
+  /* background + border set DIRECTLY (not via --dv-drag-over-* vars): the active
+     dockview theme redefines those vars on an element BETWEEN us and the
+     selection, so custom-property inheritance beats our root-level var. Explicit
+     !important on the selection rule itself is the only thing that reliably wins. */
+  background-color: color-mix(in srgb, var(--sidebar-accent, #b482ff) 18%, transparent) !important;
+  border: 1px solid color-mix(in srgb, var(--sidebar-accent, #b482ff) 55%, transparent) !important;
+  box-shadow: inset 0 0 22px color-mix(in srgb, var(--sidebar-accent, #b482ff) 22%, transparent),
+              0 0 14px var(--sidebar-active-glow, rgba(180,130,255,0.4)) !important;
+  border-radius: 4px;
+  transition: top 0.16s var(--tile-ease-out), left 0.16s var(--tile-ease-out),
+              width 0.16s var(--tile-ease-out), height 0.16s var(--tile-ease-out),
+              opacity 0.16s var(--tile-ease-out) !important;
+}
+/* sash gets a live accent while a drop-target group is active */
+#spaces-dv-root .dv-active-group > .dv-sash-container .dv-sash:hover {
+  background: color-mix(in srgb, var(--sidebar-accent, #b482ff) 45%, transparent);
+}
+
+/* #4 Lock = tactile clunk. Fired from JS (class swap alone won't re-run a
+   keyframe). Inert at rest. */
+@keyframes lock-pop {
+  0%   { transform: scale(1)    rotate(0); }
+  40%  { transform: scale(1.35) rotate(-6deg); }
+  70%  { transform: scale(0.92) rotate(2deg); }
+  100% { transform: scale(1)    rotate(0); }
+}
+.tile-lock.lock-pop { animation: lock-pop 0.28s var(--tile-spring); }
+@keyframes tile-lock-clunk {
+  0%   { box-shadow: inset 0 0 0 1px var(--sidebar-accent, #b482ff); transform: scale(1); }
+  35%  { box-shadow: inset 0 0 0 2px var(--sidebar-accent, #b482ff),
+                      0 0 16px var(--sidebar-active-glow, rgba(180,130,255,0.4)); transform: scale(0.996); }
+  100% { box-shadow: inset 0 0 0 1px transparent; transform: scale(1); }
+}
+.tile.tile-clunk { animation: tile-lock-clunk 0.26s var(--tile-spring); }
+/* whole-grid lock: a broad, brief accent sweep across the grid */
+#spaces-dv-root.grid-clunk::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none; z-index: 50;
+  background: linear-gradient(105deg, transparent 40%,
+              color-mix(in srgb, var(--sidebar-accent, #b482ff) 22%, transparent) 50%, transparent 60%);
+  animation: grid-lock-sweep 0.45s var(--tile-ease-out);
+}
+@keyframes grid-lock-sweep {
+  from { transform: translateX(-100%); opacity: 0; }
+  30%  { opacity: 0.6; }
+  to   { transform: translateX(100%);  opacity: 0; }
+}
+
+/* #5 Reduced-motion — every SP3 motion drops to instant/opacity-only; the
+   reorder lift + drop-indicator pulse/glide (elsewhere in this file) too.
+   Overlays/locks still communicate via tint, ring, opacity — they just don't
+   move. */
+@media (prefers-reduced-motion: reduce) {
+  .tile.tile-lifting { transform: none; transition: box-shadow 0.01s; }
+  .tile-lock.lock-pop,
+  .tile.tile-clunk,
+  #spaces-dv-root.grid-clunk::after,
+  #spaces-dv-root .dv-drop-target-anchor-container-changed { animation: none !important; }
+  #spaces-dv-root .dv-drop-target-anchor,
+  #spaces-dv-root .dv-drop-target-selection { transition: none !important; }
+  .session-item.dragging { transform: none; }
+  .drop-indicator { transition: none; animation: none; }
+}
+/* ════════════════════════════════════════════════════════════════════ */
 
 /* ── Activity Rails (VS Code-style icon strips) ─────────────────────
    #rail-left / #rail-right: persistent vertical icon toggles at the

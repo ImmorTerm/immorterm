@@ -9436,6 +9436,7 @@
     function primaryTileHtml() {
       return '<div class="tile">'
         + '<div class="tile-header">'
+        + '<span class="tile-grip" aria-hidden="true">⠿</span>'
         + '<span class="tile-title">Primary</span>'
         + '<span class="tile-status" data-state="live">primary</span>'
         + '<span class="tile-spacer"></span>'
@@ -9478,11 +9479,13 @@
         // source is also validated in normalizeSpaceRecord, defense in depth).
         const tile = document.createElement('div'); tile.className = 'tile';
         const hdr = document.createElement('div'); hdr.className = 'tile-header';
+        const grip = document.createElement('span');
+        grip.className = 'tile-grip'; grip.setAttribute('aria-hidden', 'true'); grip.textContent = '⠿';
         const title = document.createElement('span'); title.className = 'tile-title';
         title.textContent = name || 'session';
         const status = document.createElement('span'); status.className = 'tile-status';
         status.setAttribute('data-state', 'disconnected'); status.textContent = 'gone';
-        hdr.append(title, status); tile.appendChild(hdr);
+        hdr.append(grip, title, status); tile.appendChild(hdr);
         const body = document.createElement('div'); body.className = 'tile-body';
         tile.appendChild(body);
         element.replaceChildren(tile);
@@ -9534,7 +9537,15 @@
 
     function injectTileLockButton(tileEl, panelId) {
       const header = tileEl.querySelector('.tile-header');
-      if (!header || header.querySelector('.tile-lock')) return;
+      if (!header) return;
+      // Grip affordance (§1) — the live tile header is built by tileModule, so
+      // add the leading grip here (mirrors the lock-button insert). Idempotent.
+      if (!header.querySelector('.tile-grip')) {
+        const grip = document.createElement('span');
+        grip.className = 'tile-grip'; grip.setAttribute('aria-hidden', 'true'); grip.textContent = '⠿';
+        header.insertBefore(grip, header.firstChild);
+      }
+      if (header.querySelector('.tile-lock')) return;
       const btn = document.createElement('button');
       btn.className = 'tile-lock codicon codicon-unlock';
       btn.type = 'button'; btn.title = 'Lock this tile (pin its size)';
@@ -9569,6 +9580,12 @@
       }
       const tileEl = entry.el && entry.el.querySelector('.tile');
       if (tileEl) tileEl.classList.toggle('tile-locked', locked);
+      // #4 tactile clunk — replay-safe (void offsetWidth restarts the keyframe
+      // on repeat toggles). Skipped when `silent` (restore/re-apply, not a click).
+      if (!silent) {
+        if (btn) { btn.classList.remove('lock-pop'); void btn.offsetWidth; btn.classList.add('lock-pop'); }
+        if (tileEl && locked) { tileEl.classList.remove('tile-clunk'); void tileEl.offsetWidth; tileEl.classList.add('tile-clunk'); }
+      }
       if (!silent) saveSpaces();
     }
 
@@ -9591,19 +9608,24 @@
     }
 
     // ── LOCK (whole grid) — freeze every split (sash) + every drag/drop. ──
-    function applyGridLock(locked) {
+    function applyGridLock(locked, animate) {
       if (!dv) return;
       // Both go through updateOptions — DockviewApi delegates it to the
       // component, which honors 'locked' → gridview sashes disabled. Setting
       // `dv.locked =` directly is an inert expando (verified in dockview 7.0.4),
       // so grid lock would silently fail to freeze sash resizing.
       try { dv.updateOptions({ locked, disableDnd: locked }); } catch (_) {}
+      // #4 whole-grid clunk — one-shot accent sweep. Only on the user toggle
+      // (animate), never on space-restore (enterSpace passes animate falsy).
+      if (animate && locked && dvRoot) {
+        dvRoot.classList.remove('grid-clunk'); void dvRoot.offsetWidth; dvRoot.classList.add('grid-clunk');
+      }
     }
     function toggleGridLock(id) {
       const rec = spacesIndex.spaces[id];
       if (!rec) return;
       rec.gridLocked = !rec.gridLocked;
-      if (spaceMode === id) applyGridLock(rec.gridLocked);
+      if (spaceMode === id) applyGridLock(rec.gridLocked, true);
       saveSpaces(); syncLockGridBtn(); renderSpaces();
     }
     function syncLockGridBtn() {
@@ -9642,6 +9664,23 @@
       if (!e) return;
       if (e.kind === 'primary') reconfigurePrimarySurface();
       else if (e.tileHandle) e.tileHandle.reconfigure();
+    }
+
+    // §7 WebGPU black-flash guard for the DRAG path. dockview reparents tile
+    // DOM on every drag/drop/sash/add/remove; a rearrange can reparent a tile
+    // without changing ITS OWN dimensions/location (it rides along when a
+    // sibling splits), so the per-panel hooks miss it. onDidLayoutChange is the
+    // single catch-all — sweep every tile here. Double-rAF matches the
+    // established idiom so the kick lands after the panel size settles.
+    let _reconfKick = 0;
+    function reconfigureAllTiles() {
+      cancelAnimationFrame(_reconfKick);
+      _reconfKick = requestAnimationFrame(() => requestAnimationFrame(() => {
+        for (const [, e] of tilePanels) {
+          if (e.kind === 'primary') { try { window.dispatchEvent(new Event('resize')); } catch (_) {} reconfigurePrimarySurface(); }
+          else if (e.tileHandle) { try { e.tileHandle.reconfigure(); } catch (_) {} }
+        }
+      }));
     }
 
     function wirePanelHooks(panel) {
@@ -9690,6 +9729,56 @@
       primaryCanvasHome = document.getElementById('terminal-area');
       primaryCanvasHome.appendChild(dvRoot);
       dv = mod.createDockview(dvRoot, { createComponent: makeRenderer, disableDnd: false });
+
+      // §2 Lift-on-pickup + ghost for intra-grid drag. The §2A transparent tab
+      // overlay makes the header a native drag source; dockview fires dragstart
+      // on its .dv-tab (bubbles), so one delegated pair of listeners on dvRoot
+      // covers every group without per-panel wiring. We toggle our own class
+      // (dockview adds none to panel CONTENT) and swap the ugly bitmap snapshot
+      // drag-image for a styled clone of the header.
+      dvRoot.addEventListener('dragstart', (ev) => {
+        const tab = ev.target && ev.target.closest && ev.target.closest('.dv-tab');
+        if (!tab) return;
+        const group = tab.closest('.dv-groupview');
+        const tileEl = group && group.querySelector('.dv-tile-host .tile');
+        if (!tileEl) return;
+        tileEl.classList.add('tile-lifting');
+        const hdr = tileEl.querySelector('.tile-header');
+        if (hdr && ev.dataTransfer && ev.dataTransfer.setDragImage) {
+          const ghost = hdr.cloneNode(true);
+          ghost.className = 'tile-header tile-drag-ghost';
+          document.body.appendChild(ghost);
+          try { ev.dataTransfer.setDragImage(ghost, 20, 14); } catch (_) {}
+          setTimeout(() => ghost.remove(), 0);
+        }
+      });
+      dvRoot.addEventListener('dragend', () => {
+        for (const el2 of dvRoot.querySelectorAll('.tile.tile-lifting')) el2.classList.remove('tile-lifting');
+      });
+
+      // §6 SESSIONS-row → grid drag-in. A native drag (the row grip, set in
+      // gpu-terminal-utils) carries SESSION_MIME; internal tile moves carry a
+      // dockview panel transfer (mod.getPanelData()) and are left to dockview.
+      const SESSION_MIME = mod && utils && utils.SESSION_MIME ? utils.SESSION_MIME : 'application/x-immorterm-session';
+      dvSubs.push(dv.onUnhandledDragOver((e) => {
+        if (mod.getPanelData()) return;                       // internal tile move
+        const dt = e.nativeEvent && e.nativeEvent.dataTransfer;
+        if (dt && dt.types && dt.types.includes(SESSION_MIME)) e.accept();  // → styled overlay (§3)
+      }));
+      dvSubs.push(dv.onDidDrop((e) => {
+        if (mod.getPanelData()) return;                       // internal move — dockview handled it
+        const dt = e.nativeEvent && e.nativeEvent.dataTransfer;
+        const name = dt && dt.getData(SESSION_MIME);
+        // Same exclusions as showAddTileMenu (:9884-9888): the primary already
+        // owns activeSessionName's PTY, and a session already tiled must not get
+        // a second tile — either would double registerClaim() the one PTY and
+        // race two subscribe_raw streams (the failure enterSpace documents).
+        if (!name || !sessions.get(name) || name === activeSessionName) return;
+        for (const [, en] of tilePanels) { if (en.sessionName === name) return; }
+        addSessionTile(name, undefined, { referenceGroup: e.group && e.group.id, direction: mod.positionToDirection(e.position) });
+        try { e.nativeEvent.preventDefault(); } catch (_) {}
+      }));
+
       // Build the grid: restore the saved geometry blob verbatim, else seed a
       // fresh space with just the reparented primary. createComponent runs
       // synchronously during fromJSON/addPanel and reparents the live canvas.
@@ -9728,7 +9817,7 @@
         e.panel = panel; tilePanels.set(panel.id, e);
         wirePanelHooks(panel);
       }
-      dvSubs.push(dv.onDidLayoutChange(() => scheduleSpaceSave()));
+      dvSubs.push(dv.onDidLayoutChange(() => { scheduleSpaceSave(); reconfigureAllTiles(); }));
       // RO width/height source flips to the primary panel body (§4.4).
       if (primaryPanelBodyEl) { try { resizeObserver.observe(primaryPanelBodyEl); } catch (_) {} }
       // Primary's WebGPU surface is stale (black) after a fromJSON restore:
@@ -9779,13 +9868,15 @@
     }
 
     // ── Add-tile affordance (SP2 is a picker; section→grid drag is SP3). ──
-    function addSessionTile(sessionName, referencePanelId) {
+    function addSessionTile(sessionName, referencePanelId, position) {
       if (!dv) return;
       const id = 'panel_' + Math.random().toString(36).slice(2, 8);
+      // `position` (§6 drop) targets the drop group + quadrant; falls through to
+      // today's "right of reference" for the add-tile menu fallback.
       dv.addPanel({ id, component: 'session',
         title: (sessions.get(sessionName) && sessions.get(sessionName).displayName) || sessionName,
         params: { kind: 'session', sessionName, panelId: id },
-        position: referencePanelId ? { referencePanel: referencePanelId, direction: 'right' } : undefined });
+        position: position || (referencePanelId ? { referencePanel: referencePanelId, direction: 'right' } : undefined) });
       const panel = dv.panels.find((p) => p.id === id);
       if (panel) { const e = tilePanels.get(id) || {}; e.panel = panel; tilePanels.set(id, e); wirePanelHooks(panel); }
       scheduleSpaceSave();
@@ -15095,6 +15186,7 @@
                 //   showShareModePopover(sourceName, targetName, x, y);
                 // },
                 getCharacterDefs: () => characterDefs,
+                enableGridDrag: true,   // §6A — drag a session row into the Spaces grid
               });
               // ── Spaces sidebar list: a SECOND createRenderSidebar instance
               // bound to the spaces list. Space pseudo-rows carry only a
