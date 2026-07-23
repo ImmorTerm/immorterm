@@ -69,8 +69,10 @@ pub fn api_routes() -> Router {
         .route("/files/create", post(files_api::files_create))
         // Markdown + fenced-code highlight (port of `marked` + `shiki`)
         .route("/markdown", post(crate::markdown::render_markdown))
-        // Plans (read-only — the daemon's immorterm_plan MCP tools write)
+        // Plans (list is read-only; submit is the ONE UI write path —
+        // flock-parity with the daemon's immorterm_plan MCP tools)
         .route("/plans", get(plans::list_plans))
+        .route("/plans/submit", post(plans::submit_plan))
         // Tasks (mirrors extension TaskStorage)
         .route("/tasks", get(tasks::list_tasks).post(tasks::create_task))
         .route("/tasks/reorder", post(tasks::reorder_tasks))

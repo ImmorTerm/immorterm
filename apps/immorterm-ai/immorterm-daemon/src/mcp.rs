@@ -1934,6 +1934,22 @@ fn tool_definitions() -> Vec<Value> {
                             "required": ["id", "label"]
                         }
                     },
+                    "comments": {
+                        "type": "array",
+                        "description": "Reader comments on the plan. Merge-by-id on update: entries here replace stored comments with the same id, stored comments with other ids (e.g. user comments written via the Plans UI) are carried forward. Omit to keep all stored comments.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string", "description": "Stable comment id (uuid)." },
+                                "sectionId": { "type": "string", "description": "Optional data-plan-section anchor the comment is on." },
+                                "decisionId": { "type": "string", "description": "Optional decision id the comment is on." },
+                                "text": { "type": "string", "description": "The comment body." },
+                                "author": { "type": "string", "description": "Who wrote it." },
+                                "ts": { "type": "number", "description": "Unix ms timestamp." }
+                            },
+                            "required": ["id", "text"]
+                        }
+                    },
                     "project": { "type": "string", "description": "Project scope. Default: auto-derived from cwd (git remote → .claude/project-id → folder name), same as tasks." }
                 },
                 "required": ["id", "title"]
@@ -5240,6 +5256,28 @@ fn merge_decisions(new: &mut [Value], old: &[Value]) {
     }
 }
 
+/// Union-by-id comment merge: entries in `new` win on id match, old comments
+/// whose ids are absent from `new` are carried forward. An agent supersede or
+/// rewrite can therefore never drop a comment someone else appended (the hub
+/// submit route writes user comments with fresh uuids) — same survival
+/// guarantee `merge_decisions` gives resolved flags.
+// ponytail: no comment deletion path — carry-forward is the safety property;
+// add an explicit tombstone arg if deletion is ever needed.
+fn merge_comments(mut new: Vec<Value>, old: &[Value]) -> Vec<Value> {
+    for o in old {
+        let carried = match o.get("id").and_then(|i| i.as_str()) {
+            Some(id) => !new
+                .iter()
+                .any(|n| n.get("id").and_then(|i| i.as_str()) == Some(id)),
+            None => true, // id-less old entries: keep, never silently drop
+        };
+        if carried {
+            new.push(o.clone());
+        }
+    }
+    new
+}
+
 /// Build the full plan record for a create or supersede. Pure — all file IO
 /// stays in the callers so this is unit-testable without touching HOME.
 fn build_plan_record(
@@ -5258,6 +5296,14 @@ fn build_plan_record(
         None => old_decisions.clone(),
     };
     merge_decisions(&mut decisions, &old_decisions);
+
+    let old_comments: Vec<Value> = existing
+        .and_then(|e| e.get("comments").and_then(|c| c.as_array()).cloned())
+        .unwrap_or_default();
+    let comments = match args.get("comments").and_then(|c| c.as_array()) {
+        Some(new) => merge_comments(new.clone(), &old_comments),
+        None => old_comments,
+    };
 
     // Field precedence: explicit arg → existing value → default.
     let inherit = |field: &str, default: &str| -> String {
@@ -5282,6 +5328,8 @@ fn build_plan_record(
         "summary": inherit("summary", ""),
         "html": inherit("html", ""),
         "decisions": decisions,
+        "comments": comments,
+        "sessionName": inherit("sessionName", ""),
         "project": project,
         "createdAt": created_at,
         "updatedAt": now,
@@ -5354,13 +5402,15 @@ fn notify_plan_changed(project: &str, id: &str, plan: &Value, rt: &tokio::runtim
 }
 
 /// Structural equality ignoring the write-tracking fields (`updatedAt`,
-/// `revision`) — the content-idempotency test for `immorterm_plan`.
+/// `revision`) and the attached-session stamp (`sessionName`) — a session
+/// change alone must not bump revisions.
 fn plan_content_eq(a: &Value, b: &Value) -> bool {
     let strip = |v: &Value| {
         let mut v = v.clone();
         if let Some(o) = v.as_object_mut() {
             o.remove("updatedAt");
             o.remove("revision");
+            o.remove("sessionName");
         }
         v
     };
@@ -5413,9 +5463,18 @@ fn handle_plan(args: &Value, rt: &tokio::runtime::Runtime) -> Result<String, Str
         .and_then(|v| v.as_str())
         .ok_or("Missing required field: title")?;
     let project = resolve_plan_project(args)?;
+    // Plan 📎: stamp the writing session's name so the UI can wake the right
+    // PTY on submit. Inherit-style — when no session resolves the arg stays
+    // absent and build_plan_record keeps the existing value.
+    let mut args = args.clone();
+    if args.get("sessionName").is_none()
+        && let Ok(session) = resolve_session(&args)
+    {
+        args["sessionName"] = json!(session);
+    }
     let dir = plan_dir(&project, id);
     let lock = lock_plan_dir(&dir)?;
-    let (plan, wrote) = upsert_plan(&dir, args, &project, id, title, now_ms())?;
+    let (plan, wrote) = upsert_plan(&dir, &args, &project, id, title, now_ms())?;
     drop(lock);
     if wrote {
         notify_plan_changed(&project, id, &plan, rt);
@@ -5811,6 +5870,77 @@ mod tests {
         assert_eq!(new[0]["resolution"], "A");
         assert_eq!(new[1]["resolved"], false);
         assert_eq!(new[1]["resolution"], Value::Null);
+    }
+
+    #[test]
+    fn merge_comments_carries_foreign_ids() {
+        let old = vec![
+            json!({ "id": "a1", "text": "agent note" }),
+            json!({ "id": "u1", "text": "user comment", "author": "shai", "sectionId": "risks" }),
+        ];
+        // Agent rewrites its own comment and omits the user's — the user's
+        // survives, the matching id is replaced.
+        let merged = merge_comments(vec![json!({ "id": "a1", "text": "rewritten" })], &old);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0]["text"], "rewritten");
+        assert_eq!(merged[1]["id"], "u1");
+        assert_eq!(merged[1]["text"], "user comment");
+        // Empty new array drops nothing.
+        assert_eq!(merge_comments(vec![], &old).len(), 2);
+    }
+
+    #[test]
+    fn plan_supersede_keeps_comments_and_ignores_session_churn() {
+        let dir = std::env::temp_dir().join(format!(
+            "immorterm-plan-comments-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Create with an agent comment + session stamp.
+        let args1 = json!({
+            "summary": "s",
+            "comments": [{ "id": "a1", "text": "note" }],
+            "sessionName": "immorterm-ai-1",
+        });
+        upsert_plan(&dir, &args1, "proj", "p1", "T", 1000).unwrap();
+
+        // Host (hub submit route) appends a user comment under the same
+        // merge rules — simulate its flock-guarded in-place rewrite.
+        let mut plan = read_plan(&dir).unwrap().unwrap();
+        plan["comments"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "id": "u1", "text": "user comment", "author": "shai", "ts": 1500 }));
+        atomic_write_json(&dir.join("current.json"), &plan).unwrap();
+
+        // Agent supersedes without mentioning comments → both carried.
+        let (v2, wrote) =
+            upsert_plan(&dir, &json!({ "summary": "s2" }), "proj", "p1", "T", 2000).unwrap();
+        assert!(wrote);
+        let ids: Vec<&str> = v2["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["a1", "u1"]);
+
+        // Same content from a different session → content-idempotent no-op,
+        // no revision bump (sessionName is stripped from the equality check).
+        let (v3, wrote3) = upsert_plan(
+            &dir,
+            &json!({ "summary": "s2", "sessionName": "immorterm-ai-2" }),
+            "proj",
+            "p1",
+            "T",
+            3000,
+        )
+        .unwrap();
+        assert!(!wrote3);
+        assert_eq!(v3["revision"], 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
