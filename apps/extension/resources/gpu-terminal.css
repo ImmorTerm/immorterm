@@ -311,6 +311,12 @@ body.with-tab-bar #container {
   flex: 1; overflow: auto;
   background: #1e1e2e;
 }
+#workshop-panel-body::-webkit-scrollbar { width: 10px; height: 10px; }
+#workshop-panel-body::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--sidebar-muted, #a6adc8) 28%, transparent);
+  border-radius: 6px; border: 3px solid transparent; background-clip: padding-box;
+}
+#workshop-panel-body:hover::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--sidebar-muted, #a6adc8) 45%, transparent); background-clip: padding-box; }
 .workshop-content {
   width: 100%; min-height: 100%;
   display: none;
@@ -3590,3 +3596,58 @@ body.with-tab-bar #container {
   border-color: var(--sidebar-accent, #b482ff);
   color: var(--sidebar-accent, #b482ff);
 }
+
+/* ── Activity Rails (VS Code-style icon strips) ─────────────────────
+   #rail-left / #rail-right: persistent vertical icon toggles at the
+   container edges. Entire feature is gated on body.with-rails (same
+   idiom as body.with-tab-bar) — without the class, zero layout change. */
+:root { --rail-width: 44px; }
+
+.rail { display: none; }
+body.with-rails .rail {
+  display: flex; flex-direction: column;
+  width: var(--rail-width);
+  flex-shrink: 0;
+  background: var(--sidebar-bg, #181825);
+  user-select: none;
+}
+body.with-rails #rail-left  { border-right: 1px solid var(--sidebar-border, #313244); }
+body.with-rails #rail-right { border-left: 1px solid var(--sidebar-border, #313244); }
+
+.rail-top, .rail-bottom { display: flex; flex-direction: column; align-items: center; }
+.rail-bottom { margin-top: auto; padding-bottom: 4px; }
+
+.rail-btn {
+  position: relative;
+  width: var(--rail-width); height: var(--rail-width);
+  display: flex; align-items: center; justify-content: center;
+  background: none; border: none; padding: 0;
+  color: var(--sidebar-muted, #a6adc8);
+  cursor: pointer;
+}
+.rail-btn .codicon { font-size: 20px; }
+.rail-btn:hover { color: var(--sidebar-text, #cdd6f4); }
+.rail-btn.active { color: var(--sidebar-text, #cdd6f4); }
+/* Active indicator: 2px accent bar on the OUTER edge (VS Code style —
+   left edge on the left rail, right edge on the right rail). */
+.rail-btn.active::before {
+  content: ''; position: absolute; top: 6px; bottom: 6px; width: 2px;
+  background: var(--sidebar-accent, #b482ff);
+}
+#rail-left  .rail-btn.active::before { left: 0; }
+#rail-right .rail-btn.active::before { right: 0; }
+
+/* Overlay offsets: the auto-reveal/click-peek panels position against the
+   viewport (left:0 / right:0). With rails occupying the edges they must
+   start inside the rail, not under it. */
+body.with-rails #file-browser.auto-reveal,
+body.with-rails #file-browser.collapsed.revealed,
+body.with-rails #file-browser.hidden.revealed { left: var(--rail-width); }
+body.with-rails #sidebar.auto-reveal { right: var(--rail-width); }
+
+/* Rails supersede the floating expand buttons: the rail icons are the
+   persistent re-open affordance, so the corner chevrons are pure noise
+   when rails are on. JS keeps toggling .visible harmlessly — with the
+   class absent (rails off) the buttons behave exactly as today. */
+body.with-rails #sidebar-expand-btn.visible,
+body.with-rails #file-browser-expand-btn.visible { display: none; }

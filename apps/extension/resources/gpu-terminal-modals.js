@@ -346,9 +346,7 @@ export function createModalSystem({
       btn.addEventListener('click', () => {
         sessSeg.querySelectorAll('button').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
-        setPrefs({ sidebarMode: value });
-        postMessage({ type: 'save-preference', key: 'sidebarMode', value });
-        postMessage({ type: 'set-sidebar-mode', mode: value });
+        setPrefs({ sidebarMode: value }); // setViewMode inside persists — no separate post
       });
       sessSeg.appendChild(btn);
     });
@@ -401,9 +399,7 @@ export function createModalSystem({
       btn.addEventListener('click', () => {
         tasksSeg.querySelectorAll('button').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
-        setPrefs({ tasksMode: value });
-        postMessage({ type: 'save-preference', key: 'tasksMode', value });
-        postMessage({ type: 'set-tasks-mode', mode: value });
+        setPrefs({ tasksMode: value }); // setViewMode inside persists — no separate post
       });
       tasksSeg.appendChild(btn);
     });
@@ -428,9 +424,7 @@ export function createModalSystem({
       btn.addEventListener('click', () => {
         workshopsSeg.querySelectorAll('button').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
-        setPrefs({ workshopsMode: value });
-        postMessage({ type: 'save-preference', key: 'workshopsMode', value });
-        postMessage({ type: 'set-workshops-mode', mode: value });
+        setPrefs({ workshopsMode: value }); // setViewMode inside persists — no separate post
       });
       workshopsSeg.appendChild(btn);
     });

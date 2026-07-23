@@ -30,7 +30,7 @@ import { auditedKill } from './utils/kill-audit';
 import {
   getLogsDir, getRenamesDir, readGlobalConfig, writeGlobalConfig,
   setServiceEnabled, getLicenseStatus, isProTier,
-  getTheme, setTheme, getSpeakMode, setSpeakMode, getAppearance, updateAppearance,
+  getTheme, setTheme, getSpeakMode, setSpeakMode, getAppearance, getRawAppearance, updateAppearance,
   getProjectScreenrcPath,
 } from './utils/immorterm-config';
 import type { AppearanceConfig } from './utils/immorterm-config';
@@ -605,6 +605,12 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
 
       // Send visual preferences so the webview can apply them before first render
       const appearance = getAppearance();
+      // View modes + rail layout go RAW (no default merge): undefined means
+      // "no stored choice — webview state wins". A merged default would echo
+      // 'show' and clobber a pre-upgrade collapse that lived only in webview
+      // state. railsEnabled stays merged — its false default is the real
+      // pre-flip default, not a clobber.
+      const rawAppearance = getRawAppearance();
       webview.postMessage({
         type: 'preferences',
         borderEnabled: appearance.borderEnabled,
@@ -616,6 +622,12 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         celebrations: appearance.celebrations,
         dangerEffects: appearance.dangerEffects,
         textAnimations: appearance.textAnimations,
+        sidebarMode: rawAppearance.sidebarMode,
+        tasksMode: rawAppearance.tasksMode,
+        workshopsMode: rawAppearance.workshopsMode,
+        railsEnabled: appearance.railsEnabled,
+        railLayout: rawAppearance.railLayout,
+        viewModes: rawAppearance.viewModes,
         backgroundControlMode: appearance.backgroundControlMode,
       });
 
@@ -669,11 +681,17 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
     const cssUri = webview.asWebviewUri(
       vscode.Uri.file(path.join(this.context.extensionPath, 'resources', 'gpu-terminal.css')),
     );
+    const codiconCssUri = webview.asWebviewUri(
+      vscode.Uri.file(path.join(this.context.extensionPath, 'resources', 'vendor', 'codicons', 'codicon.css')),
+    );
 
     const csp = [
       `default-src 'none'`,
       `script-src 'nonce-${nonce}' 'unsafe-eval' 'wasm-unsafe-eval' ${webview.cspSource}`,
       `style-src 'unsafe-inline' ${webview.cspSource}`,
+      // codicon.ttf is fetched by codicon.css via a relative url() —
+      // same cspSource origin as the stylesheet itself.
+      `font-src ${webview.cspSource}`,
       // connect-src needs to include the hub on 127.0.0.1:1440 so the
       // host-agnostic modals (digest LLM, etc.) can talk to it via
       // fetch(). Without HTTP allowed here, every webview HTTP call
@@ -690,6 +708,7 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
     ].join('; ');
 
     html = html.replace('__CSS_URI__', cssUri.toString());
+    html = html.replace('__CODICON_CSS_URI__', codiconCssUri.toString());
     html = html.replace(
       '<script type="module">',
       `<meta http-equiv="Content-Security-Policy" content="${csp}">\n  <script type="module" nonce="${nonce}">`,
@@ -1724,13 +1743,33 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
           celebrations: prefs.celebrations,
           dangerEffects: prefs.dangerEffects,
           textAnimations: prefs.textAnimations,
-          tasksMode: prefs.tasksMode,
+          // Raw (unmerged) modes — same no-clobber policy as the boot push:
+          // undefined = no stored choice, webview state wins.
+          sidebarMode: getRawAppearance().sidebarMode,
+          tasksMode: getRawAppearance().tasksMode,
+          workshopsMode: prefs.workshopsMode,
+          railsEnabled: prefs.railsEnabled,
+          railLayout: prefs.railLayout,
+          viewModes: prefs.viewModes,
           backgroundControlMode: prefs.backgroundControlMode,
         });
         break;
       }
       case 'save-preference': {
         const { key, value } = msg as { key: string; value: unknown; type: string };
+        // Namespaced passthrough for views added after S2 (plans/projects/…):
+        // 'viewMode.<id>' keys land in the appearance config's viewModes
+        // record with zero per-view host edits. The four original views keep
+        // their legacy top-level keys below.
+        if (key.startsWith('viewMode.')) {
+          try {
+            const viewModes = { ...getAppearance().viewModes, [key.slice('viewMode.'.length)]: String(value) };
+            updateAppearance({ viewModes });
+          } catch (err) {
+            logger.warn(`ImmorTerm AI: failed to save preference '${key}': ${err}`);
+          }
+          break;
+        }
         const appearanceKeyMap: Record<string, keyof AppearanceConfig> = {
           borderEnabled: 'borderEnabled',
           borderOpacity: 'borderOpacity',
@@ -1746,6 +1785,9 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
           // persists per-project via the hub (PUT /api/v1/config/project),
           // not in the global appearance config.
           tasksMode: 'tasksMode',
+          workshopsMode: 'workshopsMode',
+          railsEnabled: 'railsEnabled',
+          railLayout: 'railLayout',
           backgroundControlMode: 'backgroundControlMode',
         };
         const appearanceKey = appearanceKeyMap[key];

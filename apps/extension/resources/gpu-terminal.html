@@ -40,6 +40,7 @@
     @keyframes boot-spin { to { transform: rotate(360deg); } }
   </style>
   <link rel="stylesheet" href="__CSS_URI__">
+  <link rel="stylesheet" href="__CODICON_CSS_URI__">
 </head>
 <body>
   <div id="boot-shield">
@@ -1298,6 +1299,14 @@
     })();
   </script>
   <div id="container">
+    <!-- Activity rail (left): VS Code-style icon strip. Persistent toggles
+         for the left-side surfaces. Rendered only when body.with-rails is
+         set. S2: buttons are rendered from the VIEWS registry (renderRails)
+         — new views land as registerView() rows, not markup edits. -->
+    <div id="rail-left" class="rail">
+      <div class="rail-top"></div>
+      <div class="rail-bottom"></div>
+    </div>
     <!-- File browser: left-side project tree. Mirror of the sessions
          sidebar (right) — same three visibility modes (show / auto-reveal /
          collapsed), persisted width, static across session switches. -->
@@ -1403,6 +1412,13 @@
         </span>
       </div>
       <div id="workshops-list" style="display:none"></div>
+    </div>
+    <!-- Activity rail (right): toggles for the stacked sidebar sections
+         (Sessions / Tasks / Workshops). Mirror of #rail-left; buttons
+         rendered from the VIEWS registry. -->
+    <div id="rail-right" class="rail">
+      <div class="rail-top"></div>
+      <div class="rail-bottom"></div>
     </div>
   </div>
 
@@ -2299,6 +2315,15 @@
                 celebrations: prefs.celebrations !== false,
                 dangerEffects: prefs.dangerEffects !== false,
                 textAnimations: prefs.textAnimations !== false,
+                // View modes + rails: forwarded RAW — undefined keys are
+                // skipped by handlePreferences, so webview-local state wins
+                // unless the hub reports an explicit choice.
+                sidebarMode: prefs.sidebarMode,
+                tasksMode: prefs.tasksMode,
+                workshopsMode: prefs.workshopsMode,
+                railsEnabled: prefs.railsEnabled,
+                railLayout: prefs.railLayout,
+                viewModes: prefs.viewModes,
                 backgroundControlMode: prefs.backgroundControlMode || 'auto',
               });
               sendToWebview({ type: 'visibility', visible: true });
@@ -2600,8 +2625,6 @@
           case 'wizard-check':
           case 'wizard-install':
           case 'wizard-enable-service':
-          case 'set-sidebar-mode':
-          case 'set-tasks-mode':
           case 'get-preferences':
             // Write/action endpoints — hub stubs return 501 or no-op today.
             // Wired later once the hub has mutable service/license/wizard state.
@@ -3015,20 +3038,74 @@
     // absolute positioning we can set termArea.style.right here.
     function syncTerminalAreaRight() { /* intentional no-op under flex */ }
 
+    // ── S2 view-container registry ──
+    // One declarative table + one dispatcher over the existing apply*Mode
+    // functions. Each view block below keeps its own `let` + apply fn and
+    // adds one registerView() row; restore happens once, in the end-of-eval
+    // microtask (bootRestoreViews) with every binding live — no TDZ.
+    // spec = { kind:'view'|'action', rail, section?, icon, title, disabled?,
+    //          states, defaultState, offState, prefKey,
+    //          persist:'preference'|'project'|null, projectPersist?,
+    //          container?, get, apply, activeWhen, hoverReveal?, onClick? }
+    const VIEWS = Object.create(null);
+    function registerView(name, spec) { VIEWS[name] = spec; }
+    function getViewMode(name) { return VIEWS[name].get(); }
+
+    // Boot / host-message / hub paths: apply only, never persist (preserves
+    // the read/write split — reads don't echo into writes).
+    function applyViewMode(name, mode, extra) {
+      const v = VIEWS[name];
+      if (!v || v.kind !== 'view' || !v.states.includes(mode)) return;
+      prefs[v.prefKey] = mode; // settings modal reads modes via getPrefs()
+      v.apply(mode, extra);    // existing fn; does its own setState + syncRails
+    }
+
+    // User actions (rail click, context menu, settings modal): apply +
+    // persist + containing-surface rule.
+    function setViewMode(name, mode) {
+      applyViewMode(name, mode);
+      const v = VIEWS[name];
+      if (v.persist === 'project') v.projectPersist();
+      else if (v.persist === 'preference')
+        vscode.postMessage({ type: 'save-preference', key: v.prefKey, value: mode });
+      // Enabling a sidebar section against a fully-off container would light
+      // the icon with nothing visible (VS Code rails open the surface).
+      // 'auto-reveal' is reachable by hover — escalating it to 'show' would
+      // silently overwrite that preference, so only collapsed/hidden escalate.
+      const cm = v.container ? getViewMode(v.container) : null;
+      if (mode === 'show' && (cm === 'collapsed' || cm === 'hidden'))
+        setViewMode(v.container, 'show');
+    }
+
+    function toggleView(name) {
+      const v = VIEWS[name];
+      setViewMode(name, v.activeWhen(v.get()) ? v.offState : 'show');
+    }
+
+    // Rail icons mirror the panel modes. Runs at the end of every apply*Mode
+    // so ANY path that changes a mode updates the icons — no separate state
+    // to drift. Buttons not yet rendered/registered are simply skipped.
+    function syncRails() {
+      for (const name in VIEWS) {
+        const v = VIEWS[name];
+        if (v.kind !== 'view') continue;
+        const btn = document.getElementById('rail-' + name);
+        if (btn) btn.classList.toggle('active', v.activeWhen(v.get()));
+      }
+    }
+
+    // Shared edge-hover auto-reveal: chevron mouseenter reveals, panel
+    // mouseleave hides after 300ms. Used by the sidebar + file browser.
+    function wireEdgeAutoReveal({ btn, panel, isAuto, reveal, hide }) {
+      let t = null;
+      btn.addEventListener('mouseenter', () => { if (isAuto()) { clearTimeout(t); reveal(); } });
+      panel.addEventListener('mouseenter', () => { if (isAuto()) clearTimeout(t); });
+      panel.addEventListener('mouseleave', () => { if (isAuto()) t = setTimeout(hide, 300); });
+    }
+
     // ── Sidebar: Mode / Resize / Persist ──
     // Modes: 'show' (always visible), 'auto-reveal' (overlay on hover), 'collapsed' (hidden)
     let sidebarMode = 'show';
-
-    {
-      const saved = vscode.getState() || {};
-      // Migrate legacy sidebarCollapsed → sidebarMode
-      if (saved.sidebarMode) {
-        sidebarMode = saved.sidebarMode;
-      } else if (saved.sidebarCollapsed) {
-        sidebarMode = 'collapsed';
-      }
-      applySidebarMode(sidebarMode, saved.sidebarWidth);
-    }
 
     function saveSidebarState() {
       const prev = vscode.getState() || {};
@@ -3059,45 +3136,41 @@
       }
       syncTerminalAreaRight();
       saveSidebarState();
+      syncRails();
     }
 
-    // Toggle button inside sidebar header → collapse
+    // Toggle button inside sidebar header → collapse. Routed through
+    // setViewMode so the collapse also persists via save-preference (it
+    // previously only wrote webview state).
     sidebarToggle.addEventListener('click', () => {
-      applySidebarMode('collapsed');
+      setViewMode('sessions', 'collapsed');
     });
 
     // Floating expand button → show
     sidebarExpandBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       e.preventDefault();
-      applySidebarMode('show');
+      setViewMode('sessions', 'show');
       focusInput();
     });
 
     // Auto-reveal: hover over expand button to reveal, leave sidebar to hide
-    {
-      let hideTimeout = null;
+    wireEdgeAutoReveal({
+      btn: sidebarExpandBtn,
+      panel: sidebar,
+      isAuto: () => sidebarMode === 'auto-reveal',
+      reveal: () => { sidebar.classList.add('revealed'); sidebarExpandBtn.classList.remove('visible'); },
+      hide: () => { sidebar.classList.remove('revealed'); sidebarExpandBtn.classList.add('visible'); },
+    });
 
-      sidebarExpandBtn.addEventListener('mouseenter', () => {
-        if (sidebarMode !== 'auto-reveal') return;
-        clearTimeout(hideTimeout);
-        sidebar.classList.add('revealed');
-        sidebarExpandBtn.classList.remove('visible');
-      });
-
-      sidebar.addEventListener('mouseenter', () => {
-        if (sidebarMode !== 'auto-reveal') return;
-        clearTimeout(hideTimeout);
-      });
-
-      sidebar.addEventListener('mouseleave', () => {
-        if (sidebarMode !== 'auto-reveal') return;
-        hideTimeout = setTimeout(() => {
-          sidebar.classList.remove('revealed');
-          sidebarExpandBtn.classList.add('visible');
-        }, 300);
-      });
-    }
+    registerView('sessions', {
+      kind: 'view', rail: 'right', icon: 'codicon-terminal', title: 'Sessions',
+      states: ['show', 'auto-reveal', 'collapsed'], defaultState: 'show', offState: 'collapsed',
+      prefKey: 'sidebarMode', persist: 'preference',
+      get: () => sidebarMode, apply: applySidebarMode,
+      activeWhen: (m) => m === 'show',
+      hoverReveal: () => { if (sidebarMode === 'auto-reveal') sidebar.classList.add('revealed'); },
+    });
 
     // ── File Browser: Mode / Resize / Persist ──
     // Mirror of the sessions sidebar machinery, flipped to the left edge.
@@ -3147,6 +3220,7 @@
         fileBrowserExpandBtn.classList.remove('visible');
       }
       saveFileBrowserState();
+      syncRails();
     }
 
     // Persist mode + width PER-PROJECT via the hub's project config
@@ -3173,34 +3247,21 @@
       }).catch((err) => console.warn('[file-browser] project persist failed:', err));
     }
 
-    function setFileBrowserMode(mode) {
-      applyFileBrowserMode(mode);
-      persistFileBrowserToProject();
-    }
-
-    {
-      // Fast seed from webview state; the authoritative per-project value
-      // arrives via applyFileBrowserProjectPrefs() once the hub config loads.
-      const saved = vscode.getState() || {};
-      if (saved.fileBrowserMode) fileBrowserMode = saved.fileBrowserMode;
-      applyFileBrowserMode(fileBrowserMode, saved.fileBrowserWidth);
-    }
-
-    // Apply the per-project values fetched from the hub at boot.
+    // Apply the per-project values fetched from the hub at boot —
+    // authoritative, overrides the webview-state seed from bootRestoreViews.
     function applyFileBrowserProjectPrefs(p) {
       if (!p) return;
       const width = (typeof p.fileBrowserWidth === 'number') ? p.fileBrowserWidth : undefined;
       if (p.fileBrowserMode) {
-        prefs.fileBrowserMode = p.fileBrowserMode;
-        applyFileBrowserMode(p.fileBrowserMode, width);
+        applyViewMode('files', p.fileBrowserMode, width);
       } else if (width) {
-        applyFileBrowserMode(fileBrowserMode, width);
+        applyViewMode('files', fileBrowserMode, width);
       }
     }
 
     // Toggle button inside header → collapse
     fileBrowserToggle.addEventListener('click', () => {
-      setFileBrowserMode('collapsed');
+      setViewMode('files', 'collapsed');
     });
 
     // Reveal the panel as an OVERLAY (absolute, over the terminal) so the
@@ -3236,25 +3297,34 @@
     });
 
     // Auto-reveal: hover over expand button to reveal, leave panel to hide
-    {
-      let fbHideTimeout = null;
+    wireEdgeAutoReveal({
+      btn: fileBrowserExpandBtn,
+      panel: fileBrowser,
+      isAuto: () => fileBrowserMode === 'auto-reveal',
+      reveal: openFileBrowserOverlay,
+      hide: closeFileBrowserOverlay,
+    });
 
-      fileBrowserExpandBtn.addEventListener('mouseenter', () => {
-        if (fileBrowserMode !== 'auto-reveal') return;
-        clearTimeout(fbHideTimeout);
-        openFileBrowserOverlay();
-      });
+    registerView('files', {
+      kind: 'view', rail: 'left', icon: 'codicon-files', title: 'Files',
+      states: ['show', 'auto-reveal', 'collapsed', 'hidden'], defaultState: 'show', offState: 'collapsed',
+      // Persists per-project via the hub (deliberately NOT save-preference).
+      prefKey: 'fileBrowserMode', persist: 'project', projectPersist: persistFileBrowserToProject,
+      get: () => fileBrowserMode, apply: applyFileBrowserMode,
+      activeWhen: (m) => m === 'show',
+      hoverReveal: () => { if (fileBrowserMode === 'auto-reveal') openFileBrowserOverlay(); },
+    });
 
-      fileBrowser.addEventListener('mouseenter', () => {
-        if (fileBrowserMode !== 'auto-reveal') return;
-        clearTimeout(fbHideTimeout);
-      });
-
-      fileBrowser.addEventListener('mouseleave', () => {
-        if (fileBrowserMode !== 'auto-reveal') return;
-        fbHideTimeout = setTimeout(() => { closeFileBrowserOverlay(); }, 300);
-      });
-    }
+    registerView('search', {
+      kind: 'action', rail: 'left', icon: 'codicon-search', title: 'Search',
+      onClick: () => {
+        // Same reveal rule as browseInImmorTerm: 'show' is already visible;
+        // any other mode gets an overlay peek (no mode change).
+        if (fileBrowserMode !== 'show') openFileBrowserOverlay();
+        const inp = document.getElementById('file-search-input');
+        if (inp) { inp.focus(); inp.select(); }
+      },
+    });
 
     // Drag-resize file browser (right edge — dragging right widens)
     {
@@ -3308,13 +3378,150 @@
       fileBrowserPanel.revealPath(absPath);
     }
 
+    // ── Activity Rails: table-rendered buttons + boot restore ──
+    // Rails visibility: persisted railsEnabled pref (default OFF for now),
+    // with the URL param winning either way. ?rails=1 is deliberately kept
+    // post-S2 as the cross-host smoke-test hook (fonts load lazily — only a
+    // visible rail exercises the codicon pipeline); ?rails=0 forces off.
+    function applyRailsPref(enabled) {
+      const p = new URLSearchParams(location.search).get('rails');
+      const on = p === '1' ? true : p === '0' ? false : !!enabled;
+      document.body.classList.toggle('with-rails', on);
+    }
+
+    // D2 layout override: { left:[names], right:[names], hidden:[names] }.
+    // null → registry order. Persisted via save-preference 'railLayout'.
+    let railLayout = null;
+
+    // Effective per-side order: layout entries first (unknown names ignored),
+    // then any unclaimed registered views in table order.
+    function railOrder() {
+      const L = railLayout || {};
+      const out = { left: [], right: [] };
+      const claimed = new Set(L.hidden || []);
+      for (const side of ['left', 'right']) {
+        for (const n of L[side] || []) {
+          if (VIEWS[n] && !claimed.has(n)) { out[side].push(n); claimed.add(n); }
+        }
+      }
+      for (const n in VIEWS) {
+        if (!claimed.has(n)) out[VIEWS[n].rail === 'right' ? 'right' : 'left'].push(n);
+      }
+      return out;
+    }
+
+    function renderRails() {
+      const order = railOrder();
+      for (const side of ['left', 'right']) {
+        const rail = document.getElementById('rail-' + side);
+        const top = rail.querySelector('.rail-top');
+        const bottom = rail.querySelector('.rail-bottom');
+        top.replaceChildren();
+        bottom.replaceChildren();
+        for (const name of order[side]) {
+          const v = VIEWS[name];
+          const btn = document.createElement('button');
+          btn.id = 'rail-' + name;
+          btn.className = 'rail-btn';
+          btn.dataset.rail = name;
+          btn.title = v.disabled ? v.title + ' — coming soon' : v.title;
+          btn.setAttribute('aria-label', v.title);
+          if (v.disabled) btn.disabled = true;
+          const icon = document.createElement('span');
+          icon.className = 'codicon ' + v.icon;
+          btn.appendChild(icon);
+          (v.section === 'bottom' ? bottom : top).appendChild(btn);
+          if (!v.disabled) {
+            btn.addEventListener('click', () => {
+              if (v.kind === 'action') { v.onClick(); return; }
+              toggleView(name);
+              focusInput();
+            });
+            // Auto-reveal from the rail: with rails on, the floating chevrons
+            // are display:none (CSS), so the rail icon is the hover trigger.
+            if (v.hoverReveal) btn.addEventListener('mouseenter', v.hoverReveal);
+          }
+          btn.addEventListener('contextmenu', (ev) => openRailContextMenu(ev, name));
+        }
+      }
+      syncRails();
+    }
+
+    // D2 interim: right-click a rail icon → move/reorder/hide. No drag —
+    // drag-and-drop is P4; this is a re-render of the same table.
+    function openRailContextMenu(ev, name) {
+      ev.preventDefault();
+      const onLeft = railOrder().left.includes(name);
+      const other = onLeft ? 'right' : 'left';
+      openWorkshopContextMenu(ev, [
+        { label: 'Move to ' + other + ' rail', onClick: () => mutateRailLayout(name, { side: other }) },
+        { label: 'Move up', onClick: () => mutateRailLayout(name, { delta: -1 }) },
+        { label: 'Move down', onClick: () => mutateRailLayout(name, { delta: +1 }) },
+        // ponytail: no un-hide UI yet — clearing the railLayout pref (or a
+        // future settings surface) restores hidden icons.
+        { label: 'Hide icon', onClick: () => mutateRailLayout(name, { hide: true }) },
+      ]);
+    }
+
+    function mutateRailLayout(name, op) {
+      const order = railOrder(); // materialize current effective layout
+      const layout = { left: order.left, right: order.right, hidden: ((railLayout || {}).hidden || []).slice() };
+      const side = layout.left.includes(name) ? 'left' : 'right';
+      const arr = layout[side];
+      const idx = arr.indexOf(name);
+      if (op.hide) {
+        arr.splice(idx, 1);
+        layout.hidden.push(name);
+      } else if (op.side) {
+        arr.splice(idx, 1);
+        layout[op.side].push(name);
+      } else if (op.delta) {
+        const j = idx + op.delta;
+        if (j < 0 || j >= arr.length) return;
+        arr.splice(idx, 1);
+        arr.splice(j, 0, name);
+      }
+      railLayout = layout;
+      vscode.postMessage({ type: 'save-preference', key: 'railLayout', value: layout });
+      renderRails();
+    }
+
+    registerView('account', {
+      kind: 'action', rail: 'left', section: 'bottom', icon: 'codicon-account', title: 'Account',
+      disabled: true, // S7 flips this to a real row
+    });
+    registerView('settings', {
+      kind: 'action', rail: 'left', section: 'bottom', icon: 'codicon-settings-gear', title: 'Settings',
+      onClick: () => showModal('settings'),
+    });
+
+    // Single boot restore for every registered view. Runs as an end-of-eval
+    // microtask (before first paint) so all registerView() calls, the DOM,
+    // and the `prefs` object exist — the old per-view restore blocks and the
+    // syncRails TDZ guard are gone, not worked around.
+    function bootRestoreViews() {
+      const saved = vscode.getState() || {};
+      // Legacy migrations — read-only mapping, nothing rewritten in the store.
+      if (!saved.sidebarMode && saved.sidebarCollapsed) saved.sidebarMode = 'collapsed';
+      let wsFlagHidden = false;
+      try { wsFlagHidden = localStorage.getItem(WORKSHOP_PANEL_HIDDEN_KEY) === '1'; } catch (_) {}
+      if (!saved.workshopsMode && wsFlagHidden) saved.workshopsMode = 'hidden';
+      for (const name in VIEWS) {
+        const v = VIEWS[name];
+        if (v.kind !== 'view') continue;
+        applyViewMode(name, saved[v.prefKey] || v.defaultState,
+          name === 'sessions' ? saved.sidebarWidth
+          : name === 'files' ? saved.fileBrowserWidth : undefined);
+      }
+      railLayout = saved.railLayout || null;
+      applyRailsPref(saved.railsEnabled);
+      renderRails();
+    }
+    queueMicrotask(bootRestoreViews);
+
     // ── Tasks Panel: Mode (show / auto-reveal / hidden) ──
     let tasksMode = 'show';
     let tasksRevealed = false;
-    {
-      const saved = vscode.getState() || {};
-      if (saved.tasksMode) tasksMode = saved.tasksMode;
-    }
 
     // Get tasks zone elements (cached after first call)
     function getTasksEls() {
@@ -3391,6 +3598,7 @@
       }
       const prev = vscode.getState() || {};
       vscode.setState({ ...prev, tasksMode });
+      syncRails();
     }
 
     // Auto-reveal: mouse proximity to bottom + stays visible while mouse is in tasks zone
@@ -3455,8 +3663,13 @@
       });
     }
 
-    // Apply initial tasks mode
-    applyTasksMode(tasksMode);
+    registerView('tasks', {
+      kind: 'view', rail: 'right', icon: 'codicon-checklist', title: 'Tasks',
+      states: ['show', 'auto-reveal', 'hidden'], defaultState: 'show', offState: 'hidden',
+      prefKey: 'tasksMode', persist: 'preference', container: 'sessions',
+      get: () => tasksMode, apply: applyTasksMode,
+      activeWhen: (m) => m !== 'hidden',
+    });
 
     // Drag-resize sidebar
     {
@@ -8144,16 +8357,12 @@
     let _workshopChromeWired = false;
     const WORKSHOP_PANEL_WIDTH_KEY = 'immorterm.workshop-panel.width';
     const WORKSHOP_PANEL_COLLAPSED_KEY = 'immorterm.workshop-panel.collapsed';
+    // Legacy flag: read once at boot (bootRestoreViews) to seed
+    // workshopsMode='hidden'; no longer written — workshopsMode is the
+    // single source of truth for panel visibility.
     const WORKSHOP_PANEL_HIDDEN_KEY = 'immorterm.workshop-panel.hidden';
     function isWorkshopPanelHidden() {
-      try { return localStorage.getItem(WORKSHOP_PANEL_HIDDEN_KEY) === '1'; } catch (_) { return false; }
-    }
-    function setWorkshopPanelHidden(hidden) {
-      try {
-        if (hidden) localStorage.setItem(WORKSHOP_PANEL_HIDDEN_KEY, '1');
-        else localStorage.removeItem(WORKSHOP_PANEL_HIDDEN_KEY);
-      } catch (_) {}
-      try { syncWorkshopVisibility(); } catch (_) {}
+      return workshopsMode === 'hidden';
     }
 
     // ── Workshops Mode (show / auto-reveal / hidden) — Personalize-driven ──
@@ -8164,9 +8373,9 @@
     let workshopsMode = 'show';
     function applyWorkshopsMode(mode) {
       workshopsMode = mode;
-      // 'hidden' maps to the existing localStorage hide flag, so the
-      // collapsible strip also disappears (not just the body).
-      setWorkshopPanelHidden(mode === 'hidden');
+      // Re-sync the workshop column: 'hidden' hides even the collapsible
+      // strip (isWorkshopPanelHidden reads workshopsMode).
+      try { syncWorkshopVisibility(); } catch (_) {}
       const prev = vscode.getState() || {};
       vscode.setState({ ...prev, workshopsMode });
       // Also keep the sidebar header + list hidden/shown so they don't
@@ -8180,15 +8389,15 @@
       // 'show' / 'auto-reveal' fall through to renderWorkshopsList which
       // decides visibility based on whether the active session has any.
       try { renderWorkshopsList(); } catch (_) {}
+      syncRails();
     }
-    // Restore on init.
-    {
-      const saved = vscode.getState() || {};
-      if (saved.workshopsMode) workshopsMode = saved.workshopsMode;
-      // Defer apply until DOM is ready (the elements may not exist yet at
-      // script eval time).
-      queueMicrotask(() => { try { applyWorkshopsMode(workshopsMode); } catch (_) {} });
-    }
+    registerView('workshops', {
+      kind: 'view', rail: 'right', icon: 'codicon-layout', title: 'Workshops',
+      states: ['show', 'auto-reveal', 'hidden'], defaultState: 'show', offState: 'hidden',
+      prefKey: 'workshopsMode', persist: 'preference', container: 'sessions',
+      get: () => workshopsMode, apply: applyWorkshopsMode,
+      activeWhen: (m) => m !== 'hidden',
+    });
     function wireWorkshopChromeOnce() {
       if (_workshopChromeWired) return;
       _workshopChromeWired = true;
@@ -8450,9 +8659,11 @@
       _workshopsHeaderWired = true;
       header.addEventListener('contextmenu', (ev) => {
         const hidden = isWorkshopPanelHidden();
+        // setViewMode owns the mode variable, prefs sync, persistence and
+        // the rail sync — one mutation path for every caller.
         openWorkshopContextMenu(ev, hidden
-          ? [{ label: '👁 Show workshop panel', onClick: () => setWorkshopPanelHidden(false) }]
-          : [{ label: '🚫 Hide workshop panel', onClick: () => setWorkshopPanelHidden(true) }]
+          ? [{ label: '👁 Show workshop panel', onClick: () => setViewMode('workshops', 'show') }]
+          : [{ label: '🚫 Hide workshop panel', onClick: () => setViewMode('workshops', 'hidden') }]
         );
       });
       const newBtn = document.getElementById('new-workshop-btn');
@@ -8475,6 +8686,15 @@
       const header = document.getElementById('workshops-header');
       const handle = document.getElementById('workshops-resize-handle');
       if (!list || !header) return;
+      // Mode guard: 'hidden' wins over content. Without this, any caller with
+      // workshops present re-shows the section applyWorkshopsMode just hid
+      // (open/close events, syncWorkshopVisibility, the apply itself).
+      if (workshopsMode === 'hidden') {
+        header.style.display = 'none';
+        list.style.display = 'none';
+        if (handle) handle.style.display = 'none';
+        return;
+      }
       const ours = [];
       for (const [name, w] of workshops) {
         if (w.sessionName === activeSessionName) ours.push({ name, w });
@@ -8828,8 +9048,31 @@
         card = document.createElement('div');
         card.className = 'ai-card';
         card.dataset.primId = String(prim.id);
-        // Forward wheel events to the terminal canvas so scrolling works over cards
+        // Wheel over card: if any element under the cursor can still scroll in
+        // the wheel direction, let the browser scroll it natively; otherwise
+        // forward to the terminal canvas. Same idiom as the link-tooltip wheel
+        // handler; composedPath() pierces the card's Shadow DOM.
         card.addEventListener('wheel', (e) => {
+          // Dominant axis decides which overflow we probe — cards can scroll
+          // both ways (85vh/85vw caps), and a horizontal trackpad pan must not
+          // be swallowed by the canvas forward.
+          const horiz = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+          const wantFwd = horiz ? e.deltaX > 0 : e.deltaY > 0;
+          for (const node of e.composedPath()) {
+            if (node instanceof Element) {
+              const cs = getComputedStyle(node);
+              const o = horiz ? cs.overflowX : cs.overflowY;
+              const pos = horiz ? node.scrollLeft : node.scrollTop;
+              const client = horiz ? node.clientWidth : node.clientHeight;
+              const total = horiz ? node.scrollWidth : node.scrollHeight;
+              if ((o === 'auto' || o === 'scroll') && total > client + 1) {
+                const canFwd = pos + client < total - 1;
+                const canBack = pos > 0;
+                if ((wantFwd && canFwd) || (!wantFwd && canBack)) return; // native inner scroll
+              }
+            }
+            if (node === card) break;
+          }
           canvas.dispatchEvent(new WheelEvent('wheel', e));
           e.preventDefault();
         }, { passive: false });
@@ -8969,7 +9212,7 @@
         card.style.boxShadow = 'none';
         card.style.backdropFilter = 'none';
         card.style.maxWidth = 'none';
-        card.style.overflow = 'hidden'; // Clip to prevent overflow into sidebar
+        card.style.overflow = 'auto'; // scroll (not clip) when prim.height/width undersizes the content
 
         // Use Shadow DOM for CSS isolation — prevents overlay styles from leaking
         // into the sessions sidebar or other webview elements
@@ -8977,7 +9220,15 @@
 
         // Inject default click-feedback CSS, then user CSS (user can override)
         const defaultStyle = document.createElement('style');
-        defaultStyle.textContent = '[data-click]{cursor:pointer;transition:transform 0.1s ease,opacity 0.1s ease}[data-click]:active{transform:scale(0.95);opacity:0.8}';
+        defaultStyle.textContent = '[data-click]{cursor:pointer;transition:transform 0.1s ease,opacity 0.1s ease}[data-click]:active{transform:scale(0.95);opacity:0.8}'
+          // Cap tall/wide content at ~85% of the viewport with inner scroll;
+          // small content keeps its natural size (max-* only caps). Scrollbar
+          // styling matches #file-tree in the main stylesheet — shadow DOM
+          // can't see page styles, so it's duplicated here.
+          + '.ai-html-content{max-height:85vh;max-width:85vw;overflow:auto}'
+          + '.ai-html-content::-webkit-scrollbar{width:10px;height:10px}'
+          + '.ai-html-content::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--sidebar-muted,#a6adc8) 28%,transparent);border-radius:6px;border:3px solid transparent;background-clip:padding-box}'
+          + '.ai-html-content:hover::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--sidebar-muted,#a6adc8) 45%,transparent);background-clip:padding-box}';
         shadow.appendChild(defaultStyle);
         if (prim.css) {
           const style = document.createElement('style');
@@ -12761,9 +13012,10 @@
       borderOpacity: 1.0,
       statusBarMode: 'always',  // 'always' | 'auto' | 'hidden'
       sidebarMode: 'show',     // 'show' | 'auto-reveal' | 'collapsed'
-      // Seeded from saved state so the settings modal shows the real mode
-      // (the file browser restores itself before this object exists).
-      fileBrowserMode: ((vscode.getState() || {}).fileBrowserMode) || 'show',
+      // Mode fields are kept in sync by applyViewMode (bootRestoreViews runs
+      // after this object exists), so the settings modal always sees the
+      // real modes via getPrefs().
+      fileBrowserMode: 'show', // 'show' | 'auto-reveal' | 'collapsed' | 'hidden'
       tasksMode: 'show',       // 'show' | 'auto-reveal' | 'hidden'
       workshopsMode: 'show',   // 'show' | 'auto-reveal' | 'hidden' — same tri-state
                                // as Tasks. 'hidden' overrides everything (the
@@ -13254,8 +13506,18 @@
                     'celebrations', 'dangerEffects', 'textAnimations'];
       for (const k of keys) if (msg[k] !== undefined) prefs[k] = msg[k];
       if (msg.backgroundControlMode !== undefined) backgroundControlMode = msg.backgroundControlMode;
-      if (msg.tasksMode !== undefined) { prefs.tasksMode = msg.tasksMode; applyTasksMode(msg.tasksMode); }
-      if (msg.workshopsMode !== undefined) { prefs.workshopsMode = msg.workshopsMode; applyWorkshopsMode(msg.workshopsMode); }
+      // Host-config modes (authoritative echo) — apply-only, never persist.
+      // Legacy keys (sidebarMode/tasksMode/…) arrive top-level; new views'
+      // modes arrive under the namespaced viewModes record.
+      for (const name in VIEWS) {
+        const v = VIEWS[name];
+        if (v.kind !== 'view') continue;
+        const m = msg[v.prefKey] !== undefined ? msg[v.prefKey]
+          : (msg.viewModes ? msg.viewModes[name] : undefined);
+        if (m !== undefined) applyViewMode(name, m);
+      }
+      if (msg.railsEnabled !== undefined) applyRailsPref(msg.railsEnabled);
+      if (msg.railLayout) { railLayout = msg.railLayout; renderRails(); }
       // Status bar mode — backward compat for old boolean statusBar
       if (msg.statusBarMode !== undefined) prefs.statusBarMode = msg.statusBarMode;
       else if (msg.statusBar !== undefined) prefs.statusBarMode = msg.statusBar ? 'always' : 'hidden';
@@ -13873,15 +14135,14 @@
                       sbAnim.reveal = 0.0; sbAnim.target = 0.0;
                     }
                   }
-                  if (p.sidebarMode !== undefined) {
-                    applySidebarMode(p.sidebarMode);
-                  }
-                  if (p.fileBrowserMode !== undefined) {
-                    // User action from the settings modal — persist per-project.
-                    setFileBrowserMode(p.fileBrowserMode);
-                  }
-                  if (p.tasksMode !== undefined) {
-                    applyTasksMode(p.tasksMode);
+                  // View modes: ONE mutation path — setViewMode persists
+                  // (project or preference channel) and applies the
+                  // containing-surface rule. modals.js posts nothing itself
+                  // (its save-preference lines for view modes are gone).
+                  for (const name in VIEWS) {
+                    const v = VIEWS[name];
+                    if (v.kind !== 'view' || p[v.prefKey] === undefined) continue;
+                    setViewMode(name, p[v.prefKey]);
                   }
                   applyPrefs();
                 },
@@ -14400,16 +14661,6 @@
           if (tasksPanel && msg.taskId) {
             tasksPanel.animateDone(msg.taskId);
           }
-          break;
-        }
-        case 'set-tasks-mode': {
-          const mode = msg.mode;
-          if (mode) applyTasksMode(mode);
-          break;
-        }
-        case 'set-workshops-mode': {
-          const mode = msg.mode;
-          if (mode) applyWorkshopsMode(mode);
           break;
         }
         case 'toggle-pomodoro':

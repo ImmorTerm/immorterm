@@ -95,6 +95,7 @@ vi.mock('../utils/immorterm-config', () => ({
   getTheme: vi.fn().mockReturnValue(undefined),
   setTheme: vi.fn(),
   getAppearance: mockGetAppearance,
+  getRawAppearance: vi.fn().mockReturnValue({}),
   updateAppearance: mockUpdateAppearance,
 }));
 
