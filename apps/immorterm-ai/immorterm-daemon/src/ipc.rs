@@ -341,6 +341,19 @@ pub enum Request {
     ReadWorkshop {
         name: String,
     },
+    /// Fire-and-forget: a project-scoped Plan changed on disk
+    /// (~/.immorterm/plans/<project>/<id>/). The daemon holds no plan state —
+    /// it just fans a `plan_changed` envelope out over the workshop broadcast
+    /// channel for the S4 Plans sidebar consumer, which is not built yet (no
+    /// client consumes the envelope today). Responds Ok.
+    NotifyPlanChanged {
+        project: String,
+        id: String,
+        status: String,
+        title: String,
+        summary: String,
+        unresolved_decisions: u64,
+    },
     /// Clear all AI canvas content (primitives, animations, events).
     ClearAiLayer,
     /// List all AI canvas primitives with their full state.

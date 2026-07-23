@@ -38,9 +38,26 @@ pub async fn get_config(Query(query): Query<ConfigQuery>) -> Json<Value> {
         .map(crate::config::read_project_config)
         .and_then(|pc| pc.get("services").cloned());
 
+    // Planning discipline (plans.enforce) — tri-state for the toggle UI:
+    // raw project override (true/false/null=inherit), global default
+    // (defaults.plans.enforce, absent=false), and the effective value.
+    let project_plans_enforce = query.project_dir.as_deref()
+        .map(crate::config::read_project_config)
+        .and_then(|pc| pc.get("plans").and_then(|p| p.get("enforce")).and_then(|v| v.as_bool()));
+    let global_plans_enforce = config
+        .get("defaults")
+        .and_then(|d| d.get("plans"))
+        .and_then(|p| p.get("enforce"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let plans_enforce = project_plans_enforce.unwrap_or(global_plans_enforce);
+
     let menu_data = load_menu_data();
 
     let mut resp = serde_json::Map::new();
+    resp.insert("plansEnforce".into(), json!(plans_enforce));
+    resp.insert("projectPlansEnforce".into(), json!(project_plans_enforce));
+    resp.insert("globalPlansEnforce".into(), json!(global_plans_enforce));
     resp.insert("theme".into(), json!(theme));
     resp.insert("projectTheme".into(), json!(theme));
     resp.insert("projectSpeakMode".into(), json!(speak_mode));

@@ -67,9 +67,17 @@ function readProjectIdFile(workspacePath: string): string | null {
   try {
     if (fs.existsSync(projectIdPath)) {
       const content = fs.readFileSync(projectIdPath, 'utf8').trim();
-      // Validate: only alphanumeric and hyphens
-      if (/^[a-z0-9-]+$/.test(content)) {
-        return content;
+      if (content) {
+        // Sanitize instead of reject — MUST match the daemon's
+        // sanitize_project_id (mcp.rs) exactly, or the extension reads a
+        // different ~/.immorterm/plans/<id>/ than the daemon writes and the
+        // Plans view stays empty. Rules: lowercase, each non-alphanumeric
+        // char → '-', trim '-', cap 50, 'unnamed-project' fallback.
+        const sanitized = content
+          .toLowerCase()
+          .replace(/[^a-z0-9]/g, '-')
+          .replace(/^-+|-+$/g, '');
+        return sanitized ? sanitized.slice(0, 50) : 'unnamed-project';
       }
     }
   } catch {

@@ -130,6 +130,9 @@ export interface GlobalConfig {
 	appearance?: AppearanceConfig;
 	defaults: {
 		terminalMode?: 'regular' | 'ai' | 'both';
+		/** Global default for plans.enforce (planning discipline hook block).
+		 * Absent = false (opt-in — the block costs ~200 tokens/session). */
+		plans?: { enforce: boolean };
 		services: {
 			memory: ServiceConfig;
 			mcpGateway: ServiceConfig;
@@ -189,6 +192,10 @@ export interface ProjectConfig {
 	 * Falls through to "default" when absent. Per-session overrides live in
 	 * the Rust daemon's registry.json, not here. */
 	speakMode?: string;
+	/** Planning discipline. enforce tri-state: true/false = project override,
+	 * absent = inherit global default (defaults.plans.enforce). Read at hook
+	 * RUNTIME (SessionStart script) — toggling never regenerates hooks. */
+	plans?: { enforce?: boolean };
 	terminalMode?: 'regular' | 'ai' | 'both';
 	services: {
 		memory: MemoryServiceConfig;

@@ -94,7 +94,9 @@ async fn serve_gpu_terminal_html(State(dir): State<StaticDir>) -> impl IntoRespo
     let html_path = dir.0.join("gpu-terminal.html");
     match tokio::fs::read_to_string(&html_path).await {
         Ok(raw) => {
-            let rendered = raw.replace("__CSS_URI__", "/gpu-terminal.css");
+            let rendered = raw
+                .replace("__CSS_URI__", "/gpu-terminal.css")
+                .replace("__CODICON_CSS_URI__", "/vendor/codicons/codicon.css");
             (
                 StatusCode::OK,
                 [("content-type", "text/html; charset=utf-8")],

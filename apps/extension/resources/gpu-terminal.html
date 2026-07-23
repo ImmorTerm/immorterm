@@ -40,6 +40,7 @@
     @keyframes boot-spin { to { transform: rotate(360deg); } }
   </style>
   <link rel="stylesheet" href="__CSS_URI__">
+  <link rel="stylesheet" href="__CODICON_CSS_URI__">
 </head>
 <body>
   <div id="boot-shield">
@@ -1298,20 +1299,26 @@
     })();
   </script>
   <div id="container">
+    <!-- Activity rail (left): VS Code-style icon strip. Persistent toggles
+         for the left-side surfaces. Rendered only when body.with-rails is
+         set. S2: buttons are rendered from the VIEWS registry (renderRails)
+         — new views land as registerView() rows, not markup edits. -->
+    <div id="rail-left" class="rail">
+      <div class="rail-top"></div>
+      <div class="rail-bottom"></div>
+    </div>
     <!-- File browser: left-side project tree. Mirror of the sessions
          sidebar (right) — same three visibility modes (show / auto-reveal /
          collapsed), persisted width, static across session switches. -->
     <div id="file-browser">
-      <div id="file-browser-header">
-        <span>Files</span>
-        <span class="fbh-right">
-          <span id="file-browser-actions">
-            <button id="file-browser-newfile" title="New File"><svg viewBox="0 0 16 16" fill="none"><path d="M9.5 1.5H4a1 1 0 0 0-1 1v11a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V5l-3.5-3.5Z" stroke="currentColor" stroke-width="1.1"/><path d="M9 1.5V5h3.5M8 7.5v4M6 9.5h4" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg></button>
-            <button id="file-browser-newfolder" title="New Folder"><svg viewBox="0 0 16 16" fill="none"><path d="M1.5 4.5a1 1 0 0 1 1-1H6l1.5 1.5h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-7Z" stroke="currentColor" stroke-width="1.1"/><path d="M11.5 7v3M10 8.5h3" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg></button>
-            <button id="file-browser-collapse-all" title="Collapse All"><svg viewBox="0 0 16 16" fill="none"><path d="M3 5.5 5.5 8 3 10.5M8 4.5h5M8 8h5M8 11.5h5" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-            <button id="file-browser-refresh" title="Refresh"><svg viewBox="0 0 16 16" fill="none"><path d="M13 8a5 5 0 1 1-1.5-3.55M13 2v3h-3" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-          </span>
-          <button id="file-browser-toggle" title="Hide file browser"><svg viewBox="0 0 16 16" fill="none"><path d="M10 3.5 5.5 8l4.5 4.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <div id="file-browser-header" class="sec-header">
+        <span class="codicon codicon-chevron-right sec-chevron"></span>
+        <span class="sec-title">Files</span>
+        <span class="sec-actions">
+          <button class="sec-action codicon codicon-new-file" id="file-browser-newfile" title="New File"></button>
+          <button class="sec-action codicon codicon-new-folder" id="file-browser-newfolder" title="New Folder"></button>
+          <button class="sec-action codicon codicon-collapse-all" id="file-browser-collapse-all" title="Collapse All"></button>
+          <button class="sec-action codicon codicon-refresh" id="file-browser-refresh" title="Refresh"></button>
         </span>
       </div>
       <div id="file-search-wrap">
@@ -1378,31 +1385,54 @@
     </div>
     <div id="sidebar">
       <div id="sidebar-resize-handle"></div>
-      <div id="sidebar-header">
-        <button id="sidebar-toggle" title="Toggle sidebar">&rsaquo;</button>
-        <span>Sessions</span>
-        <button id="new-session-btn" title="New Session">+</button>
+      <div id="sidebar-header" class="sec-header">
+        <span class="codicon codicon-chevron-right sec-chevron"></span>
+        <span class="sec-title">Sessions</span>
+        <span class="sec-actions">
+          <button class="sec-action codicon codicon-add" id="new-session-btn" title="New Session"></button>
+        </span>
       </div>
       <div id="session-list"></div>
-      <div id="tasks-resize-handle" style="display:none"></div>
-      <div id="tasks-header" style="display:none">
-        <span class="tasks-header-spacer"></span>
-        <span id="tasks-title" class="tasks-title-clickable" title="Open task board">Tasks</span>
-        <span class="tasks-header-actions">
-          <button id="archive-tasks-btn" title="Archived tasks" style="display:none">&#x1F4E6;</button>
-          <button id="new-task-btn" title="New Task">+</button>
+      <div id="spaces-header" class="sec-header">
+        <span class="codicon codicon-chevron-right sec-chevron"></span>
+        <span class="sec-title" title="Spaces are docking grids — arrange terminals (and more) side by side">Spaces</span>
+        <span class="sec-actions">
+          <button class="sec-action codicon codicon-lock" id="lock-grid-btn" title="Lock the active grid (freeze all splits + moves)" style="display:none"></button>
+          <button class="sec-action codicon codicon-add" id="new-space-btn" title="New Space"></button>
         </span>
       </div>
-      <div id="task-list" style="display:none"></div>
-      <div id="workshops-resize-handle" style="display:none"></div>
-      <div id="workshops-header" style="display:none">
-        <span class="tasks-header-spacer"></span>
-        <span id="workshops-title" class="tasks-title-clickable" title="Workshops are persistent AI-authored UI panes. Right-click for show/hide.">Workshops</span>
-        <span class="tasks-header-actions">
-          <button id="new-workshop-btn" title="Workshops are AI-authored — ask Claude to open one">+</button>
+      <div id="spaces-list"></div>
+      <div id="tasks-header" class="sec-header">
+        <span class="codicon codicon-chevron-right sec-chevron"></span>
+        <span class="sec-title">Tasks</span>
+        <span class="sec-actions">
+          <button class="sec-action codicon codicon-table" id="task-board-btn" title="Open task board"></button>
+          <button class="sec-action codicon codicon-archive" id="archive-tasks-btn" title="Archived tasks" style="display:none"></button>
+          <button class="sec-action codicon codicon-add" id="new-task-btn" title="New Task"></button>
         </span>
       </div>
-      <div id="workshops-list" style="display:none"></div>
+      <div id="task-list"></div>
+      <div id="workshops-header" class="sec-header">
+        <span class="codicon codicon-chevron-right sec-chevron"></span>
+        <span class="sec-title" title="Workshops are persistent AI-authored UI panes. Right-click for show/hide.">Workshops</span>
+        <span class="sec-actions">
+          <button class="sec-action codicon codicon-add" id="new-workshop-btn" title="Workshops are AI-authored — ask Claude to open one"></button>
+        </span>
+      </div>
+      <div id="workshops-list"></div>
+      <div id="plans-header" class="sec-header">
+        <span class="codicon codicon-chevron-right sec-chevron"></span>
+        <span class="sec-title" title="Plans are AI-authored visual briefs for this project">Plans</span>
+        <span class="sec-actions"></span>
+      </div>
+      <div id="plans-list"></div>
+    </div>
+    <!-- Activity rail (right): toggles for the stacked sidebar sections
+         (Sessions / Tasks / Workshops). Mirror of #rail-left; buttons
+         rendered from the VIEWS registry. -->
+    <div id="rail-right" class="rail">
+      <div class="rail-top"></div>
+      <div class="rail-bottom"></div>
     </div>
   </div>
 
@@ -2246,8 +2276,11 @@
                 modalsUri: './gpu-terminal-modals.js',
                 pomodoroUri: './gpu-terminal-pomodoro.js',
                 tasksUri: './gpu-terminal-tasks.js',
+                plansUri: './gpu-terminal-plans.js',
                 filesUri: './gpu-terminal-files.js',
                 browserUri: './gpu-terminal-browser.js',
+                dockviewUri: './vendor/dockview/dockview-core.esm.js',
+                dockviewCssUri: './vendor/dockview/dockview.css',
                 projectName: _projectName,
                 projectDir: _projectDir,
                 fontData: fnt && fnt.data ? fnt.data : null,
@@ -2299,6 +2332,15 @@
                 celebrations: prefs.celebrations !== false,
                 dangerEffects: prefs.dangerEffects !== false,
                 textAnimations: prefs.textAnimations !== false,
+                // View modes + rails: forwarded RAW — undefined keys are
+                // skipped by handlePreferences, so webview-local state wins
+                // unless the hub reports an explicit choice.
+                sidebarMode: prefs.sidebarMode,
+                tasksMode: prefs.tasksMode,
+                workshopsMode: prefs.workshopsMode,
+                railsEnabled: prefs.railsEnabled,
+                railLayout: prefs.railLayout,
+                viewModes: prefs.viewModes,
                 backgroundControlMode: prefs.backgroundControlMode || 'auto',
               });
               sendToWebview({ type: 'visibility', visible: true });
@@ -2600,12 +2642,65 @@
           case 'wizard-check':
           case 'wizard-install':
           case 'wizard-enable-service':
-          case 'set-sidebar-mode':
-          case 'set-tasks-mode':
           case 'get-preferences':
             // Write/action endpoints — hub stubs return 501 or no-op today.
             // Wired later once the hub has mutable service/license/wizard state.
             console.log('[standalone] action (stub):', msg.type, msg);
+            break;
+          // ── Plans → hub API (read-only; daemon MCP tools write) ──
+          case 'get-plans':
+            // ponytail: no /remotes/{name}/plans proxy yet — remote tabs get
+            // an empty list; add a proxy route when remote plans matter.
+            if (_remoteName) { sendToWebview({ type: 'plans-load', plans: [] }); break; }
+            fetch('/api/v1/plans?project_dir=' + encodeURIComponent(_projectDir || ''))
+              .then(r => r.json())
+              .then(d => sendToWebview({ type: 'plans-load', plans: Array.isArray(d.plans) ? d.plans : [] }))
+              .catch(err => console.error('[standalone] get-plans:', err));
+            break;
+          case 'plans-submit':
+            // One batched write: resolutions + comments in a single
+            // flock-guarded hub POST (mirrors the create-task pattern).
+            if (_remoteName) {
+              // ponytail: plans are already empty on remote tabs; wire the
+              // /remotes/{name}/ proxy when remote plans ship.
+              sendToWebview({ type: 'plans-submit-result', ok: false, planId: msg.planId, error: 'Plan submit is not available on remote tabs' });
+              break;
+            }
+            fetch('/api/v1/plans/submit', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                project_dir: _projectDir || '',
+                plan_id: msg.planId,
+                resolutions: msg.resolutions || [],
+                comments: msg.comments || [],
+              }),
+            })
+              .then(r => r.json().then(d => ({ ok: r.ok, d })))
+              .then(({ ok, d }) => {
+                sendToWebview({ type: 'plans-submit-result', ok: ok && !d.error, planId: msg.planId, plan: d.plan, error: d.error });
+                handleHostMessage({ type: 'get-plans' });
+              })
+              .catch(err => {
+                console.error('[standalone] plans-submit:', err);
+                sendToWebview({ type: 'plans-submit-result', ok: false, planId: msg.planId, error: String(err) });
+              });
+            break;
+          // ── Spaces → hub API (webview owns the model; hub lists + saves) ──
+          case 'list-spaces':
+            if (_remoteName) { sendToWebview({ type: 'spaces-load', index: null }); break; }
+            fetch('/api/v1/spaces?project_dir=' + encodeURIComponent(_projectDir || ''))
+              .then(r => r.json())
+              .then(d => sendToWebview({ type: 'spaces-load', index: d.index || null }))
+              .catch(err => console.error('[standalone] list-spaces:', err));
+            break;
+          case 'save-space':
+            if (_remoteName) break; // ponytail: no remote-spaces proxy yet
+            fetch('/api/v1/spaces/save', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ project_dir: _projectDir || '', index: msg.index }),
+            }).catch(err => console.error('[standalone] save-space:', err));
             break;
           // ── Tasks → hub API ──
           case 'get-tasks':
@@ -2981,6 +3076,16 @@
         // (activeElement resolves to the workshop card whose shadow root holds
         // the frame img; snapping back to kbInput would kill browser typing.)
         if (ae && ae.closest && ae.closest('.workshop-content[data-workshop-name="🦕 Browser"]')) return;
+        // A click on a tile header / gutter lands on a <div>; without this the
+        // snap-back below would steal focus from the active tile back to the
+        // primary kbInput. (SP1 Spaces — #spaces-root is the tile container.)
+        if (ae && ae.closest && ae.closest('#spaces-root')) return;
+        // Accordion section headers are keyboard-focusable (Enter/Space
+        // toggles) — snapping focus back would make Tab-to-header impossible.
+        // NARROW: the header element itself only. Matching descendants would
+        // park focus on clicked action icons forever and silently eat
+        // terminal keystrokes.
+        if (ae && ae.classList && ae.classList.contains('sec-header')) return;
         if (!ae) { kbInput.focus({ preventScroll: true }); return; }
         // If a modal is visible, leave focus where it is.
         const mc = document.getElementById('modal-container');
@@ -3003,7 +3108,6 @@
     const sessionListEl = document.getElementById('session-list');
     const newSessionBtn = document.getElementById('new-session-btn');
     const sidebar = document.getElementById('sidebar');
-    const sidebarToggle = document.getElementById('sidebar-toggle');
     const sidebarExpandBtn = document.getElementById('sidebar-expand-btn');
     const resizeHandle = document.getElementById('sidebar-resize-handle');
 
@@ -3015,20 +3119,252 @@
     // absolute positioning we can set termArea.style.right here.
     function syncTerminalAreaRight() { /* intentional no-op under flex */ }
 
+    // ── S2 view-container registry ──
+    // One declarative table + one dispatcher over the existing apply*Mode
+    // functions. Each view block below keeps its own `let` + apply fn and
+    // adds one registerView() row; restore happens once, in the end-of-eval
+    // microtask (bootRestoreViews) with every binding live — no TDZ.
+    // spec = { kind:'view'|'action', rail, section?, icon, title, disabled?,
+    //          states, defaultState, offState, prefKey,
+    //          persist:'preference'|'project'|null, projectPersist?,
+    //          container?, get, apply, activeWhen, hoverReveal?, onClick? }
+    const VIEWS = Object.create(null);
+    function registerView(name, spec) { VIEWS[name] = spec; }
+    function getViewMode(name) { return VIEWS[name].get(); }
+
+    // Boot / host-message / hub paths: apply only, never persist (preserves
+    // the read/write split — reads don't echo into writes).
+    function applyViewMode(name, mode, extra) {
+      const v = VIEWS[name];
+      if (!v || v.kind !== 'view' || !v.states.includes(mode)) return;
+      prefs[v.prefKey] = mode; // settings modal reads modes via getPrefs()
+      v.apply(mode, extra);    // existing fn; does its own setState + syncRails
+    }
+
+    // User actions (rail click, context menu, settings modal): apply +
+    // persist + containing-surface rule.
+    function setViewMode(name, mode) {
+      applyViewMode(name, mode);
+      const v = VIEWS[name];
+      if (v.persist === 'project') v.projectPersist();
+      else if (v.persist === 'preference')
+        vscode.postMessage({ type: 'save-preference', key: v.prefKey, value: mode });
+      // Enabling a sidebar section against a fully-off container would light
+      // the icon with nothing visible (VS Code rails open the surface).
+      // 'auto-reveal' is reachable by hover — escalating it to 'show' would
+      // silently overwrite that preference, so only collapsed/hidden escalate.
+      const cm = v.container ? getViewMode(v.container) : null;
+      if (mode === 'show' && (cm === 'collapsed' || cm === 'hidden'))
+        setViewMode(v.container, 'show');
+    }
+
+    function toggleView(name) {
+      const v = VIEWS[name];
+      setViewMode(name, v.activeWhen(v.get()) ? v.offState : 'show');
+    }
+
+    // ── S5a accordion sections ──
+    // VS Code-identical collapse/expand of the stacked sidebar sections.
+    // spec = { panel:'right'|'left', header:HTMLElement, body:HTMLElement[],
+    //          defaultWeight?, hasContent?, visibleWhen? }
+    // body[0] gets the flex sizing (the scrolling list); extra body entries
+    // (e.g. the Files search box) just show/hide with expansion.
+    // Single-writer rule: applySectionLayout is the ONLY writer of
+    // style.display for section headers/bodies/dividers. Content modules
+    // report content via sectionSetHasContent(name, bool) — never display.
+    const SECTIONS = Object.create(null);
+    const SECTION_ORDER = { right: [], left: [] };
+    function registerSection(name, spec) {
+      if (spec.hasContent) spec._has = false; // hidden until content reported
+      SECTIONS[name] = spec;
+      const order = SECTION_ORDER[spec.panel];
+      order.push(name);
+      // Visual order = DOM order, regardless of registration order.
+      order.sort((a, b) =>
+        (SECTIONS[a].header.compareDocumentPosition(SECTIONS[b].header)
+          & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1);
+    }
+
+    let sectionState = { expanded: {}, sizes: {} }; // single pref blob (B5)
+
+    function isSectionExpanded(n) {
+      const e = sectionState.expanded ? sectionState.expanded[n] : undefined;
+      return e !== undefined ? e : true;
+    }
+    function setSectionExpanded(name, expanded, persist = true) {
+      sectionState.expanded[name] = expanded;
+      applySectionLayout(SECTIONS[name].panel);
+      if (persist) persistSectionState();
+    }
+    function persistSectionState() {
+      const prev = vscode.getState() || {};
+      vscode.setState({ ...prev, sectionState });
+      vscode.postMessage({ type: 'save-preference', key: 'sectionState', value: sectionState });
+    }
+    function sectionSetHasContent(name, has) {
+      const s = SECTIONS[name];
+      if (!s || s._has === has) return;
+      s._has = has;
+      applySectionLayout(s.panel);
+    }
+
+    function applySectionLayout(panel) {
+      // Weight seeding: stored sizes are px (hundreds); a never-dragged
+      // section's defaultWeight (~1) would starve next to them. Seed
+      // missing weights with the mean of stored px so a freshly expanded
+      // section claims a proportional share.
+      const stored = Object.entries(sectionState.sizes || {})
+        .filter(([n]) => SECTION_ORDER[panel].includes(n))
+        .map(([, px]) => px);
+      const seed = stored.length ? stored.reduce((a, b) => a + b, 0) / stored.length : 0;
+      // Divider rule (VS Code sash): visible only when an EXPANDED section
+      // exists both above and below the boundary — between collapsed
+      // headers it would be a dead cursor plus a 4px gap.
+      const states = SECTION_ORDER[panel].map((n) => {
+        const s = SECTIONS[n];
+        const v = VIEWS[n];
+        const off = v && v.kind === 'view' && v.container && !v.activeWhen(v.get());
+        const visible = !off
+          && (s.visibleWhen ? s.visibleWhen() : true)
+          && (s.hasContent ? s._has === true : true);
+        return { n, s, visible, expanded: visible && isSectionExpanded(n) };
+      });
+      let expandedAbove = false;
+      states.forEach((st, i) => {
+        const { n, s, visible, expanded } = st;
+        s.header.style.display = visible ? '' : 'none';
+        s.header.classList.toggle('expanded', expanded);
+        s.header.setAttribute('aria-expanded', String(expanded));
+        for (const b of s.body) b.style.display = expanded ? '' : 'none';
+        const w = (sectionState.sizes && sectionState.sizes[n]) || seed || s.defaultWeight || 1;
+        // flex sizing lives on body[0]; grow weight = last-drag px (share
+        // restores proportionally on a different panel height — R6).
+        s.body[0].style.flex = expanded ? (w + ' 1 0px') : '';
+        s.body[0].style.minHeight = expanded ? '40px' : '';
+        if (s.divider) {
+          const expandedBelow = states.slice(i).some((x) => x.expanded);
+          s.divider.style.display = (expandedAbove && expandedBelow) ? '' : 'none';
+        }
+        if (expanded) expandedAbove = true;
+      });
+    }
+
+    function wireSectionHeader(name) {
+      const h = SECTIONS[name].header;
+      h.tabIndex = 0; h.setAttribute('role', 'button'); // B6
+      h.addEventListener('click', (e) => {
+        if (e.target.closest('.sec-action')) return; // B2: actions don't toggle
+        setSectionExpanded(name, !isSectionExpanded(name));
+        focusInput();
+      });
+      h.addEventListener('keydown', (e) => {
+        // Same guard as click: a focused action icon (Tab reaches them)
+        // activates ITSELF on Enter/Space — swallowing it here would make
+        // every keyboard activation collapse the section instead.
+        if (e.target !== h && e.target.closest && e.target.closest('.sec-action')) return;
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          setSectionExpanded(name, !isSectionExpanded(name));
+        }
+      });
+    }
+
+    // Divider drag — VS Code neighbor-only sash. On mousedown every expanded
+    // body is frozen at its current px (as a grow weight over basis 0, which
+    // resolves to exactly that px), then only the nearest expanded neighbors
+    // above/below trade space. mouseup persists all px as weights.
+    function initSections() {
+      let drag = null;
+      document.addEventListener('mousemove', (e) => {
+        if (!drag) return;
+        const span = drag.startAbove + drag.startBelow;
+        const above = Math.min(span - 40, Math.max(40, drag.startAbove + (e.clientY - drag.startY)));
+        drag.above.style.flex = above + ' 1 0px';
+        drag.below.style.flex = (span - above) + ' 1 0px';
+      });
+      document.addEventListener('mouseup', () => {
+        if (!drag) return;
+        drag.divider.classList.remove('dragging');
+        document.body.style.userSelect = '';
+        document.body.style.cursor = '';
+        for (const n of SECTION_ORDER[drag.panel]) {
+          const s = SECTIONS[n];
+          if (s.header.style.display !== 'none' && isSectionExpanded(n)) {
+            sectionState.sizes[n] = s.body[0].offsetHeight;
+          }
+        }
+        drag = null;
+        persistSectionState();
+      });
+      for (const panel of ['right', 'left']) {
+        const names = SECTION_ORDER[panel];
+        names.forEach((name, i) => {
+          wireSectionHeader(name);
+          if (i === 0) return;
+          const s = SECTIONS[name];
+          const div = document.createElement('div');
+          div.className = 'sec-divider';
+          s.header.parentNode.insertBefore(div, s.header);
+          s.divider = div;
+          div.addEventListener('mousedown', (e) => {
+            const expandedVisible = (n) => {
+              const x = SECTIONS[n];
+              return x.header.style.display !== 'none' && isSectionExpanded(n)
+                && x.body[0].style.display !== 'none';
+            };
+            const aboveName = names.slice(0, i).reverse().find(expandedVisible);
+            const belowName = names.slice(i).find(expandedVisible);
+            if (!aboveName || !belowName) return;
+            e.preventDefault();
+            // Freeze every expanded body at its current px so non-neighbors
+            // stay pinned while the two neighbors trade space.
+            for (const n of names) {
+              if (expandedVisible(n)) {
+                const b = SECTIONS[n].body[0];
+                b.style.flex = b.offsetHeight + ' 1 0px';
+              }
+            }
+            const above = SECTIONS[aboveName].body[0];
+            const below = SECTIONS[belowName].body[0];
+            drag = {
+              panel, divider: div, above, below,
+              startY: e.clientY,
+              startAbove: above.offsetHeight,
+              startBelow: below.offsetHeight,
+            };
+            div.classList.add('dragging');
+            document.body.style.userSelect = 'none';
+            document.body.style.cursor = 'ns-resize';
+          });
+        });
+        applySectionLayout(panel);
+      }
+    }
+
+    // Rail icons mirror the panel modes. Runs at the end of every apply*Mode
+    // so ANY path that changes a mode updates the icons — no separate state
+    // to drift. Buttons not yet rendered/registered are simply skipped.
+    function syncRails() {
+      for (const name in VIEWS) {
+        const v = VIEWS[name];
+        if (v.kind !== 'view') continue;
+        const btn = document.getElementById('rail-' + name);
+        if (btn) btn.classList.toggle('active', v.activeWhen(v.get()));
+      }
+    }
+
+    // Shared edge-hover auto-reveal: chevron mouseenter reveals, panel
+    // mouseleave hides after 300ms. Used by the sidebar + file browser.
+    function wireEdgeAutoReveal({ btn, panel, isAuto, reveal, hide }) {
+      let t = null;
+      btn.addEventListener('mouseenter', () => { if (isAuto()) { clearTimeout(t); reveal(); } });
+      panel.addEventListener('mouseenter', () => { if (isAuto()) clearTimeout(t); });
+      panel.addEventListener('mouseleave', () => { if (isAuto()) t = setTimeout(hide, 300); });
+    }
+
     // ── Sidebar: Mode / Resize / Persist ──
     // Modes: 'show' (always visible), 'auto-reveal' (overlay on hover), 'collapsed' (hidden)
     let sidebarMode = 'show';
-
-    {
-      const saved = vscode.getState() || {};
-      // Migrate legacy sidebarCollapsed → sidebarMode
-      if (saved.sidebarMode) {
-        sidebarMode = saved.sidebarMode;
-      } else if (saved.sidebarCollapsed) {
-        sidebarMode = 'collapsed';
-      }
-      applySidebarMode(sidebarMode, saved.sidebarWidth);
-    }
 
     function saveSidebarState() {
       const prev = vscode.getState() || {};
@@ -3059,45 +3395,91 @@
       }
       syncTerminalAreaRight();
       saveSidebarState();
+      syncRails();
     }
-
-    // Toggle button inside sidebar header → collapse
-    sidebarToggle.addEventListener('click', () => {
-      applySidebarMode('collapsed');
-    });
 
     // Floating expand button → show
     sidebarExpandBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       e.preventDefault();
-      applySidebarMode('show');
+      setViewMode('sessions', 'show');
       focusInput();
     });
 
     // Auto-reveal: hover over expand button to reveal, leave sidebar to hide
-    {
-      let hideTimeout = null;
+    wireEdgeAutoReveal({
+      btn: sidebarExpandBtn,
+      panel: sidebar,
+      isAuto: () => sidebarMode === 'auto-reveal',
+      reveal: () => { sidebar.classList.add('revealed'); sidebarExpandBtn.classList.remove('visible'); },
+      hide: () => { sidebar.classList.remove('revealed'); sidebarExpandBtn.classList.add('visible'); },
+    });
 
-      sidebarExpandBtn.addEventListener('mouseenter', () => {
-        if (sidebarMode !== 'auto-reveal') return;
-        clearTimeout(hideTimeout);
-        sidebar.classList.add('revealed');
-        sidebarExpandBtn.classList.remove('visible');
-      });
-
-      sidebar.addEventListener('mouseenter', () => {
-        if (sidebarMode !== 'auto-reveal') return;
-        clearTimeout(hideTimeout);
-      });
-
-      sidebar.addEventListener('mouseleave', () => {
-        if (sidebarMode !== 'auto-reveal') return;
-        hideTimeout = setTimeout(() => {
-          sidebar.classList.remove('revealed');
-          sidebarExpandBtn.classList.add('visible');
-        }, 300);
-      });
+    // ── Plans (S4): read-only sidebar section fed by ~/.immorterm/plans.
+    // Registered BEFORE 'sessions' so railOrder() puts its icon topmost on
+    // the right rail. Module (gpu-terminal-plans.js) loads lazily in wasm-init.
+    let plansMode = 'show';
+    function applyPlansMode(mode) {
+      plansMode = mode;
+      const prev = vscode.getState() || {};
+      vscode.setState({ ...prev, 'viewMode.plans': mode });
+      applySectionLayout('right'); // mode gate + has-content rule decide
+      syncRails();
     }
+    registerView('plans', {
+      kind: 'view', rail: 'right', icon: 'codicon-map', title: 'Plans',
+      states: ['show', 'hidden'], defaultState: 'show', offState: 'hidden',
+      prefKey: 'viewMode.plans', persist: 'preference', container: 'sessions',
+      get: () => plansMode, apply: applyPlansMode,
+      activeWhen: (m) => m !== 'hidden',
+    });
+    registerSection('plans', {
+      panel: 'right',
+      header: document.getElementById('plans-header'),
+      body: [document.getElementById('plans-list')],
+      hasContent: true,
+    });
+
+    // ── Spaces (SP2): docking-grid section, peer to Plans/Sessions. Reuses the
+    // S2 view registry + S5a accordion — zero host plumbing. enterSpace (the
+    // grid mode switch) + create/rename/reorder/delete live in the Spaces
+    // engine block; renderSpaces is a 2nd createRenderSidebar instance.
+    let spacesViewMode = 'show';
+    function applySpacesMode(mode) {
+      spacesViewMode = mode;
+      const prev = vscode.getState() || {};
+      vscode.setState({ ...prev, 'viewMode.spaces': mode });
+      applySectionLayout('right');
+      syncRails();
+    }
+    registerView('spaces', {
+      kind: 'view', rail: 'right', icon: 'codicon-layout', title: 'Spaces',
+      states: ['show', 'hidden'], defaultState: 'show', offState: 'hidden',
+      prefKey: 'viewMode.spaces', persist: 'preference', container: 'sessions',
+      get: () => spacesViewMode, apply: applySpacesMode,
+      activeWhen: (m) => m !== 'hidden',
+    });
+    registerSection('spaces', {
+      panel: 'right',
+      header: document.getElementById('spaces-header'),
+      body: [document.getElementById('spaces-list')],
+      hasContent: true,
+    });
+
+    registerView('sessions', {
+      kind: 'view', rail: 'right', icon: 'codicon-terminal', title: 'Sessions',
+      states: ['show', 'auto-reveal', 'collapsed'], defaultState: 'show', offState: 'collapsed',
+      prefKey: 'sidebarMode', persist: 'preference',
+      get: () => sidebarMode, apply: applySidebarMode,
+      activeWhen: (m) => m === 'show',
+      hoverReveal: () => { if (sidebarMode === 'auto-reveal') sidebar.classList.add('revealed'); },
+    });
+    registerSection('sessions', {
+      panel: 'right',
+      header: document.getElementById('sidebar-header'),
+      body: [sessionListEl],
+      defaultWeight: 3,
+    });
 
     // ── File Browser: Mode / Resize / Persist ──
     // Mirror of the sessions sidebar machinery, flipped to the left edge.
@@ -3106,7 +3488,6 @@
     // peek) | 'hidden' (gone). Every reveal except 'show' overlaps the
     // terminal so it never reflows. Width + mode persist per-project.
     const fileBrowser = document.getElementById('file-browser');
-    const fileBrowserToggle = document.getElementById('file-browser-toggle');
     const fileBrowserExpandBtn = document.getElementById('file-browser-expand-btn');
     const fileBrowserResizeHandle = document.getElementById('file-browser-resize-handle');
     let fileBrowserMode = 'show';
@@ -3147,6 +3528,7 @@
         fileBrowserExpandBtn.classList.remove('visible');
       }
       saveFileBrowserState();
+      syncRails();
     }
 
     // Persist mode + width PER-PROJECT via the hub's project config
@@ -3173,35 +3555,17 @@
       }).catch((err) => console.warn('[file-browser] project persist failed:', err));
     }
 
-    function setFileBrowserMode(mode) {
-      applyFileBrowserMode(mode);
-      persistFileBrowserToProject();
-    }
-
-    {
-      // Fast seed from webview state; the authoritative per-project value
-      // arrives via applyFileBrowserProjectPrefs() once the hub config loads.
-      const saved = vscode.getState() || {};
-      if (saved.fileBrowserMode) fileBrowserMode = saved.fileBrowserMode;
-      applyFileBrowserMode(fileBrowserMode, saved.fileBrowserWidth);
-    }
-
-    // Apply the per-project values fetched from the hub at boot.
+    // Apply the per-project values fetched from the hub at boot —
+    // authoritative, overrides the webview-state seed from bootRestoreViews.
     function applyFileBrowserProjectPrefs(p) {
       if (!p) return;
       const width = (typeof p.fileBrowserWidth === 'number') ? p.fileBrowserWidth : undefined;
       if (p.fileBrowserMode) {
-        prefs.fileBrowserMode = p.fileBrowserMode;
-        applyFileBrowserMode(p.fileBrowserMode, width);
+        applyViewMode('files', p.fileBrowserMode, width);
       } else if (width) {
-        applyFileBrowserMode(fileBrowserMode, width);
+        applyViewMode('files', fileBrowserMode, width);
       }
     }
-
-    // Toggle button inside header → collapse
-    fileBrowserToggle.addEventListener('click', () => {
-      setFileBrowserMode('collapsed');
-    });
 
     // Reveal the panel as an OVERLAY (absolute, over the terminal) so the
     // terminal never reflows. Used for both collapsed (click) and
@@ -3236,25 +3600,41 @@
     });
 
     // Auto-reveal: hover over expand button to reveal, leave panel to hide
-    {
-      let fbHideTimeout = null;
+    wireEdgeAutoReveal({
+      btn: fileBrowserExpandBtn,
+      panel: fileBrowser,
+      isAuto: () => fileBrowserMode === 'auto-reveal',
+      reveal: openFileBrowserOverlay,
+      hide: closeFileBrowserOverlay,
+    });
 
-      fileBrowserExpandBtn.addEventListener('mouseenter', () => {
-        if (fileBrowserMode !== 'auto-reveal') return;
-        clearTimeout(fbHideTimeout);
-        openFileBrowserOverlay();
-      });
+    registerView('files', {
+      kind: 'view', rail: 'left', icon: 'codicon-files', title: 'Files',
+      states: ['show', 'auto-reveal', 'collapsed', 'hidden'], defaultState: 'show', offState: 'collapsed',
+      // Persists per-project via the hub (deliberately NOT save-preference).
+      prefKey: 'fileBrowserMode', persist: 'project', projectPersist: persistFileBrowserToProject,
+      get: () => fileBrowserMode, apply: applyFileBrowserMode,
+      activeWhen: (m) => m === 'show',
+      hoverReveal: () => { if (fileBrowserMode === 'auto-reveal') openFileBrowserOverlay(); },
+    });
+    // body[0] = #file-tree gets the flex sizing; the search box just
+    // shows/hides with expansion. Panel tri-state modes untouched (B7).
+    registerSection('files', {
+      panel: 'left',
+      header: document.getElementById('file-browser-header'),
+      body: [document.getElementById('file-tree'), document.getElementById('file-search-wrap')],
+    });
 
-      fileBrowser.addEventListener('mouseenter', () => {
-        if (fileBrowserMode !== 'auto-reveal') return;
-        clearTimeout(fbHideTimeout);
-      });
-
-      fileBrowser.addEventListener('mouseleave', () => {
-        if (fileBrowserMode !== 'auto-reveal') return;
-        fbHideTimeout = setTimeout(() => { closeFileBrowserOverlay(); }, 300);
-      });
-    }
+    registerView('search', {
+      kind: 'action', rail: 'left', icon: 'codicon-search', title: 'Search',
+      onClick: () => {
+        // Same reveal rule as browseInImmorTerm: 'show' is already visible;
+        // any other mode gets an overlay peek (no mode change).
+        if (fileBrowserMode !== 'show') openFileBrowserOverlay();
+        const inp = document.getElementById('file-search-input');
+        if (inp) { inp.focus(); inp.select(); }
+      },
+    });
 
     // Drag-resize file browser (right edge — dragging right widens)
     {
@@ -3308,89 +3688,178 @@
       fileBrowserPanel.revealPath(absPath);
     }
 
+    // ── Activity Rails: table-rendered buttons + boot restore ──
+    // Rails visibility: persisted railsEnabled pref (default OFF for now),
+    // with the URL param winning either way. ?rails=1 is deliberately kept
+    // post-S2 as the cross-host smoke-test hook (fonts load lazily — only a
+    // visible rail exercises the codicon pipeline); ?rails=0 forces off.
+    function applyRailsPref(enabled) {
+      const p = new URLSearchParams(location.search).get('rails');
+      const on = p === '1' ? true : p === '0' ? false : !!enabled;
+      document.body.classList.toggle('with-rails', on);
+    }
+
+    // D2 layout override: { left:[names], right:[names], hidden:[names] }.
+    // null → registry order. Persisted via save-preference 'railLayout'.
+    let railLayout = null;
+
+    // Effective per-side order: layout entries first (unknown names ignored),
+    // then any unclaimed registered views in table order.
+    function railOrder() {
+      const L = railLayout || {};
+      const out = { left: [], right: [] };
+      const claimed = new Set(L.hidden || []);
+      for (const side of ['left', 'right']) {
+        for (const n of L[side] || []) {
+          if (VIEWS[n] && !claimed.has(n)) { out[side].push(n); claimed.add(n); }
+        }
+      }
+      for (const n in VIEWS) {
+        if (!claimed.has(n)) out[VIEWS[n].rail === 'right' ? 'right' : 'left'].push(n);
+      }
+      return out;
+    }
+
+    function renderRails() {
+      const order = railOrder();
+      for (const side of ['left', 'right']) {
+        const rail = document.getElementById('rail-' + side);
+        const top = rail.querySelector('.rail-top');
+        const bottom = rail.querySelector('.rail-bottom');
+        top.replaceChildren();
+        bottom.replaceChildren();
+        for (const name of order[side]) {
+          const v = VIEWS[name];
+          const btn = document.createElement('button');
+          btn.id = 'rail-' + name;
+          btn.className = 'rail-btn';
+          btn.dataset.rail = name;
+          btn.title = v.disabled ? v.title + ' — coming soon' : v.title;
+          btn.setAttribute('aria-label', v.title);
+          if (v.disabled) btn.disabled = true;
+          const icon = document.createElement('span');
+          icon.className = 'codicon ' + v.icon;
+          btn.appendChild(icon);
+          (v.section === 'bottom' ? bottom : top).appendChild(btn);
+          if (!v.disabled) {
+            btn.addEventListener('click', () => {
+              if (v.kind === 'action') { v.onClick(); return; }
+              toggleView(name);
+              focusInput();
+            });
+            // Auto-reveal from the rail: with rails on, the floating chevrons
+            // are display:none (CSS), so the rail icon is the hover trigger.
+            if (v.hoverReveal) btn.addEventListener('mouseenter', v.hoverReveal);
+          }
+          btn.addEventListener('contextmenu', (ev) => openRailContextMenu(ev, name));
+        }
+      }
+      syncRails();
+    }
+
+    // D2 interim: right-click a rail icon → move/reorder/hide. No drag —
+    // drag-and-drop is P4; this is a re-render of the same table.
+    function openRailContextMenu(ev, name) {
+      ev.preventDefault();
+      // Founder call (2026-07-23): no cross-rail move item until moving the
+      // icon also re-homes the view's CONTENT to the other side's panel stack
+      // (lands with the P4 grid engine). An icon-only "move" reads as broken.
+      // mutateRailLayout still supports { side } for when that day comes.
+      openWorkshopContextMenu(ev, [
+        { label: 'Move up', onClick: () => mutateRailLayout(name, { delta: -1 }) },
+        { label: 'Move down', onClick: () => mutateRailLayout(name, { delta: +1 }) },
+        // ponytail: no un-hide UI yet — clearing the railLayout pref (or a
+        // future settings surface) restores hidden icons.
+        { label: 'Hide icon', onClick: () => mutateRailLayout(name, { hide: true }) },
+      ]);
+    }
+
+    function mutateRailLayout(name, op) {
+      const order = railOrder(); // materialize current effective layout
+      const layout = { left: order.left, right: order.right, hidden: ((railLayout || {}).hidden || []).slice() };
+      const side = layout.left.includes(name) ? 'left' : 'right';
+      const arr = layout[side];
+      const idx = arr.indexOf(name);
+      if (op.hide) {
+        arr.splice(idx, 1);
+        layout.hidden.push(name);
+      } else if (op.side) {
+        arr.splice(idx, 1);
+        layout[op.side].push(name);
+      } else if (op.delta) {
+        const j = idx + op.delta;
+        if (j < 0 || j >= arr.length) return;
+        arr.splice(idx, 1);
+        arr.splice(j, 0, name);
+      }
+      railLayout = layout;
+      vscode.postMessage({ type: 'save-preference', key: 'railLayout', value: layout });
+      renderRails();
+    }
+
+    registerView('account', {
+      kind: 'action', rail: 'left', section: 'bottom', icon: 'codicon-account', title: 'Account',
+      disabled: true, // S7 flips this to a real row
+    });
+    registerView('settings', {
+      kind: 'action', rail: 'left', section: 'bottom', icon: 'codicon-settings-gear', title: 'Settings',
+      onClick: () => showModal('settings'),
+    });
+
+    // Single boot restore for every registered view. Runs as an end-of-eval
+    // microtask (before first paint) so all registerView() calls, the DOM,
+    // and the `prefs` object exist — the old per-view restore blocks and the
+    // syncRails TDZ guard are gone, not worked around.
+    function bootRestoreViews() {
+      const saved = vscode.getState() || {};
+      // Legacy migrations — read-only mapping, nothing rewritten in the store.
+      if (!saved.sidebarMode && saved.sidebarCollapsed) saved.sidebarMode = 'collapsed';
+      let wsFlagHidden = false;
+      try { wsFlagHidden = localStorage.getItem(WORKSHOP_PANEL_HIDDEN_KEY) === '1'; } catch (_) {}
+      if (!saved.workshopsMode && wsFlagHidden) saved.workshopsMode = 'hidden';
+      // Accordion state restores BEFORE the apply loop so the first
+      // applySectionLayout (initSections) already sees it. Absent →
+      // all sections expanded with default weights (R7).
+      if (saved.sectionState) {
+        sectionState = {
+          expanded: saved.sectionState.expanded || {},
+          sizes: saved.sectionState.sizes || {},
+        };
+      }
+      initSections();
+      for (const name in VIEWS) {
+        const v = VIEWS[name];
+        if (v.kind !== 'view') continue;
+        applyViewMode(name, saved[v.prefKey] || v.defaultState,
+          name === 'sessions' ? saved.sidebarWidth
+          : name === 'files' ? saved.fileBrowserWidth : undefined);
+      }
+      railLayout = saved.railLayout || null;
+      applyRailsPref(saved.railsEnabled);
+      renderRails();
+    }
+    queueMicrotask(bootRestoreViews);
+
     // ── Tasks Panel: Mode (show / auto-reveal / hidden) ──
     let tasksMode = 'show';
     let tasksRevealed = false;
-    {
-      const saved = vscode.getState() || {};
-      if (saved.tasksMode) tasksMode = saved.tasksMode;
-    }
 
-    // Get tasks zone elements (cached after first call)
-    function getTasksEls() {
-      return {
-        header: document.getElementById('tasks-header'),
-        list: document.getElementById('task-list'),
-        resize: document.getElementById('tasks-resize-handle'),
-      };
-    }
-
+    // Auto-reveal toggles section VISIBILITY; accordion expanded state still
+    // governs whether the body shows when revealed (R4). Instant toggle —
+    // VS Code sections don't animate, and nothing may transition layout
+    // adjacent to the GPU canvas (R5).
     function setTasksVisible(visible) {
-      const els = getTasksEls();
       tasksRevealed = visible;
-      if (visible) {
-        // Show elements first (display: '' so layout computes), then add revealed class
-        // The rAF ensures the browser computes the initial state before transitioning
-        // 1. Set display so elements enter layout
-        if (els.header) { els.header.style.display = ''; }
-        if (els.list && tasksPanel) { els.list.style.display = ''; }
-        if (els.resize) { els.resize.style.display = ''; }
-        // 2. Force layout reflow so browser computes the initial (hidden) state
-        //    before transitioning to the revealed state. Without this, the browser
-        //    batches display + class into one paint and skips the transition.
-        if (els.header) void els.header.offsetHeight;
-        // 3. Now add revealed class → triggers CSS transition
-        if (els.header) els.header.classList.add('tasks-revealed');
-        if (els.list) els.list.classList.add('tasks-revealed');
-        if (els.resize) els.resize.classList.add('tasks-revealed');
-      } else {
-        // Remove revealed → CSS transitions opacity to 0 + slides down
-        if (els.header) els.header.classList.remove('tasks-revealed');
-        if (els.list) els.list.classList.remove('tasks-revealed');
-        if (els.resize) els.resize.classList.remove('tasks-revealed');
-        // After transition ends, set display: none
-        const onEnd = () => {
-          if (!tasksRevealed) {
-            if (els.header) els.header.style.display = 'none';
-            if (els.list) els.list.style.display = 'none';
-            if (els.resize) els.resize.style.display = 'none';
-          }
-        };
-        if (els.header) {
-          els.header.addEventListener('transitionend', onEnd, { once: true });
-          setTimeout(onEnd, 400); // fallback
-        } else {
-          onEnd();
-        }
-      }
+      applySectionLayout('right');
     }
 
     function applyTasksMode(mode) {
       tasksMode = mode;
-      const els = getTasksEls();
-      // Clean up animation classes
-      const autoRevealClass = 'tasks-auto-reveal';
-
-      if (mode === 'hidden') {
-        tasksRevealed = false;
-        for (const e of [els.header, els.list, els.resize]) {
-          if (e) { e.style.display = 'none'; e.classList.remove('tasks-revealed', autoRevealClass); }
-        }
-      } else if (mode === 'auto-reveal') {
-        tasksRevealed = false;
-        // Add base class for CSS transitions, start hidden
-        for (const e of [els.header, els.list, els.resize]) {
-          if (e) { e.classList.add(autoRevealClass); e.classList.remove('tasks-revealed'); e.style.display = 'none'; }
-        }
-      } else {
-        // 'show' — remove all animation classes, make visible immediately
-        for (const e of [els.header, els.list, els.resize]) {
-          if (e) { e.classList.remove('tasks-revealed', autoRevealClass); e.style.display = ''; }
-        }
-        tasksRevealed = true;
-      }
+      tasksRevealed = mode === 'show';
       const prev = vscode.getState() || {};
       vscode.setState({ ...prev, tasksMode });
+      applySectionLayout('right');
+      syncRails();
     }
 
     // Auto-reveal: mouse proximity to bottom + stays visible while mouse is in tasks zone
@@ -3405,10 +3874,9 @@
         if (tasksMode !== 'auto-reveal') return;
         const rect = sidebar.getBoundingClientRect();
         const bottomDist = rect.bottom - e.clientY;
-        const els = getTasksEls();
 
-        // Check if mouse is inside the tasks zone (header + list + resize)
-        const taskTarget = e.target.closest('#tasks-header, #task-list, #tasks-resize-handle');
+        // Check if mouse is inside the tasks zone (header + list)
+        const taskTarget = e.target.closest('#tasks-header, #task-list');
         if (taskTarget || bottomDist < REVEAL_ZONE) {
           // Mouse is in reveal zone or inside tasks — keep visible
           clearTimeout(hideTimer); hideTimer = null;
@@ -3433,7 +3901,7 @@
       });
 
       // When mouse enters the tasks elements directly, cancel hide
-      for (const id of ['tasks-header', 'task-list', 'tasks-resize-handle']) {
+      for (const id of ['tasks-header', 'task-list']) {
         const el = document.getElementById(id);
         if (el) {
           el.addEventListener('mouseenter', () => {
@@ -3455,8 +3923,20 @@
       });
     }
 
-    // Apply initial tasks mode
-    applyTasksMode(tasksMode);
+    registerView('tasks', {
+      kind: 'view', rail: 'right', icon: 'codicon-checklist', title: 'Tasks',
+      states: ['show', 'auto-reveal', 'hidden'], defaultState: 'show', offState: 'hidden',
+      prefKey: 'tasksMode', persist: 'preference', container: 'sessions',
+      get: () => tasksMode, apply: applyTasksMode,
+      activeWhen: (m) => m !== 'hidden',
+    });
+    registerSection('tasks', {
+      panel: 'right',
+      header: document.getElementById('tasks-header'),
+      body: [document.getElementById('task-list')],
+      // auto-reveal proximity machinery gates section visibility (R4)
+      visibleWhen: () => tasksMode !== 'auto-reveal' || tasksRevealed,
+    });
 
     // Drag-resize sidebar
     {
@@ -3517,6 +3997,9 @@
     let markedPromise = null; // lazy-loaded marked UMD bundle
     let iroUri = null;
     let iroPromise = null; // lazy-loaded iro.js color-picker UMD bundle
+    let dockviewUri = null;      // vendor/dockview/dockview-core.esm.js (wasm-init, both hosts)
+    let dockviewCssUri = null;   // vendor/dockview/dockview.css
+    let dockviewModule = null;   // lazy-loaded dockview-core ESM (SP2 docking engine)
     const loadIro = () => {
       if (iroPromise) return iroPromise;
       if (!iroUri) return Promise.resolve(null);
@@ -7125,7 +7608,9 @@
         onOpen: (ws) => {
           // Send actual viewport dimensions BEFORE subscribing, so the daemon
           // knows the correct PTY size before it sends the initial snapshot.
-          if (terminal && wasmReady) {
+          // Skip sessions a Spaces tile owns — the tile sizes their PTY (SP1);
+          // the primary's socket must not stomp it on (re)connect.
+          if (terminal && wasmReady && !claimedTileSessions.has(sessionName)) {
             const dims = terminal.dimensions();
             if (dims[0] > 0 && dims[1] > 0) {
               ws.send(JSON.stringify({ type: 'resize', cols: dims[0], rows: dims[1] }));
@@ -7371,6 +7856,17 @@
 
     function switchSession(sessionName) {
       if (sessionName === activeSessionName) return;
+      // A Spaces tile OWNS its session's PTY sizing (SP1). If the primary
+      // switched INTO a claimed session, the primary would resize that
+      // session's local grid while the tile-exemption skips its PTY
+      // broadcast → grid/PTY dim divergence → primary corruption. Enforce
+      // the "claimed ≠ active" invariant DURABLY at the one chokepoint every
+      // switch routes through (Shift+↑↓, sidebar clicks, restore). The
+      // session is already visible in the tile; close the tile to reclaim it.
+      if (typeof claimedTileSessions !== 'undefined' && claimedTileSessions.has(sessionName)) {
+        dbg('switchSession: refused — ' + sessionName + ' is claimed by a Spaces tile');
+        return;
+      }
       const session = sessions.get(sessionName);
       if (!session) return;
       // Persist last-active focus per-tab so the next reload restores it
@@ -7603,7 +8099,9 @@
       setupWsHandlers(ws, sessionName, session, {
         connectStatus: 'Reconnected',
         onOpen: (ws) => {
-          if (terminal && wasmReady) {
+          // Same tile-claim skip as the initial connect (SP1): a claimed
+          // background session's PTY is the tile's to size, not the primary's.
+          if (terminal && wasmReady && !claimedTileSessions.has(sessionName)) {
             const dims = terminal.dimensions();
             if (dims[0] > 0 && dims[1] > 0) {
               ws.send(JSON.stringify({ type: 'resize', cols: dims[0], rows: dims[1] }));
@@ -7841,6 +8339,10 @@
           }
         });
       });
+
+      // Full-fidelity Spaces restore (§2): if a space was active on last
+      // reload, re-enter it now that WASM/GPU are live. No-op in classic.
+      try { maybeRestoreSpace(); } catch (_) { /* spaces engine may load later */ }
     }
 
     // ── Server Message Handling ──
@@ -7993,7 +8495,8 @@
           // Persistent webview pane lifecycle (open_workshop / update_workshop /
           // eval_in_workshop / close_workshop MCP tools). Same Shadow-DOM
           // execution model as draw_html — only the lifecycle differs.
-          if (msg.data && typeof msg.data.event === 'string' && typeof msg.data.name === 'string') {
+          if (msg.data && typeof msg.data.event === 'string'
+              && (typeof msg.data.name === 'string' || msg.data.event === 'plan_changed')) {
             handleWorkshopEvent(msg.data);
           }
           break;
@@ -8128,6 +8631,12 @@
             syncWorkshopVisibility();
           }
           break;
+        case 'plan_changed':
+          // S4: a plan file changed on disk — re-pull the list. No project
+          // filter: refresh is cheap and cross-project events are rare
+          // (daemon notifies the writing session only, mcp.rs:5338).
+          if (plansPanel) plansPanel.refresh();
+          break;
         default:
           dbg('unknown workshop event: ' + data.event);
       }
@@ -8144,16 +8653,12 @@
     let _workshopChromeWired = false;
     const WORKSHOP_PANEL_WIDTH_KEY = 'immorterm.workshop-panel.width';
     const WORKSHOP_PANEL_COLLAPSED_KEY = 'immorterm.workshop-panel.collapsed';
+    // Legacy flag: read once at boot (bootRestoreViews) to seed
+    // workshopsMode='hidden'; no longer written — workshopsMode is the
+    // single source of truth for panel visibility.
     const WORKSHOP_PANEL_HIDDEN_KEY = 'immorterm.workshop-panel.hidden';
     function isWorkshopPanelHidden() {
-      try { return localStorage.getItem(WORKSHOP_PANEL_HIDDEN_KEY) === '1'; } catch (_) { return false; }
-    }
-    function setWorkshopPanelHidden(hidden) {
-      try {
-        if (hidden) localStorage.setItem(WORKSHOP_PANEL_HIDDEN_KEY, '1');
-        else localStorage.removeItem(WORKSHOP_PANEL_HIDDEN_KEY);
-      } catch (_) {}
-      try { syncWorkshopVisibility(); } catch (_) {}
+      return workshopsMode === 'hidden';
     }
 
     // ── Workshops Mode (show / auto-reveal / hidden) — Personalize-driven ──
@@ -8164,31 +8669,30 @@
     let workshopsMode = 'show';
     function applyWorkshopsMode(mode) {
       workshopsMode = mode;
-      // 'hidden' maps to the existing localStorage hide flag, so the
-      // collapsible strip also disappears (not just the body).
-      setWorkshopPanelHidden(mode === 'hidden');
+      // Re-sync the workshop column: 'hidden' hides even the collapsible
+      // strip (isWorkshopPanelHidden reads workshopsMode).
+      try { syncWorkshopVisibility(); } catch (_) {}
       const prev = vscode.getState() || {};
       vscode.setState({ ...prev, workshopsMode });
-      // Also keep the sidebar header + list hidden/shown so they don't
-      // leak into the Sessions sidebar when workshops are off.
-      const header = document.getElementById('workshops-header');
-      const list = document.getElementById('workshops-list');
-      const resize = document.getElementById('workshops-resize-handle');
-      if (mode === 'hidden') {
-        for (const e of [header, list, resize]) if (e) e.style.display = 'none';
-      }
-      // 'show' / 'auto-reveal' fall through to renderWorkshopsList which
-      // decides visibility based on whether the active session has any.
+      // Sidebar section visibility: applySectionLayout owns display —
+      // the mode gate ('hidden') + has-content rule both live there.
       try { renderWorkshopsList(); } catch (_) {}
+      applySectionLayout('right');
+      syncRails();
     }
-    // Restore on init.
-    {
-      const saved = vscode.getState() || {};
-      if (saved.workshopsMode) workshopsMode = saved.workshopsMode;
-      // Defer apply until DOM is ready (the elements may not exist yet at
-      // script eval time).
-      queueMicrotask(() => { try { applyWorkshopsMode(workshopsMode); } catch (_) {} });
-    }
+    registerView('workshops', {
+      kind: 'view', rail: 'right', icon: 'codicon-layout', title: 'Workshops',
+      states: ['show', 'auto-reveal', 'hidden'], defaultState: 'show', offState: 'hidden',
+      prefKey: 'workshopsMode', persist: 'preference', container: 'sessions',
+      get: () => workshopsMode, apply: applyWorkshopsMode,
+      activeWhen: (m) => m !== 'hidden',
+    });
+    registerSection('workshops', {
+      panel: 'right',
+      header: document.getElementById('workshops-header'),
+      body: [document.getElementById('workshops-list')],
+      hasContent: true,
+    });
     function wireWorkshopChromeOnce() {
       if (_workshopChromeWired) return;
       _workshopChromeWired = true;
@@ -8450,9 +8954,11 @@
       _workshopsHeaderWired = true;
       header.addEventListener('contextmenu', (ev) => {
         const hidden = isWorkshopPanelHidden();
+        // setViewMode owns the mode variable, prefs sync, persistence and
+        // the rail sync — one mutation path for every caller.
         openWorkshopContextMenu(ev, hidden
-          ? [{ label: '👁 Show workshop panel', onClick: () => setWorkshopPanelHidden(false) }]
-          : [{ label: '🚫 Hide workshop panel', onClick: () => setWorkshopPanelHidden(true) }]
+          ? [{ label: '👁 Show workshop panel', onClick: () => setViewMode('workshops', 'show') }]
+          : [{ label: '🚫 Hide workshop panel', onClick: () => setViewMode('workshops', 'hidden') }]
         );
       });
       const newBtn = document.getElementById('new-workshop-btn');
@@ -8472,24 +8978,17 @@
 
     function renderWorkshopsList() {
       const list = document.getElementById('workshops-list');
-      const header = document.getElementById('workshops-header');
-      const handle = document.getElementById('workshops-resize-handle');
-      if (!list || !header) return;
+      if (!list) return;
       const ours = [];
       for (const [name, w] of workshops) {
         if (w.sessionName === activeSessionName) ours.push({ name, w });
       }
-      if (ours.length === 0) {
-        header.style.display = 'none';
-        list.style.display = 'none';
-        if (handle) handle.style.display = 'none';
-        return;
-      }
-      header.style.display = '';
-      list.style.display = '';
-      if (handle) handle.style.display = '';
-      wireWorkshopsHeaderOnce();
+      // Single-writer rule: visibility (mode gate + has-content) is
+      // applySectionLayout's job — this renderer only builds rows.
+      sectionSetHasContent('workshops', ours.length > 0);
       list.replaceChildren();
+      if (ours.length === 0) return;
+      wireWorkshopsHeaderOnce();
       for (const { name, w } of ours) {
         // Reuse `.session-item` class so workshop rows inherit session-row
         // styling exactly (padding, font, hover, active state, height). The
@@ -8500,15 +8999,12 @@
         const glyph = document.createElement('span');
         glyph.className = 'glyph';
         glyph.textContent = '⚒'; // ⚒
-        glyph.style.cssText = 'width:10px;display:inline-flex;align-items:center;justify-content:center;font-size:11px;flex-shrink:0;opacity:0.85';
         const lbl = document.createElement('span');
         lbl.className = 'name';
         lbl.textContent = name;
         lbl.title = name;
         row.appendChild(glyph);
         row.appendChild(lbl);
-        row.addEventListener('mouseenter', () => { row.style.background = '#313244'; });
-        row.addEventListener('mouseleave', () => { row.style.background = ''; });
         row.addEventListener('click', () => {
           // Focus this workshop in the panel (also expands if collapsed).
           _activeWorkshopName = name;
@@ -8784,6 +9280,666 @@
       }
     }
 
+    // ── SP1 Spaces dev demo — two live GPU terminals side by side ──
+    // Gated behind a dev toggle (Cmd/Ctrl+Alt+Shift+2, or window.__spaces2()).
+    // Classic single-terminal layout is the default and untouched; this only
+    // runs when the toggle fires. It inserts ONE TerminalTile as a flex sibling
+    // right after #terminal-area (each keeps flex:1 → 50/50). The primary needs
+    // ZERO code change to reflow: its ResizeObserver already sources width from
+    // #terminal-area.clientWidth and observes #terminal-area, so shrinking it
+    // fires that RO and the primary reflows to its new half-width. The §2
+    // claimedTileSessions exemption keeps the two PTYs from stomping each other.
+    async function enterSpaces2() {
+      if (spacesTile || !wasmReady || !tileModuleUrl) return;
+      // Pick the first NON-active session (exclusivity: a tile must bind a
+      // background session, never the primary's active one — else two
+      // subscribe_raw streams race and the resize claim can't be honored for
+      // the active session the primary keeps resizing).
+      let pickedName = null;
+      for (const [name] of sessions) { if (name !== activeSessionName) { pickedName = name; break; } }
+      if (!pickedName) {
+        // ponytail: SP1 requires 2 pre-existing sessions; auto-creating one is SP2.
+        if (showTransientPopover) {
+          const anchor = document.getElementById('terminal-canvas');
+          showTransientPopover('Open a second session to demo Spaces (SP1 needs two).', anchor, 4000);
+        }
+        return;
+      }
+      const picked = sessions.get(pickedName);
+      const root = document.createElement('div');
+      root.id = 'spaces-root';
+      document.getElementById('terminal-area').after(root);
+      try {
+        if (!tileModule) tileModule = await import(tileModuleUrl);
+        spacesTile = await tileModule.createTerminalTile({
+          wasmModule,
+          sessionName: pickedName,
+          wsPort: picked.wsPort,
+          resolveWsPort: () => resolveCurrentWsPort(pickedName),
+          mountEl: root,
+          registerClaim: () => claimedTileSessions.add(pickedName),
+          releaseClaim: () => claimedTileSessions.delete(pickedName),
+          displayName: picked.displayName || pickedName,
+          fontData, fontName, fontSize, lineHeight, fontWeight,
+          applyColors: applyVSCodeTerminalColors,
+          themeName: activeThemeName,
+          openLink: (link) => openTerminalLink(link, undefined),
+          linkHover: terminalLinkHoverHook,
+          linkHoverEnd: terminalLinkHoverEndHook,
+          fallbackCwd: () => picked.cwd || undefined,
+          onStatus: () => { /* SP1: header chip is enough */ },
+          onDestroy: () => {
+            spacesTile = null;
+            const r = document.getElementById('spaces-root');
+            if (r) r.remove(); // #terminal-area snaps back to full flex:1 → primary reflows
+          },
+        });
+      } catch (e) {
+        spacesTile = null;
+        root.remove();
+        reportError('spaces-tile', e);
+      }
+    }
+    function exitSpaces2() {
+      if (!spacesTile) return;
+      spacesTile.destroy(); // releases claim, frees GPU/WS/RO/rAF/input; onDestroy removes #spaces-root
+    }
+    function toggleSpaces2() { if (spacesTile) exitSpaces2(); else enterSpaces2(); }
+    try { window.__spaces2 = toggleSpaces2; } catch (_) { /* best effort */ }
+
+    // ── SP2 Spaces docking engine ──────────────────────────────────────
+    //  The primary is REPARENTED into a dockview panel (never re-inited): an
+    //  appendChild of an attached node is a MOVE, so the WebGPU device/surface
+    //  survive. Generalized from the proven __dvProof harness; reconfigure =
+    //  the same post-compositor double-rAF used at init (~8278).
+    function reconfigurePrimarySurface() {
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (terminal && wasmReady && canvas.width > 0 && canvas.height > 0) {
+          terminal.resize(canvas.width, canvas.height);
+        }
+      }));
+    }
+
+    // ── Spaces state ──
+    let spaceMode = null;              // null = classic single-terminal; else entered spaceId
+    let activeSpaceId = null;          // persisted `active` — the entered space (null in classic)
+    const spaceOrder = [];             // spaceId[] display order (mirrors sessionOrder)
+    const spacesMap = new Map();       // spaceId -> session-shaped pseudo-row for createRenderSidebar
+    let spacesIndex = { version: 1, order: [], active: null, spaces: {} }; // full persisted model
+    let _renamingSpace = null;
+    let renderSpaces = () => {};       // replaced with a createRenderSidebar instance when utils loads
+    // Live dockview instance while a space is shown:
+    let dv = null;                     // dockview api
+    let dvRoot = null;                 // absolute overlay mount inside #terminal-area
+    let dvSubs = [];                   // dockview disposables (torn down on leave)
+    const tilePanels = new Map();      // panelId -> { kind, sessionName?, panel, el, bodyEl, tileHandle }
+    const _builtPanels = new Set();    // panelIds whose content is built — idempotency guard so the
+                                       // async createComponent.init and the fromJSON reconcile pass
+                                       // can't both build the same panel (double-tile). Cleared with tilePanels.
+    let primaryPanelBodyEl = null;     // .tile-body of the reparented primary — the RO width/height source
+    let primaryCanvasHome = null;      // where to reparent the canvas back to on leave (#terminal-area)
+    let _savedStatusBarMode = null;    // classic statusBarMode stashed while a space hides it
+    let _spaceSaveTimer = null;
+    let _tearingDown = false;          // true during leaveSpace so tile onDestroy doesn't re-enter removePanel
+    // The canvas + every canvas-anchored overlay move TOGETHER so they keep a
+    // shared coordinate system (offset parent = the panel body). PROOF #2.
+    const PRIMARY_MOVE_IDS = ['terminal-canvas', 'kb-input', 'title-tooltip', 'link-tooltip',
+      'emoji-overlays', 'comment-pills', 'comment-editor', 'explore-popup', 'task-wizard',
+      'comment-compose', 'cursor-mask', 'phantom-cursor', 'dictation-pulse', 'composition-view', 'ai-overlay'];
+    function reparentPrimaryInto(target) {
+      for (const id of PRIMARY_MOVE_IDS) {
+        const n = document.getElementById(id);
+        if (n) target.appendChild(n);   // appendChild of an attached node = MOVE
+      }
+    }
+
+    async function loadDockview() {
+      if (dockviewModule) return dockviewModule;
+      if (!dockviewUri) return null;
+      // Inject the vendored stylesheet once. Resolve against document.baseURI
+      // so the passed relative (hub) or absolute (asWebviewUri) href both work
+      // — never import.meta (the inline module is syntax-checked as a Script).
+      if (dockviewCssUri && !document.querySelector('link[data-dockview]')) {
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = new URL(dockviewCssUri, document.baseURI).href;
+        link.setAttribute('data-dockview', '1');
+        document.head.appendChild(link);
+      }
+      try {
+        dockviewModule = await import(new URL(dockviewUri, document.baseURI).href);
+      } catch (e) { reportError('dockview-load', e); return null; }
+      return dockviewModule;
+    }
+
+    // dockview createComponent — one renderer per panel kind. The element it
+    // returns is the panel CONTENT; we fill it with the unified .tile chrome.
+    function makeRenderer(options) {
+      const element = document.createElement('div');
+      element.className = 'dv-tile-host';
+      return {
+        element,
+        init(parameters) {
+          const p = (parameters && parameters.params) || {};
+          const panelId = p.panelId || (options && options.id) || 'panel';
+          if ((options && options.name) === 'primary' || p.kind === 'primary') {
+            buildPrimaryTile(element, panelId);
+          } else {
+            buildSessionTile(element, panelId, p);
+          }
+        },
+      };
+    }
+
+    function primaryTileHtml() {
+      return '<div class="tile">'
+        + '<div class="tile-header">'
+        + '<span class="tile-title">Primary</span>'
+        + '<span class="tile-status" data-state="live">primary</span>'
+        + '<span class="tile-spacer"></span>'
+        + '<button class="tile-lock codicon codicon-unlock" type="button" title="Lock this tile (pin its size)"></button>'
+        + '<button class="tile-addtile codicon codicon-add" type="button" title="Add a session tile"></button>'
+        + '</div>'
+        + '<div class="tile-body" style="position:relative"></div>'
+        + '</div>';
+    }
+
+    function buildPrimaryTile(element, panelId) {
+      if (_builtPanels.has(panelId)) return; // init or reconcile already built it
+      _builtPanels.add(panelId);
+      element.innerHTML = primaryTileHtml();
+      const body = element.querySelector('.tile-body');
+      primaryPanelBodyEl = body;
+      reparentPrimaryInto(body);                 // ⚠ PROOF #1 — the gating move
+      const lockBtn = element.querySelector('.tile-lock');
+      if (lockBtn) {
+        lockBtn.addEventListener('mousedown', (e) => e.preventDefault());
+        lockBtn.addEventListener('click', () => toggleTileLock(panelId));
+      }
+      const addBtn = element.querySelector('.tile-addtile');
+      if (addBtn) {
+        addBtn.addEventListener('mousedown', (e) => e.preventDefault());
+        addBtn.addEventListener('click', (e) => showAddTileMenu(e, panelId));
+      }
+      tilePanels.set(panelId, { kind: 'primary', panel: null, el: element, bodyEl: body });
+    }
+
+    async function buildSessionTile(element, panelId, params) {
+      if (_builtPanels.has(panelId)) return; // init or reconcile already built it
+      _builtPanels.add(panelId);
+      const name = params.sessionName;
+      const sess = sessions.get(name);
+      tilePanels.set(panelId, { kind: 'session', sessionName: name, panel: null, el: element });
+      if (!sess) {
+        // Build with DOM APIs, never innerHTML — `name` comes from a persisted
+        // spaces index (untrusted); textContent neutralizes any markup (the
+        // source is also validated in normalizeSpaceRecord, defense in depth).
+        const tile = document.createElement('div'); tile.className = 'tile';
+        const hdr = document.createElement('div'); hdr.className = 'tile-header';
+        const title = document.createElement('span'); title.className = 'tile-title';
+        title.textContent = name || 'session';
+        const status = document.createElement('span'); status.className = 'tile-status';
+        status.setAttribute('data-state', 'disconnected'); status.textContent = 'gone';
+        hdr.append(title, status); tile.appendChild(hdr);
+        const body = document.createElement('div'); body.className = 'tile-body';
+        tile.appendChild(body);
+        element.replaceChildren(tile);
+        return;
+      }
+      try {
+        if (!tileModule) tileModule = await import(tileModuleUrl);
+        const handle = await tileModule.createTerminalTile({
+          wasmModule, sessionName: name, wsPort: sess.wsPort,
+          resolveWsPort: () => resolveCurrentWsPort(name),
+          mountEl: element,
+          registerClaim: () => claimedTileSessions.add(name),
+          releaseClaim: () => claimedTileSessions.delete(name),
+          displayName: sess.displayName || name,
+          fontData, fontName, fontSize, lineHeight, fontWeight,
+          applyColors: applyVSCodeTerminalColors, themeName: activeThemeName,
+          openLink: (link) => openTerminalLink(link, undefined),
+          linkHover: terminalLinkHoverHook, linkHoverEnd: terminalLinkHoverEndHook,
+          fallbackCwd: () => sess.cwd || undefined,
+          onStatus: () => { /* header chip is enough */ },
+          onDestroy: () => {
+            // The tile ✕ freed the engine; drop the now-empty dockview panel
+            // and persist. Skipped during leaveSpace (whole grid is disposing).
+            if (_tearingDown) return;
+            const p = dv && dv.panels.find((x) => x.id === panelId);
+            if (p) { try { dv.removePanel(p); } catch (_) {} }
+            tilePanels.delete(panelId);
+            scheduleSpaceSave();
+          },
+        });
+        const entry = tilePanels.get(panelId) || { kind: 'session', sessionName: name };
+        entry.tileHandle = handle; entry.el = element;
+        entry.bodyEl = handle.el.querySelector('.tile-body');
+        tilePanels.set(panelId, entry);
+        // Mount/restore can leave the WebGPU surface stale (black) until a
+        // dimension change — kick it once the panel size has settled. The
+        // tile's RO fires on mount but can race a not-yet-final panel size on
+        // fromJSON restore; this guarantees a paint. Idempotent for fresh tiles.
+        if (handle.reconfigure) {
+          requestAnimationFrame(() => requestAnimationFrame(() => { try { handle.reconfigure(); } catch (_) {} }));
+        }
+        injectTileLockButton(handle.el, panelId);
+        const rec = spaceMode && spacesIndex.spaces[spaceMode];
+        if (rec && rec.tiles && rec.tiles[panelId] && rec.tiles[panelId].locked) {
+          toggleTileLock(panelId, true, true);
+        }
+      } catch (e) { reportError('spaces-tile', e); }
+    }
+
+    function injectTileLockButton(tileEl, panelId) {
+      const header = tileEl.querySelector('.tile-header');
+      if (!header || header.querySelector('.tile-lock')) return;
+      const btn = document.createElement('button');
+      btn.className = 'tile-lock codicon codicon-unlock';
+      btn.type = 'button'; btn.title = 'Lock this tile (pin its size)';
+      btn.addEventListener('mousedown', (e) => e.preventDefault());
+      btn.addEventListener('click', () => toggleTileLock(panelId));
+      const closeBtn = header.querySelector('.tile-close');
+      if (closeBtn) header.insertBefore(btn, closeBtn); else header.appendChild(btn);
+    }
+
+    // ── LOCK (per-tile) — pin the panel's size via dockview constraints, and
+    //  flag it non-draggable. dockview 7.0.4 has NO public per-panel DnD
+    //  toggle (only the grid-wide `disableDnd`), and SP2 exposes no intra-grid
+    //  drag surface anyway (that's SP3), so pinning the size IS the robust
+    //  "can't be moved/resized while others still can": a sash bordering a
+    //  size-pinned panel can't move it, other sashes stay free. When SP3 adds
+    //  drag, the same `locked` flag gates the drag source.
+    function toggleTileLock(panelId, force, silent) {
+      const entry = tilePanels.get(panelId);
+      const rec = spaceMode && spacesIndex.spaces[spaceMode];
+      if (!entry || !rec) return;
+      rec.tiles = rec.tiles || {};
+      const t = rec.tiles[panelId] || (rec.tiles[panelId] = { kind: entry.kind, sessionName: entry.sessionName });
+      const locked = (force !== undefined) ? force : !t.locked;
+      t.locked = locked;
+      applyTileConstraint(entry, locked);
+      const btn = entry.el && entry.el.querySelector('.tile-lock');
+      if (btn) {
+        btn.classList.toggle('codicon-lock', locked);
+        btn.classList.toggle('codicon-unlock', !locked);
+        btn.classList.toggle('active', locked);
+        btn.title = locked ? 'Unlock this tile' : 'Lock this tile (pin its size)';
+      }
+      const tileEl = entry.el && entry.el.querySelector('.tile');
+      if (tileEl) tileEl.classList.toggle('tile-locked', locked);
+      if (!silent) saveSpaces();
+    }
+
+    function applyTileConstraint(entry, locked) {
+      const panel = entry.panel;
+      if (!panel || !panel.api || !panel.api.setConstraints) return;
+      try {
+        if (locked) {
+          const host = entry.el;
+          const w = host ? host.clientWidth : 0;
+          const h = host ? host.clientHeight : 0;
+          panel.api.setConstraints({ minimumWidth: w, maximumWidth: w, minimumHeight: h, maximumHeight: h });
+        } else {
+          panel.api.setConstraints({
+            minimumWidth: 100, maximumWidth: Number.MAX_SAFE_INTEGER,
+            minimumHeight: 100, maximumHeight: Number.MAX_SAFE_INTEGER,
+          });
+        }
+      } catch (_) { /* best effort — padlock visual + persisted flag still hold */ }
+    }
+
+    // ── LOCK (whole grid) — freeze every split (sash) + every drag/drop. ──
+    function applyGridLock(locked) {
+      if (!dv) return;
+      // Both go through updateOptions — DockviewApi delegates it to the
+      // component, which honors 'locked' → gridview sashes disabled. Setting
+      // `dv.locked =` directly is an inert expando (verified in dockview 7.0.4),
+      // so grid lock would silently fail to freeze sash resizing.
+      try { dv.updateOptions({ locked, disableDnd: locked }); } catch (_) {}
+    }
+    function toggleGridLock(id) {
+      const rec = spacesIndex.spaces[id];
+      if (!rec) return;
+      rec.gridLocked = !rec.gridLocked;
+      if (spaceMode === id) applyGridLock(rec.gridLocked);
+      saveSpaces(); syncLockGridBtn(); renderSpaces();
+    }
+    function syncLockGridBtn() {
+      const btn = document.getElementById('lock-grid-btn');
+      if (!btn) return;
+      const rec = spaceMode && spacesIndex.spaces[spaceMode];
+      if (rec) {
+        btn.style.display = '';
+        const locked = !!rec.gridLocked;
+        btn.classList.remove('codicon-lock', 'codicon-unlock');
+        btn.classList.add(locked ? 'codicon-lock' : 'codicon-unlock');
+        btn.classList.toggle('active', locked);
+        btn.title = locked ? 'Unlock the active grid' : 'Lock the active grid (freeze splits + moves)';
+      } else {
+        btn.style.display = 'none';
+      }
+    }
+
+    function gateStatusBarForSpace(inSpace) {
+      if (!terminal) return;
+      if (inSpace) {
+        _savedStatusBarMode = prefs.statusBarMode;
+        try { terminal.set_status_bar_mode('hidden'); terminal.set_status_bar_reveal(0); } catch (_) {}
+        sbAnim.reveal = 0; sbAnim.target = 0;
+      } else {
+        const mode = _savedStatusBarMode || prefs.statusBarMode;
+        try { terminal.set_status_bar_mode(mode); } catch (_) {}
+        if (mode === 'always') { sbAnim.reveal = 1; sbAnim.target = 1; try { terminal.set_status_bar_reveal(1); } catch (_) {} }
+        else { sbAnim.reveal = 0; sbAnim.target = 0; }
+        _savedStatusBarMode = null;
+      }
+    }
+
+    function onPanelResize(panelId) {
+      const e = tilePanels.get(panelId);
+      if (!e) return;
+      if (e.kind === 'primary') reconfigurePrimarySurface();
+      else if (e.tileHandle) e.tileHandle.reconfigure();
+    }
+
+    function wirePanelHooks(panel) {
+      const id = panel.id;
+      try { dvSubs.push(panel.api.onDidDimensionsChange(() => onPanelResize(id))); } catch (_) {}
+      try { dvSubs.push(panel.api.onDidLocationChange(() => onPanelResize(id))); } catch (_) {}
+      // renderer:'always' keeps hidden tiles alive — suspend/wake bounds the GPU cost.
+      try {
+        dvSubs.push(panel.api.onDidVisibilityChange((ev) => {
+          const e = tilePanels.get(id);
+          if (!e || !e.tileHandle) return;
+          if (ev.isVisible) { e.tileHandle.wake(); e.tileHandle.reconfigure(); }
+          else e.tileHandle.suspend();
+        }));
+      } catch (_) {}
+    }
+
+    let _enteringSpace = false;
+    async function enterSpace(spaceId) {
+      // Synchronous re-entrancy guard: loadDockview() awaits a dynamic import
+      // that spans macrotasks on first entry — without this, a second call
+      // (fast click / restore racing a click) would start a parallel enter and
+      // mount two dockview roots / double-reparent the primary canvas.
+      if (_enteringSpace) return;
+      if (spaceMode) { if (spaceMode === spaceId) return; leaveSpace(); }
+      if (!wasmReady) return;
+      const rec = spacesIndex.spaces[spaceId];
+      if (!rec) return;
+      _enteringSpace = true;
+      let mod;
+      try {
+        mod = await loadDockview();
+      } finally {
+        _enteringSpace = false;
+      }
+      if (!mod) return;
+      if (spaceMode) return; // lost a race while awaiting — another enter won
+      spaceMode = spaceId; activeSpaceId = spaceId;
+      tilePanels.clear(); _builtPanels.clear();
+      if (emptyState) emptyState.style.display = 'none';
+      dvRoot = document.createElement('div');
+      dvRoot.id = 'spaces-dv-root';
+      dvRoot.style.cssText = 'position:absolute;inset:0;z-index:2';
+      dvRoot.className = document.documentElement.getAttribute('data-theme') === 'light'
+        ? 'dockview-theme-light' : 'dockview-theme-dark';
+      primaryCanvasHome = document.getElementById('terminal-area');
+      primaryCanvasHome.appendChild(dvRoot);
+      dv = mod.createDockview(dvRoot, { createComponent: makeRenderer, disableDnd: false });
+      // Build the grid: restore the saved geometry blob verbatim, else seed a
+      // fresh space with just the reparented primary. createComponent runs
+      // synchronously during fromJSON/addPanel and reparents the live canvas.
+      let restored = false;
+      if (rec.layout) {
+        try { dv.fromJSON(rec.layout); restored = true; }
+        catch (e) { reportError('spaces-restore', e); rec.layout = null; }
+      }
+      if (!restored) {
+        dv.addPanel({ id: 'panel_primary', component: 'primary', title: 'Primary',
+          params: { kind: 'primary', panelId: 'panel_primary' } });
+        rec.tiles = rec.tiles || {};
+        rec.tiles.panel_primary = rec.tiles.panel_primary || { kind: 'primary' };
+      }
+      // Reconcile restored panels: fromJSON recreates the panel HOSTS but does
+      // NOT reliably run our createComponent.init content-builder for every
+      // panel (observed: the non-primary panel's content host came back empty).
+      // The `tiles` binding map is the source of truth — build any empty host
+      // from it. Idempotent: panels init already filled are skipped.
+      if (restored) {
+        for (const panel of dv.panels) {
+          let host = null;
+          try { host = panel.view && panel.view.content && panel.view.content.element; } catch (_) {}
+          if (!host || host.childElementCount > 0) continue; // already built
+          const binding = (rec.tiles && rec.tiles[panel.id]) || {};
+          if (binding.kind === 'primary') {
+            buildPrimaryTile(host, panel.id);
+          } else {
+            buildSessionTile(host, panel.id, { kind: 'session', sessionName: binding.sessionName, panelId: panel.id });
+          }
+        }
+      }
+      // Link live panel objects + wire resize/visibility hooks.
+      for (const panel of dv.panels) {
+        const e = tilePanels.get(panel.id) || {};
+        e.panel = panel; tilePanels.set(panel.id, e);
+        wirePanelHooks(panel);
+      }
+      dvSubs.push(dv.onDidLayoutChange(() => scheduleSpaceSave()));
+      // RO width/height source flips to the primary panel body (§4.4).
+      if (primaryPanelBodyEl) { try { resizeObserver.observe(primaryPanelBodyEl); } catch (_) {} }
+      // Primary's WebGPU surface is stale (black) after a fromJSON restore:
+      // the canvas backing store is still at its pre-space full width until the
+      // RO re-sizes it to the half-width panel. reconfigurePrimarySurface alone
+      // resizes at the stale backing size — we must run the full RO→resize→
+      // reconfigure path. A synthetic resize is exactly what fixes it manually
+      // and is the app's own layout-change mechanism.
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        try { window.dispatchEvent(new Event('resize')); } catch (_) {}
+        reconfigurePrimarySurface();
+      }));
+      gateStatusBarForSpace(true);
+      applyGridLock(!!rec.gridLocked);
+      // Re-apply per-tile locks once a frame has settled the panel sizes.
+      requestAnimationFrame(() => {
+        for (const pid in (rec.tiles || {})) {
+          if (rec.tiles[pid] && rec.tiles[pid].locked) toggleTileLock(pid, true, true);
+        }
+      });
+      reconfigurePrimarySurface();
+      saveSpaces(); renderSpaces(); syncLockGridBtn();
+    }
+
+    function leaveSpace() {
+      if (!spaceMode) return;
+      captureLayout();                            // snapshot geometry + bindings before teardown
+      const home = primaryCanvasHome || document.getElementById('terminal-area');
+      reparentPrimaryInto(home);                  // ⚠ PROOF #1 — the return leg
+      if (primaryPanelBodyEl) { try { resizeObserver.unobserve(primaryPanelBodyEl); } catch (_) {} }
+      primaryPanelBodyEl = null;
+      gateStatusBarForSpace(false);
+      for (const s of dvSubs) { try { s.dispose(); } catch (_) {} }
+      dvSubs = [];
+      // dockview does NOT know about our tile handles — free each session
+      // tile's engine (WS/GPU/RO/rAF + claim) explicitly before disposing.
+      _tearingDown = true;
+      for (const [, e] of tilePanels) { if (e.tileHandle) { try { e.tileHandle.destroy(); } catch (_) {} } }
+      try { if (dv) dv.dispose(); } catch (_) {}
+      _tearingDown = false;
+      dv = null;
+      if (dvRoot) { dvRoot.remove(); dvRoot = null; }
+      tilePanels.clear(); _builtPanels.clear();
+      spaceMode = null; activeSpaceId = null;
+      if (emptyState) emptyState.style.display = sessions.size ? 'none' : '';
+      reconfigurePrimarySurface();
+      saveSpaces(); renderSpaces(); syncLockGridBtn();
+    }
+
+    // ── Add-tile affordance (SP2 is a picker; section→grid drag is SP3). ──
+    function addSessionTile(sessionName, referencePanelId) {
+      if (!dv) return;
+      const id = 'panel_' + Math.random().toString(36).slice(2, 8);
+      dv.addPanel({ id, component: 'session',
+        title: (sessions.get(sessionName) && sessions.get(sessionName).displayName) || sessionName,
+        params: { kind: 'session', sessionName, panelId: id },
+        position: referencePanelId ? { referencePanel: referencePanelId, direction: 'right' } : undefined });
+      const panel = dv.panels.find((p) => p.id === id);
+      if (panel) { const e = tilePanels.get(id) || {}; e.panel = panel; tilePanels.set(id, e); wirePanelHooks(panel); }
+      scheduleSpaceSave();
+    }
+    function showAddTileMenu(e, referencePanelId) {
+      const old = document.querySelector('.sb-context-menu'); if (old) old.remove();
+      const menu = el('div', 'sb-context-menu');
+      menu.style.left = e.clientX + 'px'; menu.style.top = e.clientY + 'px';
+      const tiled = new Set();
+      for (const [, en] of tilePanels) if (en.sessionName) tiled.add(en.sessionName);
+      // The primary tile carries kind:'primary' with no sessionName, so the
+      // active session isn't in `tiled` — add it explicitly, else it's offered
+      // as a tile and double-claims its own PTY (registerClaim conflict).
+      if (activeSessionName) tiled.add(activeSessionName);
+      let any = false;
+      for (const [name, s] of sessions) {
+        if (tiled.has(name)) continue; any = true;
+        const it = el('div', 'sb-context-menu-item', s.displayName || name);
+        it.addEventListener('click', () => { menu.remove(); addSessionTile(name, referencePanelId); });
+        menu.appendChild(it);
+      }
+      if (!any) { const it = el('div', 'sb-context-menu-item', 'No other sessions'); it.style.opacity = '0.6'; menu.appendChild(it); }
+      document.body.appendChild(menu);
+      const close = (ev) => { if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('mousedown', close, true); } };
+      setTimeout(() => document.addEventListener('mousedown', close, true), 0);
+    }
+
+    // ── Persistence — full-fidelity capture of geometry + bindings + locks. ──
+    function captureLayout() {
+      if (!dv || !spaceMode) return;
+      const rec = spacesIndex.spaces[spaceMode];
+      if (!rec) return;
+      try { rec.layout = dv.toJSON(); } catch (_) {}   // opaque geometry blob (split ratios etc.)
+      const tiles = {};
+      for (const [id, e] of tilePanels) {
+        const prev = (rec.tiles && rec.tiles[id]) || {};
+        tiles[id] = { kind: e.kind, sessionName: e.sessionName, locked: !!prev.locked };
+      }
+      rec.tiles = tiles;
+    }
+    function saveSpaces() {
+      spacesIndex.version = 1;
+      spacesIndex.order = [...spaceOrder];
+      spacesIndex.active = activeSpaceId;
+      vscode.postMessage({ type: 'save-space', index: spacesIndex });
+    }
+    function scheduleSpaceSave() {
+      captureLayout();
+      if (_spaceSaveTimer) clearTimeout(_spaceSaveTimer);
+      _spaceSaveTimer = setTimeout(() => { _spaceSaveTimer = null; saveSpaces(); }, 400);
+    }
+
+    function createSpace() {
+      const id = 'sp_' + Math.random().toString(36).slice(2, 8);
+      const rec = { name: 'Space ' + (spaceOrder.length + 1), createdMs: Date.now(),
+        layout: null, tiles: { panel_primary: { kind: 'primary' } }, gridLocked: false };
+      spacesIndex.spaces[id] = rec;
+      spaceOrder.push(id);
+      spacesMap.set(id, { name: id, displayName: rec.name, connected: true });
+      saveSpaces(); renderSpaces();
+      enterSpace(id);
+    }
+    function deleteSpace(id) {
+      if (spaceMode === id) leaveSpace();
+      delete spacesIndex.spaces[id];
+      const i = spaceOrder.indexOf(id); if (i !== -1) spaceOrder.splice(i, 1);
+      spacesMap.delete(id);
+      if (activeSpaceId === id) activeSpaceId = null;
+      saveSpaces(); renderSpaces();
+    }
+    // Clone of startSessionRename (:6878) — posts save-space instead of rename-session.
+    function startSpaceRename(id, space, nameEl) {
+      _renamingSpace = id;
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = space.displayName || id;
+      input.className = 'name';
+      input.style.cssText = 'background: #313244; border: 1px solid #b482ff; outline: none; padding: 0 2px; color: #cdd6f4; font: inherit; width: 100%;';
+      nameEl.replaceWith(input);
+      input.focus(); input.select();
+      const commit = () => {
+        _renamingSpace = null;
+        const newName = input.value.trim();
+        if (newName && newName !== space.displayName) {
+          space.displayName = newName;
+          if (spacesIndex.spaces[id]) spacesIndex.spaces[id].name = newName;
+          saveSpaces();
+        }
+        renderSpaces();
+      };
+      input.addEventListener('blur', commit);
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') { ev.preventDefault(); input.blur(); }
+        if (ev.key === 'Escape') { input.value = space.displayName || id; input.blur(); }
+      });
+    }
+    // Clone of showSessionContextMenu (:6906) — Enter / Rename / Lock Grid / Delete.
+    function showSpaceContextMenu(e, id) {
+      e.preventDefault(); e.stopPropagation();
+      clearDocumentSelection();
+      const old = document.querySelector('.sb-context-menu'); if (old) old.remove();
+      const menu = el('div', 'sb-context-menu');
+      menu.style.left = e.clientX + 'px'; menu.style.top = e.clientY + 'px';
+      const rec = spacesIndex.spaces[id];
+      const add = (label, fn) => {
+        const it = el('div', 'sb-context-menu-item', label);
+        it.addEventListener('click', () => { menu.remove(); fn(); });
+        menu.appendChild(it);
+      };
+      add(spaceMode === id ? 'Leave' : 'Enter', () => { if (spaceMode === id) leaveSpace(); else enterSpace(id); });
+      add('Rename', () => {
+        const nameEl = document.querySelector('#spaces-list .session-item[data-name="' + id + '"] .name');
+        const s = spacesMap.get(id);
+        if (nameEl && s) startSpaceRename(id, s, nameEl);
+      });
+      add(rec && rec.gridLocked ? 'Unlock Grid' : 'Lock Grid', () => toggleGridLock(id));
+      add('Delete', () => deleteSpace(id));
+      document.body.appendChild(menu);
+      const close = (ev) => { if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('mousedown', close, true); } };
+      setTimeout(() => document.addEventListener('mousedown', close, true), 0);
+    }
+
+    // Populate state from a persisted index.json (spaces-load) and, if a space
+    // was active on last reload, re-enter it once WASM is ready (§2 restore).
+    function loadSpacesIndex(index) {
+      if (!index || typeof index !== 'object') return;
+      spacesIndex = {
+        version: index.version || 1,
+        order: Array.isArray(index.order) ? index.order : [],
+        active: index.active || null,
+        spaces: (index.spaces && typeof index.spaces === 'object') ? index.spaces : {},
+      };
+      // Normalize each record to the canonical shape (utils, pure) so a
+      // hand-edited/partial index can't crash the grid rebuild.
+      if (utils && utils.normalizeSpaceRecord) {
+        for (const id in spacesIndex.spaces) {
+          spacesIndex.spaces[id] = utils.normalizeSpaceRecord(spacesIndex.spaces[id]);
+        }
+      }
+      spaceOrder.length = 0;
+      for (const id of spacesIndex.order) if (spacesIndex.spaces[id]) spaceOrder.push(id);
+      for (const id in spacesIndex.spaces) if (!spaceOrder.includes(id)) spaceOrder.push(id);
+      spacesMap.clear();
+      for (const id of spaceOrder) {
+        const rec = spacesIndex.spaces[id] || {};
+        spacesMap.set(id, { name: id, displayName: rec.name || id, connected: true });
+      }
+      activeSpaceId = (spacesIndex.active && spacesIndex.spaces[spacesIndex.active]) ? spacesIndex.active : null;
+      renderSpaces(); syncLockGridBtn();
+      maybeRestoreSpace();
+    }
+    function maybeRestoreSpace() {
+      if (!wasmReady || spaceMode) return;
+      if (activeSpaceId && spacesIndex.spaces[activeSpaceId]) enterSpace(activeSpaceId);
+    }
+
     // Tiny indirection so the security-warning grep doesn't flag the
     // workshop+overlay path twice — the `new Function()` call lives in a
     // single shared helper, mirroring runScriptInOverlay above.
@@ -8828,8 +9984,31 @@
         card = document.createElement('div');
         card.className = 'ai-card';
         card.dataset.primId = String(prim.id);
-        // Forward wheel events to the terminal canvas so scrolling works over cards
+        // Wheel over card: if any element under the cursor can still scroll in
+        // the wheel direction, let the browser scroll it natively; otherwise
+        // forward to the terminal canvas. Same idiom as the link-tooltip wheel
+        // handler; composedPath() pierces the card's Shadow DOM.
         card.addEventListener('wheel', (e) => {
+          // Dominant axis decides which overflow we probe — cards can scroll
+          // both ways (85vh/85vw caps), and a horizontal trackpad pan must not
+          // be swallowed by the canvas forward.
+          const horiz = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+          const wantFwd = horiz ? e.deltaX > 0 : e.deltaY > 0;
+          for (const node of e.composedPath()) {
+            if (node instanceof Element) {
+              const cs = getComputedStyle(node);
+              const o = horiz ? cs.overflowX : cs.overflowY;
+              const pos = horiz ? node.scrollLeft : node.scrollTop;
+              const client = horiz ? node.clientWidth : node.clientHeight;
+              const total = horiz ? node.scrollWidth : node.scrollHeight;
+              if ((o === 'auto' || o === 'scroll') && total > client + 1) {
+                const canFwd = pos + client < total - 1;
+                const canBack = pos > 0;
+                if ((wantFwd && canFwd) || (!wantFwd && canBack)) return; // native inner scroll
+              }
+            }
+            if (node === card) break;
+          }
           canvas.dispatchEvent(new WheelEvent('wheel', e));
           e.preventDefault();
         }, { passive: false });
@@ -8969,7 +10148,7 @@
         card.style.boxShadow = 'none';
         card.style.backdropFilter = 'none';
         card.style.maxWidth = 'none';
-        card.style.overflow = 'hidden'; // Clip to prevent overflow into sidebar
+        card.style.overflow = 'auto'; // scroll (not clip) when prim.height/width undersizes the content
 
         // Use Shadow DOM for CSS isolation — prevents overlay styles from leaking
         // into the sessions sidebar or other webview elements
@@ -8977,7 +10156,15 @@
 
         // Inject default click-feedback CSS, then user CSS (user can override)
         const defaultStyle = document.createElement('style');
-        defaultStyle.textContent = '[data-click]{cursor:pointer;transition:transform 0.1s ease,opacity 0.1s ease}[data-click]:active{transform:scale(0.95);opacity:0.8}';
+        defaultStyle.textContent = '[data-click]{cursor:pointer;transition:transform 0.1s ease,opacity 0.1s ease}[data-click]:active{transform:scale(0.95);opacity:0.8}'
+          // Cap tall/wide content at ~85% of the viewport with inner scroll;
+          // small content keeps its natural size (max-* only caps). Scrollbar
+          // styling matches #file-tree in the main stylesheet — shadow DOM
+          // can't see page styles, so it's duplicated here.
+          + '.ai-html-content{max-height:85vh;max-width:85vw;overflow:auto}'
+          + '.ai-html-content::-webkit-scrollbar{width:10px;height:10px}'
+          + '.ai-html-content::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--sidebar-muted,#a6adc8) 28%,transparent);border-radius:6px;border:3px solid transparent;background-clip:padding-box}'
+          + '.ai-html-content:hover::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--sidebar-muted,#a6adc8) 45%,transparent);background-clip:padding-box}';
         shadow.appendChild(defaultStyle);
         if (prim.css) {
           const style = document.createElement('style');
@@ -9350,6 +10537,15 @@
         rerenderActiveBacklog();
         return;
       }
+      // Cmd/Ctrl+Alt+Shift+2 → SP1 Spaces dev demo: toggle a second live GPU
+      // terminal tile side by side. Dev-only entry; classic layout is default.
+      if ((e.metaKey || e.ctrlKey) && e.altKey && e.shiftKey
+          && (e.code === 'Digit2' || e.key === '2' || e.key === '@')) {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleSpaces2();
+        return;
+      }
       // Alt+Shift+` → toggle Pomodoro modal (document-level so it works regardless of focus)
       if (e.shiftKey && e.altKey && !e.ctrlKey && !e.metaKey && (e.key === '`' || e.key === 'Dead')) {
         e.preventDefault();
@@ -9361,9 +10557,14 @@
       // Keystrokes inside a scratch panel belong to ITS terminal — don't
       // steal Shift+Up/Down (keyboard selection there) for session switching.
       if (e.target && e.target.closest && e.target.closest('.scratch-panel')) return;
+      // Same for a Spaces tile (SP1): its keystrokes belong to ITS terminal.
+      if (e.target && e.target.closest && e.target.closest('#spaces-root')) return;
       if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey
           && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
-        const names = sessionOrder.length > 0 ? [...sessionOrder] : Array.from(sessions.keys());
+        // Skip sessions owned by a Spaces tile — switchSession refuses them,
+        // so cycling must step OVER them, not stall on one.
+        const names = (sessionOrder.length > 0 ? [...sessionOrder] : Array.from(sessions.keys()))
+          .filter(n => !claimedTileSessions.has(n));
         if (names.length > 1 && activeSessionName) {
           const idx = names.indexOf(activeSessionName);
           if (idx !== -1) {
@@ -10490,6 +11691,25 @@
       }
       const quoted = /\s/.test(p) ? `"${p}"` : p;
       return claudeActive ? `@${quoted}` : quoted;
+    }
+
+    // Plan-submit wake: type a compact summary into the plan's attached
+    // Claude session (📎, plan.sessionName), falling back to the active
+    // session. NEVER types when claudeRaw is null — the PTY would hand the
+    // text to a shell. Delivery is the terminal's own input channel with the
+    // daemon's anti-paste-heuristic timing (daemon.rs:3728): bracketed-paste
+    // text first, then a discrete Enter after ~120ms.
+    function wakePlanAgent(sessionName, text) {
+      let target = sessionName ? sessions.get(sessionName) : null;
+      if (!(target && target.ws && target.connected && target.claudeRaw)) {
+        const active = sessions.get(activeSessionName);
+        target = (active && active.ws && active.connected && active.claudeRaw) ? active : null;
+      }
+      if (!target) return false;
+      const ws = target.ws;
+      ws.send(JSON.stringify({ type: 'input', data: '\x1b[200~' + text + '\x1b[201~' }));
+      setTimeout(() => ws.send(JSON.stringify({ type: 'input', data: '\r' })), 120);
+      return true;
     }
 
     // Send text to the active PTY as keyboard input, replacing any live
@@ -12761,9 +13981,10 @@
       borderOpacity: 1.0,
       statusBarMode: 'always',  // 'always' | 'auto' | 'hidden'
       sidebarMode: 'show',     // 'show' | 'auto-reveal' | 'collapsed'
-      // Seeded from saved state so the settings modal shows the real mode
-      // (the file browser restores itself before this object exists).
-      fileBrowserMode: ((vscode.getState() || {}).fileBrowserMode) || 'show',
+      // Mode fields are kept in sync by applyViewMode (bootRestoreViews runs
+      // after this object exists), so the settings modal always sees the
+      // real modes via getPrefs().
+      fileBrowserMode: 'show', // 'show' | 'auto-reveal' | 'collapsed' | 'hidden'
       tasksMode: 'show',       // 'show' | 'auto-reveal' | 'hidden'
       workshopsMode: 'show',   // 'show' | 'auto-reveal' | 'hidden' — same tri-state
                                // as Tasks. 'hidden' overrides everything (the
@@ -13214,14 +14435,24 @@
     let modals = null; // initialized in wasm-init handler
     let pomodoro = null; // initialized in wasm-init handler (gpu-terminal-pomodoro.js)
     let tasksPanel = null; // initialized in wasm-init handler (gpu-terminal-tasks.js)
+    let plansPanel = null; // initialized in wasm-init handler (gpu-terminal-plans.js)
     let filesModule = null; // gpu-terminal-files.js module (floating menu + factory)
     let browserModule = null; // gpu-terminal-browser.js — workshop surface + controller factory
     let browserMortAvatarUrl = null; // resolved URL for the Mort sticker PNG
     const browserControllers = new Map(); // owning sessionName → controller (drives its workshop card's shadow DOM)
     let scratchModuleUrl = null; // gpu-terminal-scratch.js URL (derived in wasm-init, imported lazily)
     let scratchModule = null; // gpu-terminal-scratch.js — floating scratch-terminal panel
+    let tileModuleUrl = null; // gpu-terminal-tile.js URL (derived in wasm-init, imported lazily)
+    let tileModule = null; // gpu-terminal-tile.js — SP1 Spaces TerminalTile factory
+    let spacesTile = null; // the single SP1 dev-demo TerminalTile (null when classic layout)
     const scratchControllers = new Map(); // owning sessionName → live scratch panel controller
     const scratchOpenPending = new Set(); // sessionNames with scratch_open awaiting scratch_info
+    // Sessions whose PTY dims a TerminalTile owns (SP1 Spaces). The primary's
+    // sendResize broadcast MUST skip these — the tile sizes them to its own
+    // cell via its own debounced ResizeObserver; without the skip, every
+    // window/panel resize stomps the tile's PTY back to the primary's dims and
+    // the tile's RO stomps it forward again (SIGWINCH ping-pong).
+    const claimedTileSessions = new Set();
     // Status-bar theme fan-out: apply to the main terminal AND every live
     // scratch panel. The theme's accent drives the selection highlight
     // (renderer paints ALL selections with pseudo_selection) — a scratch
@@ -13254,8 +14485,28 @@
                     'celebrations', 'dangerEffects', 'textAnimations'];
       for (const k of keys) if (msg[k] !== undefined) prefs[k] = msg[k];
       if (msg.backgroundControlMode !== undefined) backgroundControlMode = msg.backgroundControlMode;
-      if (msg.tasksMode !== undefined) { prefs.tasksMode = msg.tasksMode; applyTasksMode(msg.tasksMode); }
-      if (msg.workshopsMode !== undefined) { prefs.workshopsMode = msg.workshopsMode; applyWorkshopsMode(msg.workshopsMode); }
+      // Host-config modes (authoritative echo) — apply-only, never persist.
+      // Legacy keys (sidebarMode/tasksMode/…) arrive top-level; new views'
+      // modes arrive under the namespaced viewModes record.
+      for (const name in VIEWS) {
+        const v = VIEWS[name];
+        if (v.kind !== 'view') continue;
+        const m = msg[v.prefKey] !== undefined ? msg[v.prefKey]
+          : (msg.viewModes ? msg.viewModes[name] : undefined);
+        if (m !== undefined) applyViewMode(name, m);
+      }
+      if (msg.railsEnabled !== undefined) applyRailsPref(msg.railsEnabled);
+      if (msg.railLayout) { railLayout = msg.railLayout; renderRails(); }
+      // S5a accordion state — authoritative echo from the host config
+      // (raw/unmerged: absent means webview state wins). Apply-only.
+      if (msg.sectionState) {
+        sectionState = {
+          expanded: msg.sectionState.expanded || {},
+          sizes: msg.sectionState.sizes || {},
+        };
+        applySectionLayout('right');
+        applySectionLayout('left');
+      }
       // Status bar mode — backward compat for old boolean statusBar
       if (msg.statusBarMode !== undefined) prefs.statusBarMode = msg.statusBarMode;
       else if (msg.statusBar !== undefined) prefs.statusBarMode = msg.statusBar ? 'always' : 'hidden';
@@ -13318,9 +14569,14 @@
         // element itself, not its parent. Fall back to the viewport math only
         // if terminal-area isn't measurable yet (very early init).
         const terminalAreaEl = document.getElementById('terminal-area');
-        const taW = terminalAreaEl ? terminalAreaEl.clientWidth : 0;
+        // In a Space the primary is a grid cell, not the whole area: source
+        // BOTH the CSS width AND height from its panel body so the reparented
+        // canvas fills exactly the cell (§4.4). Classic view is unchanged.
+        const inSpace = spaceMode && primaryPanelBodyEl;
+        const widthSrc = inSpace ? primaryPanelBodyEl : terminalAreaEl;
+        const taW = widthSrc ? widthSrc.clientWidth : 0;
         const cssW = taW > 0 ? taW : Math.max(0, vw - sidebarWidth - wsPanelWidth);
-        const cssH = vh;
+        const cssH = inSpace ? primaryPanelBodyEl.clientHeight : vh;
         // Clamp backing store to 4× viewport (defensive upper bound — no
         // legitimate DPR exceeds this on any shipping display).
         const MAX_BACK = Math.max(vw, vh) * 4;
@@ -13587,7 +14843,8 @@
         // Send resize to ALL connected sessions — background sessions also need
         // correct PTY dimensions so their data doesn't arrive at stale sizes.
         let sent = false;
-        for (const [, sess] of sessions) {
+        for (const [name, sess] of sessions) {
+          if (claimedTileSessions.has(name)) continue; // tile owns this session's PTY dims
           if (sess.ws && sess.ws.readyState === WebSocket.OPEN) {
             sess.ws.send(resizeMsg);
             sent = true;
@@ -13778,6 +15035,8 @@
           if (msg.fontName) fontName = msg.fontName;
           if (msg.markedUri) markedUri = msg.markedUri;
           if (msg.iroUri) iroUri = msg.iroUri;
+          if (msg.dockviewUri) dockviewUri = msg.dockviewUri;
+          if (msg.dockviewCssUri) dockviewCssUri = msg.dockviewCssUri;
           // Shared input pipeline (gpu-terminal-input.js) — same static dir
           // as the other sibling modules, derived by swapping the filename.
           if (msg.utilsUri) {
@@ -13835,6 +15094,39 @@
                 // },
                 getCharacterDefs: () => characterDefs,
               });
+              // ── Spaces sidebar list: a SECOND createRenderSidebar instance
+              // bound to the spaces list. Space pseudo-rows carry only a
+              // displayName (+ connected:true for a neutral dot); the working
+              // dot/bell/task-badge chrome simply doesn't render. Reused as-is.
+              renderSpaces = utils.createRenderSidebar({
+                sessionListEl: document.getElementById('spaces-list'),
+                sessions: spacesMap,
+                getActiveSessionName: () => activeSpaceId,
+                onSwitch: (id) => { if (spaceMode === id) leaveSpace(); else enterSpace(id); },
+                onRename: (id, s, nameEl) => startSpaceRename(id, s, nameEl),
+                onRemove: (id) => deleteSpace(id),
+                onContextMenu: (e, id) => showSpaceContextMenu(e, id),
+                isRenaming: () => _renamingSpace !== null,
+                getOrder: () => spaceOrder,
+                onReorder: (o) => { spaceOrder.length = 0; spaceOrder.push(...o); saveSpaces(); renderSpaces(); },
+                onShareContext: () => {},   // no-op: dragging a space onto the terminal is meaningless
+                onShareDragState: () => {}, // no-op
+              });
+              const newSpaceBtn = document.getElementById('new-space-btn');
+              if (newSpaceBtn) newSpaceBtn.addEventListener('click', () => createSpace());
+              const lockGridBtn = document.getElementById('lock-grid-btn');
+              if (lockGridBtn) lockGridBtn.addEventListener('click', () => { if (spaceMode) toggleGridLock(spaceMode); });
+              // Request the persisted spaces index (VS Code: extension fs;
+              // standalone/Tauri: hub GET /api/v1/spaces).
+              vscode.postMessage({ type: 'list-spaces' });
+              // Standalone cross-window freshness stopgap (mirrors plans): the
+              // hub has no push, so refetch on tab focus — but never while a
+              // space is entered (would clobber the live layout).
+              if (IS_STANDALONE) {
+                document.addEventListener('visibilitychange', () => {
+                  if (!document.hidden && !spaceMode) vscode.postMessage({ type: 'list-spaces' });
+                });
+              }
               dbg('wasm-init: utils module loaded');
             } catch (e) {
               reportError('gpu-terminal-utils', e);
@@ -13873,15 +15165,14 @@
                       sbAnim.reveal = 0.0; sbAnim.target = 0.0;
                     }
                   }
-                  if (p.sidebarMode !== undefined) {
-                    applySidebarMode(p.sidebarMode);
-                  }
-                  if (p.fileBrowserMode !== undefined) {
-                    // User action from the settings modal — persist per-project.
-                    setFileBrowserMode(p.fileBrowserMode);
-                  }
-                  if (p.tasksMode !== undefined) {
-                    applyTasksMode(p.tasksMode);
+                  // View modes: ONE mutation path — setViewMode persists
+                  // (project or preference channel) and applies the
+                  // containing-surface rule. modals.js posts nothing itself
+                  // (its save-preference lines for view modes are gone).
+                  for (const name in VIEWS) {
+                    const v = VIEWS[name];
+                    if (v.kind !== 'view' || p[v.prefKey] === undefined) continue;
+                    setViewMode(name, p[v.prefKey]);
                   }
                   applyPrefs();
                 },
@@ -13974,40 +15265,44 @@
               });
               // Request task data from host
               vscode.postMessage({ type: 'get-tasks' });
-
-              // Wire up resize handle between sessions and tasks
-              const resizeHandle = document.getElementById('tasks-resize-handle');
-              const sessionListEl = document.getElementById('session-list');
-              const taskListEl = document.getElementById('task-list');
-              if (resizeHandle && sessionListEl && taskListEl) {
-                resizeHandle.style.display = '';
-                let resizing = false;
-                let startY = 0;
-                let startSessionH = 0;
-                resizeHandle.addEventListener('mousedown', (re) => {
-                  re.preventDefault();
-                  resizing = true;
-                  startY = re.clientY;
-                  startSessionH = sessionListEl.offsetHeight;
-                  resizeHandle.classList.add('dragging');
-                });
-                document.addEventListener('mousemove', (re) => {
-                  if (!resizing) return;
-                  const dy = re.clientY - startY;
-                  const newH = Math.max(40, startSessionH + dy);
-                  sessionListEl.style.maxHeight = newH + 'px';
-                  sessionListEl.style.flexShrink = '0';
-                });
-                document.addEventListener('mouseup', () => {
-                  if (!resizing) return;
-                  resizing = false;
-                  resizeHandle.classList.remove('dragging');
-                });
-              }
-
+              // (Vertical resize between sections is owned by the S5a
+              // accordion dividers — no per-module handle wiring.)
               dbg('wasm-init: tasks module loaded');
             } catch (e) {
               reportError('gpu-terminal-tasks', e);
+            }
+          }
+          // Import plans module (sidebar plans section — S4)
+          if (msg.plansUri && !plansPanel) {
+            try {
+              const plansModule = await import(msg.plansUri);
+              plansPanel = plansModule.createPlansPanel({
+                plansHeaderEl: document.getElementById('plans-header'),
+                plansListEl: document.getElementById('plans-list'),
+                getPlansMode: () => plansMode,
+                requestPlans: () => vscode.postMessage({ type: 'get-plans' }),
+                submitPlan: (p) => vscode.postMessage({
+                  type: 'plans-submit', planId: p.planId,
+                  resolutions: p.resolutions, comments: p.comments,
+                }),
+                wakeAgent: wakePlanAgent,
+                // S5a single-writer rule: the module reports content, the
+                // accordion (applySectionLayout) owns display.
+                onHasContent: (has) => sectionSetHasContent('plans', has),
+              });
+              vscode.postMessage({ type: 'get-plans' });
+              // Standalone cross-session freshness stopgap: plan_changed only
+              // reaches the WRITING session's webview (daemon single-session
+              // notify), so refetch on tab focus. VS Code host doesn't need
+              // this — its fs.watch pushes to every window.
+              if (IS_STANDALONE) {
+                document.addEventListener('visibilitychange', () => {
+                  if (!document.hidden) vscode.postMessage({ type: 'get-plans' });
+                });
+              }
+              dbg('wasm-init: plans module loaded');
+            } catch (e) {
+              reportError('gpu-terminal-plans', e);
             }
           }
           // Import files module (left-side file browser)
@@ -14095,6 +15390,12 @@
             scratchModuleUrl = msg.scratchUri;
           } else if (msg.browserUri) {
             scratchModuleUrl = msg.browserUri.replace(/[^/]+$/, 'gpu-terminal-scratch.js');
+          }
+          // SP1 Spaces tile module — same static dir, derived by filename swap.
+          if (scratchModuleUrl) {
+            tileModuleUrl = scratchModuleUrl.replace(/[^/]+$/, 'gpu-terminal-tile.js');
+          } else if (msg.browserUri) {
+            tileModuleUrl = msg.browserUri.replace(/[^/]+$/, 'gpu-terminal-tile.js');
           }
           // Kick off actual WASM compilation NOW, regardless of session
           // count. Previously this only fired inside `case 'add-session':`
@@ -14339,6 +15640,15 @@
         case 'pomodoro-load-state':
           if (pomodoro) pomodoro.loadState(msg.data);
           break;
+        case 'plans-load':
+          if (plansPanel) plansPanel.setPlans(msg.plans);
+          break;
+        case 'spaces-load':
+          loadSpacesIndex(msg.index);
+          break;
+        case 'plans-submit-result':
+          if (plansPanel) plansPanel.handleSubmitResult(msg);
+          break;
         case 'tasks-load': {
           if (tasksPanel) tasksPanel.setTasks(msg.tasks);
           // Update task counts on session objects for badge rendering
@@ -14400,16 +15710,6 @@
           if (tasksPanel && msg.taskId) {
             tasksPanel.animateDone(msg.taskId);
           }
-          break;
-        }
-        case 'set-tasks-mode': {
-          const mode = msg.mode;
-          if (mode) applyTasksMode(mode);
-          break;
-        }
-        case 'set-workshops-mode': {
-          const mode = msg.mode;
-          if (mode) applyWorkshopsMode(mode);
           break;
         }
         case 'toggle-pomodoro':

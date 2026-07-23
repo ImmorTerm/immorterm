@@ -815,6 +815,89 @@ If the user writes "@session_3 what happened?" or "ask session 3 about...", trea
 </immorterm-memory>
 IMMORTERM_MEMORY_GUIDE
 
+# ── Planning discipline (plans.enforce) ─────────────────────────────────
+# RUNTIME gate — read on every session start so the Personalize toggle
+# applies to the next session without a hook reinstall:
+# project .immorterm/config.json plans.enforce →
+# global ~/.immorterm/config.json defaults.plans.enforce → off.
+PLANS_ENFORCE=$(python3 -c "
+import json, os, sys
+def get(path, *keys):
+    try:
+        with open(os.path.expanduser(path)) as f: v = json.load(f)
+        for k in keys: v = v[k]
+        return v
+    except Exception: return None
+v = get(os.path.join(sys.argv[1], '.immorterm', 'config.json'), 'plans', 'enforce')
+if v is None: v = get('~/.immorterm/config.json', 'defaults', 'plans', 'enforce')
+print('1' if v is True else '0')
+" "$PROJECT_ROOT" 2>/dev/null)
+
+if [ "$PLANS_ENFORCE" = "1" ]; then
+  cat << 'PLAN_DISCIPLINE'
+
+### Planning Discipline — ACTIVE for this project
+
+Maintain a live plan with the \`immorterm_plan\` MCP tool for any non-trivial task:
+- **One stable id per effort** (kebab-case, e.g. \`auth-refactor\`). Always create-or-update that id — never mint a new id for the same work.
+- **Tag open decisions** in \`decisions[]\`: \`{id, label, options[], recommendation}\`. The user resolves them from the plan overlay and submits in one batch — do not stall waiting; proceed on your recommendation and adjust when the submission arrives.
+- **Author the \`html\` as a rich, self-contained visual brief in THIS PROJECT's own brand** — its tokens, fonts (inline as data URIs), and voice, NOT a generic or ImmorTerm-themed look. Same craft as a published artifact: real type hierarchy, considered spacing, a proper palette. The plan body is the project's; ImmorTerm only frames it. Keep it self-contained (inline CSS in a leading \`<style>\`; no external stylesheets/scripts — they are stripped).
+- **Anchor sections for comments**: wrap each major section of the plan \`html\` in an element with \`data-plan-section="<stable-section-id>"\` (e.g. \`data-plan-section="rollout"\`). User comments attach to these anchors.
+- **Keep it current**: update status/summary/html as work progresses. When a message "Plan <id> submitted: ..." arrives, read the decision resolutions and comments, apply them to the plan, and continue.
+PLAN_DISCIPLINE
+
+  # Active-plan surfacing — the plans slug MUST byte-match the daemon's
+  # get_stable_project_id (immorterm-daemon/src/mcp.rs:4757):
+  #   1. git remote origin → "user-repo" lowercased
+  #   2. .claude/project-id file
+  #   3. folder basename
+  # sanitize: lowercase, non-alnum → '-', trim '-', max 50, else
+  # "unnamed-project". NOT this hook's mcp.json-slug PROJECT_ID.
+  python3 - "$PROJECT_ROOT" << 'ACTIVE_PLAN'
+import json, os, re, subprocess, sys
+root = sys.argv[1]
+def sanitize(s):
+    s = re.sub(r'[^a-z0-9]', '-', s.lower()).strip('-')[:50]
+    return s or 'unnamed-project'
+slug = None
+try:
+    url = subprocess.run(['git', '-C', root, 'config', '--get', 'remote.origin.url'],
+                         capture_output=True, text=True, timeout=2).stdout.strip()
+    if url:
+        m = re.search(r'[:/]([^/:]+)/([^/:]+?)(?:\\.git)?$', url)
+        # MUST byte-match the daemon's extract_user_repo (mcp.rs): the git
+        # branch is LOWERCASED ONLY, never sanitized — '_' and '.' survive in
+        # the dir name (e.g. foo-my_repo.js). Sanitizing here (branches 2/3 do)
+        # would read a different dir than the daemon writes.
+        if m: slug = (m.group(1) + '-' + m.group(2)).lower()
+except Exception: pass
+if not slug:
+    try:
+        pid = open(os.path.join(root, '.claude', 'project-id')).read().strip()
+        if pid: slug = sanitize(pid)
+    except Exception: pass
+if not slug: slug = sanitize(os.path.basename(root))
+plans_dir = os.path.expanduser(os.path.join('~', '.immorterm', 'plans', slug))
+best = None
+try:
+    for d in os.listdir(plans_dir):
+        cur = os.path.join(plans_dir, d, 'current.json')
+        try:
+            with open(cur) as f: p = json.load(f)
+        except Exception: continue
+        if p.get('status') in ('done', 'archived', 'superseded'): continue
+        if best is None or p.get('updatedAt', 0) > best.get('updatedAt', 0): best = p
+except Exception: pass
+if best:
+    open_n = sum(1 for dec in best.get('decisions', []) if dec.get('resolved') is not True)
+    print(f"\\n**Active plan:** \`{best.get('id','?')}\` — \\"{best.get('title','?')}\\" "
+          f"(status {best.get('status','draft')}, rev {best.get('revision',1)}, {open_n} open decisions)")
+    s = (best.get('summary') or '')[:200]
+    if s: print(s)
+    print("Continue this plan (create-or-update by its id) rather than starting a new one.")
+ACTIVE_PLAN
+fi
+
 # ── Background digest of unprocessed JSONL (covers /clear gap) ──────────
 # When the user runs /clear, the previous session's JSONL content may not have
 # been digested yet (15-min timer didn't fire). Scan the JSONL dir for files

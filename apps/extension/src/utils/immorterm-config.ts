@@ -131,6 +131,20 @@ export interface AppearanceConfig {
   // project config, not here — see persistFileBrowserToProject() in
   // gpu-terminal.html. Intentionally not an appearance key.
   tasksMode: 'show' | 'auto-reveal' | 'hidden';
+  // Optional (no default): while unset, the webview's own state wins — a
+  // default here would echo into the webview and clobber a pre-upgrade
+  // hidden-workshops choice on first run.
+  workshopsMode?: 'show' | 'auto-reveal' | 'hidden';
+  // S2 activity rails: master switch (default off until the flip decision)
+  // and the D2 icon layout override.
+  railsEnabled: boolean;
+  railLayout?: { left?: string[]; right?: string[]; hidden?: string[] };
+  // Namespaced modes for views registered after S2 ('viewMode.<id>' prefs) —
+  // new views need zero host-side key plumbing.
+  viewModes?: Record<string, string>;
+  // S5a accordion: per-section expanded state + drag-sized flex weights.
+  // Optional (no default) — while unset, the webview's own state wins.
+  sectionState?: { expanded?: Record<string, boolean>; sizes?: Record<string, number> };
   backgroundControlMode: boolean;
 }
 
@@ -141,6 +155,9 @@ export interface GlobalConfig {
   appearance?: AppearanceConfig;
   defaults: {
     terminalMode?: 'regular' | 'ai' | 'both';
+    /** Global default for plans.enforce (planning discipline hook block).
+     * Absent = false (opt-in — the block costs ~200 tokens/session). */
+    plans?: { enforce: boolean };
     services: {
       memory: ServiceConfig;
       mcpGateway: ServiceConfig;
@@ -200,6 +217,10 @@ export interface ProjectConfig {
    * Falls through to "default" when absent. Per-session overrides live in
    * the Rust daemon's registry.json, not here. */
   speakMode?: string;
+  /** Planning discipline. enforce tri-state: true/false = project override,
+   * absent = inherit global default (defaults.plans.enforce). Read at hook
+   * RUNTIME (SessionStart script) — toggling never regenerates hooks. */
+  plans?: { enforce?: boolean };
   terminalMode?: 'regular' | 'ai' | 'both';
   services: {
     memory: MemoryServiceConfig;
@@ -247,6 +268,9 @@ function defaultGlobalConfig(): GlobalConfig {
       textAnimations: true,
       sidebarMode: 'show' as const,
       tasksMode: 'show' as const,
+      // Founder decision (2026-07-23, plan workbench-refactor/rails-default):
+      // rails ship ON now that Plans gives the right rail its payoff.
+      railsEnabled: true,
       backgroundControlMode: true,
     },
     defaults: {
@@ -649,6 +673,9 @@ const DEFAULT_APPEARANCE: AppearanceConfig = {
   textAnimations: true,
   sidebarMode: 'show',
   tasksMode: 'show',
+  // Founder decision (2026-07-23): rails default ON — see plan
+  // workbench-refactor, decision rails-default.
+  railsEnabled: true,
   backgroundControlMode: true,
 };
 
@@ -656,6 +683,14 @@ const DEFAULT_APPEARANCE: AppearanceConfig = {
 export function getAppearance(): AppearanceConfig {
   const config = readGlobalConfig();
   return { ...DEFAULT_APPEARANCE, ...config.appearance };
+}
+
+/** Raw stored appearance (no default merge) — for echo paths where a merged
+ * default would clobber webview-local state (view modes: an echoed default
+ * 'show' would override a pre-upgrade collapse that lived only in webview
+ * state; undefined lets the webview's own state win). */
+export function getRawAppearance(): Partial<AppearanceConfig> {
+  return { ...readGlobalConfig().appearance };
 }
 
 /** Merge partial appearance updates into global config */
