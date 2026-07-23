@@ -16,6 +16,41 @@
 
 const STATUSES = ['draft', 'active', 'decided', 'superseded', 'done'];
 
+// ── Plan-html sanitizer ──────────────────────────────────────────────
+// Plan html is untrusted (any vendor/agent authors it) and renders in a
+// shadow root with NO CSP backstop on the hub (standalone/Tauri) path.
+// Shadow DOM does NOT sandbox execution, so all active content must be
+// neutralized. This is a hardened denylist, not DOMPurify — DOMPurify is
+// not a dependency of this repo, and plan bodies are semi-trusted +
+// isolated; vendor DOMPurify if that threat model tightens. Covers the
+// vectors an automated review flagged: dangerous elements, every URL-
+// bearing attribute, and data: URIs (only safe raster images allowed —
+// SVG excluded because it can carry script).
+const PLAN_BLOCK_TAGS =
+  'script,iframe,object,embed,meta,base,link,form,param,applet,frame,frameset,noscript';
+const PLAN_URL_ATTRS = [
+  'href', 'src', 'xlink:href', 'srcdoc', 'formaction', 'action',
+  'data', 'background', 'poster', 'ping',
+];
+const PLAN_SAFE_DATA_IMG = /^data:image\/(png|jpe?g|gif|webp)[;,]/;
+function sanitizePlanDoc(doc) {
+  // Whole document (head + body): a leading <style> is routed to <head> and
+  // carried across, so head must be scrubbed too.
+  doc.querySelectorAll(PLAN_BLOCK_TAGS).forEach((n) => n.remove());
+  for (const node of doc.querySelectorAll('*')) {
+    for (const attr of [...node.attributes]) {
+      const n = attr.name.toLowerCase();
+      if (n.startsWith('on')) { node.removeAttribute(attr.name); continue; }
+      if (PLAN_URL_ATTRS.includes(n)) {
+        const v = (attr.value || '').replace(/\s+/g, '').toLowerCase();
+        const bad = v.startsWith('javascript:') || v.startsWith('vbscript:')
+          || (v.startsWith('data:') && !PLAN_SAFE_DATA_IMG.test(v));
+        if (bad) node.removeAttribute(attr.name);
+      }
+    }
+  }
+}
+
 function el(tag, cls, text) {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
@@ -183,19 +218,7 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
     // active content, not just <script>: inline on*= handlers and
     // javascript:/data: URLs execute even with scripts removed, and the hub
     // (standalone/Tauri) has no CSP backstop like the VS Code webview does.
-    // Whole document (head + body): head <style> is carried across, so a
-    // <script> or on*= there must be neutralized too.
-    doc.querySelectorAll('script').forEach(s => s.remove());
-    for (const node of doc.querySelectorAll('*')) {
-      for (const attr of [...node.attributes]) {
-        const n = attr.name.toLowerCase();
-        const v = (attr.value || '').replace(/\s+/g, '').toLowerCase();
-        if (n.startsWith('on') || ((n === 'href' || n === 'src' || n === 'xlink:href')
-            && (v.startsWith('javascript:') || v.startsWith('data:text/html')))) {
-          node.removeAttribute(attr.name);
-        }
-      }
-    }
+    sanitizePlanDoc(doc);
 
     // ── Local form state — plain in-memory, discarded on close. Selecting
     //    and typing never wakes anyone; only Submit persists. ──
