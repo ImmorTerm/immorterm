@@ -1372,6 +1372,17 @@
       <div id="status-indicator"></div>
       <button id="sidebar-expand-btn" title="Show sessions">&lsaquo;</button>
       <button id="file-browser-expand-btn" title="Show files">&rsaquo;</button>
+      <!-- Layout cluster: toggles for the always-present panes only. A workshop-
+           panel toggle is deliberately omitted — #workshop-panel is an on-demand
+           surface (auto-hidden when the active session has zero open workshops),
+           so a layout toggle for it would report a visible pane while none shows
+           and no-op on click. It needs a product decision (disabled-when-empty
+           semantics) before it earns a slot here. -->
+      <div id="layout-cluster" role="group" aria-label="Layout">
+        <button class="layout-btn" id="layout-files" type="button" title="Toggle file browser" aria-pressed="false"><span class="codicon codicon-layout-sidebar-left"></span></button>
+        <button class="layout-btn" id="layout-sidebar" type="button" title="Toggle sessions sidebar" aria-pressed="false"><span class="codicon codicon-layout-sidebar-right"></span></button>
+        <button class="layout-btn" id="layout-rails" type="button" title="Toggle activity bar" aria-pressed="false"><span class="codicon codicon-layout-activitybar-left"></span></button>
+      </div>
     </div>
     <!-- Workshop panel: dedicated column for AI-authored persistent webview
          panes. Lives between the terminal area and the sessions sidebar so
@@ -3351,6 +3362,7 @@
         const btn = document.getElementById('rail-' + name);
         if (btn) btn.classList.toggle('active', v.activeWhen(v.get()));
       }
+      syncLayoutCluster();
     }
 
     // Shared edge-hover auto-reveal: chevron mouseenter reveals, panel
@@ -3699,6 +3711,7 @@
       const p = new URLSearchParams(location.search).get('rails');
       const on = p === '1' ? true : p === '0' ? false : !!enabled;
       document.body.classList.toggle('with-rails', on);
+      syncLayoutCluster();
     }
 
     // D2 layout override: { left:[names], right:[names], hidden:[names] }.
@@ -3841,6 +3854,36 @@
       renderRails();
     }
     queueMicrotask(bootRestoreViews);
+
+    // ── Layout-toggle cluster (top-right of #terminal-area) ──
+    // VS Code-style layout controls that show/hide WHOLE panes, complementary
+    // to the activity rails. Each button reuses the existing view registry
+    // (toggleView self-persists) or, for rails, the railsEnabled pref. Purely
+    // additive: no pane-collapse mechanism is changed. syncLayoutCluster only
+    // reads live state (aria-pressed + accent), never writes pane state.
+    const LAYOUT_BTNS = {
+      files:     { el: document.getElementById('layout-files'),     active: () => VIEWS.files.activeWhen(getViewMode('files')) },
+      sidebar:   { el: document.getElementById('layout-sidebar'),   active: () => VIEWS.sessions.activeWhen(getViewMode('sessions')) },
+      rails:     { el: document.getElementById('layout-rails'),     active: () => document.body.classList.contains('with-rails') },
+    };
+    function syncLayoutCluster() {
+      for (const k in LAYOUT_BTNS) {
+        const b = LAYOUT_BTNS[k]; if (!b.el) continue;
+        const on = b.active();
+        b.el.classList.toggle('is-active', on);
+        b.el.setAttribute('aria-pressed', String(on));
+      }
+    }
+    LAYOUT_BTNS.files.el.addEventListener('click', () => { toggleView('files'); focusInput(); });
+    LAYOUT_BTNS.sidebar.el.addEventListener('click', () => { toggleView('sessions'); focusInput(); });
+    LAYOUT_BTNS.rails.el.addEventListener('click', () => {
+      const on = !document.body.classList.contains('with-rails');
+      document.body.classList.toggle('with-rails', on);                                 // user intent — bypasses applyRailsPref's ?rails= override on purpose
+      vscode.setState({ ...(vscode.getState() || {}), railsEnabled: on });              // fast-path for bootRestoreViews' applyRailsPref(saved.railsEnabled)
+      vscode.postMessage({ type: 'save-preference', key: 'railsEnabled', value: on });  // authoritative host round-trip (mirrors setViewMode's post)
+      syncLayoutCluster();
+      focusInput();
+    });
 
     // ── Tasks Panel: Mode (show / auto-reveal / hidden) ──
     let tasksMode = 'show';

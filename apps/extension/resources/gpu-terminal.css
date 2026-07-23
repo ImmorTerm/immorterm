@@ -383,6 +383,33 @@ body.with-tab-bar #container {
   opacity: 1;
 }
 #sidebar-expand-btn.visible { display: block; }
+/* Sits below #layout-cluster (top:8px) so the collapsed-sidebar chevron doesn't
+   overlap the cluster in the shared top-right corner. Behavior unchanged. */
+#sidebar-expand-btn { top: 44px; }
+
+/* ── Layout-toggle cluster: VS Code-style whole-pane show/hide controls ── */
+#layout-cluster {
+  position: absolute; top: 8px; right: 8px; z-index: 101;
+  display: flex; gap: 2px; padding: 2px;
+  background: color-mix(in srgb, var(--sidebar-bg, #181825) 82%, transparent);
+  border: 1px solid var(--sidebar-border, #313244); border-radius: 6px;
+}
+#layout-cluster .layout-btn {
+  width: 26px; height: 24px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; border: 0; border-radius: 4px;
+  color: var(--sidebar-muted, #a6adc8); cursor: pointer;
+  transition: transform 0.16s var(--tile-ease-out), color 0.15s var(--tile-ease-out), background 0.15s var(--tile-ease-out);
+}
+#layout-cluster .layout-btn .codicon { font-size: 16px; }
+#layout-cluster .layout-btn:hover { color: var(--sidebar-text, #cdd6f4); background: color-mix(in srgb, var(--sidebar-accent, #b482ff) 14%, transparent); }
+#layout-cluster .layout-btn:focus-visible { outline: 1px solid var(--sidebar-accent, #b482ff); outline-offset: -1px; }
+#layout-cluster .layout-btn:active { transform: scale(0.86); transition-timing-function: var(--tile-spring); }
+#layout-cluster .layout-btn.is-active { color: var(--sidebar-accent, #b482ff); background: color-mix(in srgb, var(--sidebar-accent, #b482ff) 22%, transparent); }
+@media (prefers-reduced-motion: reduce) {
+  #layout-cluster .layout-btn { transition: color 0.15s, background 0.15s; }
+  #layout-cluster .layout-btn:active { transform: none; }
+}
 
 /* ── Resize handle (left edge of sidebar) ── */
 #sidebar-resize-handle {
