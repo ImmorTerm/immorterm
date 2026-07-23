@@ -1907,6 +1907,68 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
 
+        // ── Plan tools — project-scoped visual briefs with history ─────
+        json!({
+            "name": "immorterm_plan",
+            "description": "Create or update a Plan — a project-scoped visual brief (status, decisions needed, what's next) shown in the ImmorTerm Plans sidebar. Idempotent on `id`: calling again with the same id SUPERSEDES the current version (the prior version is kept under history/, newest 20 retained), and a call with identical content is a no-op — nothing is written or duplicated. Persists to ~/.immorterm/plans/<project>/<id>/ and survives daemon restarts. Returns the stored plan id + a stable plan:// reference.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Stable slug identifying the plan across updates. [a-zA-Z0-9_.-], max 64 chars, no path separators." },
+                    "title": { "type": "string", "description": "Human-readable plan title." },
+                    "status": { "type": "string", "enum": ["draft", "active", "decided", "superseded", "done"], "description": "Plan lifecycle status. Default: 'draft' on create, unchanged on update." },
+                    "summary": { "type": "string", "description": "One-line summary for the sidebar row." },
+                    "html": { "type": "string", "description": "Self-contained visual brief body (same Shadow-DOM rules as open_workshop). Omit on update to keep the current html." },
+                    "decisions": {
+                        "type": "array",
+                        "description": "Open decisions the user owns. Replaces the full decisions array when provided; resolved flags on matching decision ids are preserved.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string", "description": "Stable decision id within the plan." },
+                                "label": { "type": "string", "description": "What is being decided." },
+                                "options": { "type": "array", "items": { "type": "string" }, "description": "The candidate options." },
+                                "recommendation": { "type": "string", "description": "The recommended option." },
+                                "resolved": { "type": "boolean", "description": "Whether the decision is resolved. Default: prior value for a matching decision id, else false." }
+                            },
+                            "required": ["id", "label"]
+                        }
+                    },
+                    "project": { "type": "string", "description": "Project scope. Default: auto-derived from cwd (git remote → .claude/project-id → folder name), same as tasks." }
+                },
+                "required": ["id", "title"]
+            }
+        }),
+        json!({
+            "name": "immorterm_list_plans",
+            "description": "List plans for the current project (or read one in full). Without `id`: one row per plan — id, title, status, summary, unresolved decision count, updatedAt, revision count. With `id`: the full current version (html included) plus the list of history version stems. With `id` + `history`: that stored history version's record instead of the current one.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Read this plan in full instead of listing." },
+                    "history": { "type": "string", "description": "With `id`: a history version stem from the history list (e.g. '1721760000000-r3') — returns that version's record instead of the current one." },
+                    "status": { "type": "string", "enum": ["draft", "active", "decided", "superseded", "done"], "description": "Filter list by status." },
+                    "project": { "type": "string", "description": "Project scope. Default: auto-derived from cwd." }
+                },
+                "required": []
+            }
+        }),
+        json!({
+            "name": "immorterm_resolve_plan_decision",
+            "description": "Mark a decision inside a plan as resolved (or unresolved). Records which option was chosen. Updates current.json in place (no new history version) and notifies open webviews.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "plan_id": { "type": "string", "description": "The plan's stable id." },
+                    "decision_id": { "type": "string", "description": "The decision id inside the plan." },
+                    "resolution": { "type": "string", "description": "The chosen option (free text)." },
+                    "resolved": { "type": "boolean", "description": "Default true. Pass false to reopen." },
+                    "project": { "type": "string", "description": "Project scope. Default: auto-derived from cwd." }
+                },
+                "required": ["plan_id", "decision_id"]
+            }
+        }),
+
         // ───────────────────────────────────────────────────────────────
         // App-control tools — drive the Tauri ImmorTerm app shell itself
         // (tabs, picker, windows, snapshots). Backed by the Tauri-side
@@ -2314,6 +2376,10 @@ fn handle_tool_call(
         "immorterm_update_task" => handle_update_task(&arguments),
         "immorterm_list_tasks" => handle_list_tasks(&arguments),
         "immorterm_delete_task" => handle_delete_task(&arguments),
+        // Plan tools
+        "immorterm_plan" => handle_plan(&arguments, rt),
+        "immorterm_list_plans" => handle_list_plans(&arguments),
+        "immorterm_resolve_plan_decision" => handle_resolve_plan_decision(&arguments, rt),
         // App-control tools — proxy to Tauri's localhost:1443 control API.
         "immorterm_app_list_windows" => handle_app_call("list_windows", &arguments),
         "immorterm_app_list_tabs" => handle_app_call("list_tabs", &arguments),
@@ -4708,12 +4774,8 @@ fn get_stable_project_id() -> Result<String, String> {
     }
 
     // 2. Try .claude/project-id file
-    let project_id_path = cwd.join(".claude").join("project-id");
-    if let Ok(id) = std::fs::read_to_string(&project_id_path) {
-        let id = id.trim().to_string();
-        if !id.is_empty() {
-            return Ok(id);
-        }
+    if let Some(id) = project_id_from_file(&cwd) {
+        return Ok(id);
     }
 
     // 3. Folder name fallback
@@ -4722,6 +4784,20 @@ fn get_stable_project_id() -> Result<String, String> {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "unnamed-project".to_string());
     Ok(sanitize_project_id(&folder))
+}
+
+/// Branch 2 of `get_stable_project_id`: the optional `.claude/project-id`
+/// override file. Sanitized — the file is repo-controlled content that becomes
+/// a path component under ~/.immorterm (tasks AND plans), so raw traversal
+/// like `../../../evil` must not pass through.
+fn project_id_from_file(cwd: &std::path::Path) -> Option<String> {
+    let id = std::fs::read_to_string(cwd.join(".claude").join("project-id")).ok()?;
+    let id = id.trim();
+    if id.is_empty() {
+        None
+    } else {
+        Some(sanitize_project_id(id))
+    }
 }
 
 fn extract_user_repo(url: &str) -> Option<String> {
@@ -4979,6 +5055,490 @@ fn handle_delete_task(args: &Value) -> Result<String, String> {
     Ok(format!("Deleted task {}", task_id))
 }
 
+// ─── Plan tool implementations ────────────────────────────────────────
+//
+// Plans are project-scoped visual briefs with history, persisted like tasks
+// (MCP-process file IO, no daemon state) under:
+//   ~/.immorterm/plans/<project_id>/<plan_id>/
+//     current.json               full record (html + decisions included)
+//     current.html               standalone doctype document for file:// pop-out
+//     history/<ms>-r<rev>.json   superseded versions (newest 20 kept)
+//     .lock                      flock serializing cross-process writes
+// The only daemon involvement is a best-effort NotifyPlanChanged IPC that
+// re-uses the workshop broadcast channel — emitted for the S4 Plans sidebar,
+// which is not built yet; no client consumes the event today.
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Validate a plan id — same rules as the daemon's `validate_workshop_name`:
+/// ids become path components under ~/.immorterm/plans/<project>/<id>/ so
+/// path traversal would let a misbehaving MCP client write anywhere.
+fn validate_plan_id(id: &str) -> Result<(), String> {
+    if id.is_empty() {
+        return Err("Plan id cannot be empty".into());
+    }
+    if id.len() > 64 {
+        return Err("Plan id too long (max 64 chars)".into());
+    }
+    if id.contains('/') || id.contains('\\') || id == "." || id.contains("..") {
+        return Err("Plan id must not contain path separators or '..'".into());
+    }
+    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+        return Err("Plan id may only contain [a-zA-Z0-9_.-]".into());
+    }
+    Ok(())
+}
+
+fn plans_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(home_dir())
+        .join(".immorterm")
+        .join("plans")
+}
+
+fn plan_dir(project: &str, id: &str) -> std::path::PathBuf {
+    plans_root().join(project).join(id)
+}
+
+fn resolve_plan_project(args: &Value) -> Result<String, String> {
+    match args.get("project").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => Ok(sanitize_project_id(p)),
+        _ => get_stable_project_id(),
+    }
+}
+
+fn read_plan(dir: &std::path::Path) -> Result<Option<Value>, String> {
+    let path = dir.join("current.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&path).map_err(|e| format!("Read error: {}", e))?;
+    serde_json::from_str(&content)
+        .map(Some)
+        .map_err(|e| format!("Parse error: {}", e))
+}
+
+/// Atomic write: tmp + rename (same pattern as `write_tasks`). The tmp name
+/// is per-process so concurrent writers can't rename each other's tmp out
+/// from under themselves.
+fn atomic_write_json(path: &std::path::Path, value: &Value) -> Result<(), String> {
+    let content =
+        serde_json::to_string_pretty(value).map_err(|e| format!("Serialize error: {}", e))?;
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, &content).map_err(|e| format!("Write error: {}", e))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("Rename error: {}", e))?;
+    Ok(())
+}
+
+/// Advisory per-plan lock: flock(2) on `<dir>/.lock`, held for the duration
+/// of a read-modify-write so concurrent MCP processes (multi-agent sessions
+/// on one project) serialize instead of silently losing updates. Released on
+/// drop. Read-only paths stay lock-free — rename atomicity is enough there.
+fn lock_plan_dir(dir: &std::path::Path) -> Result<nix::fcntl::Flock<std::fs::File>, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("mkdir error: {}", e))?;
+    let file = std::fs::File::create(dir.join(".lock"))
+        .map_err(|e| format!("Lock open error: {}", e))?;
+    nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive)
+        .map_err(|(_, e)| format!("Lock error: {}", e))
+}
+
+// ponytail: hard cap of 20 history revisions per plan — every supersede
+// snapshots the full record (html can be hundreds of KB), so unbounded growth
+// is real; prune oldest-first. Raise the cap or archive elsewhere if deeper
+// archaeology is ever needed.
+const PLAN_HISTORY_CAP: usize = 20;
+
+/// Revision from a history file stem (`<updatedAt_ms>-r<revision>`); 0 when
+/// unparseable so junk sorts oldest and is pruned first.
+fn history_stem_revision(stem: &str) -> u64 {
+    stem.rsplit("-r").next().and_then(|p| p.parse().ok()).unwrap_or(0)
+}
+
+fn prune_history(history: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(history) else { return };
+    let mut files: Vec<std::path::PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    if files.len() <= PLAN_HISTORY_CAP {
+        return;
+    }
+    files.sort_by_key(|p| {
+        p.file_stem()
+            .map(|s| history_stem_revision(&s.to_string_lossy()))
+            .unwrap_or(0)
+    });
+    for old in files.iter().take(files.len() - PLAN_HISTORY_CAP) {
+        let _ = std::fs::remove_file(old);
+    }
+}
+
+/// Persist a plan record: snapshot the existing current.json into history/,
+/// atomically write the new current.json, and (best-effort) mirror the html
+/// into a standalone current.html for file:// pop-out — same doctype wrapping
+/// as the daemon's `persist_workshop`. The snapshot is copy-then-replace, not
+/// rename-then-write, so a crash between the two steps still leaves a valid
+/// current.json.
+fn write_plan(dir: &std::path::Path, plan: &Value) -> Result<(), String> {
+    let history = dir.join("history");
+    std::fs::create_dir_all(&history).map_err(|e| format!("mkdir error: {}", e))?;
+    let current = dir.join("current.json");
+    if current.exists() {
+        let old: Option<Value> = std::fs::read_to_string(&current)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok());
+        let field = |f: &str| old.as_ref().and_then(|v| v.get(f).and_then(|x| x.as_u64()));
+        let old_ts = field("updatedAt").unwrap_or_else(now_ms);
+        // Revision is strictly increasing, so the name is collision-free.
+        let dest = history.join(format!("{}-r{}.json", old_ts, field("revision").unwrap_or(0)));
+        std::fs::copy(&current, &dest).map_err(|e| format!("History copy error: {}", e))?;
+    }
+    atomic_write_json(&current, plan)?;
+    prune_history(&history);
+    // Best-effort pop-out document — the JSON is the source of truth, a failed
+    // html mirror must not fail the store (matches persist_workshop tolerance).
+    // The free-text title is entity-escaped: it lands inside <title> and must
+    // not break out of the head. The body html is raw by design.
+    let title = plan
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    let document = format!(
+        "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>{title}</title></head>\n<body>{html}</body></html>",
+        html = plan.get("html").and_then(|v| v.as_str()).unwrap_or(""),
+    );
+    let _ = std::fs::write(dir.join("current.html"), document);
+    Ok(())
+}
+
+/// Carry forward `resolved`/`resolution` from old decisions with matching ids
+/// unless the new decision explicitly sets them; default new decisions to
+/// unresolved.
+fn merge_decisions(new: &mut [Value], old: &[Value]) {
+    for d in new.iter_mut() {
+        if !d.is_object() {
+            continue;
+        }
+        let old_match = d.get("id").and_then(|i| i.as_str()).and_then(|id| {
+            old.iter()
+                .find(|o| o.get("id").and_then(|i| i.as_str()) == Some(id))
+        });
+        if d.get("resolved").is_none() {
+            d["resolved"] = old_match
+                .and_then(|o| o.get("resolved").cloned())
+                .unwrap_or(json!(false));
+        }
+        if d.get("resolution").is_none() {
+            d["resolution"] = old_match
+                .and_then(|o| o.get("resolution").cloned())
+                .unwrap_or(Value::Null);
+        }
+    }
+}
+
+/// Build the full plan record for a create or supersede. Pure — all file IO
+/// stays in the callers so this is unit-testable without touching HOME.
+fn build_plan_record(
+    existing: Option<&Value>,
+    args: &Value,
+    project: &str,
+    id: &str,
+    title: &str,
+    now: u64,
+) -> Value {
+    let old_decisions: Vec<Value> = existing
+        .and_then(|e| e.get("decisions").and_then(|d| d.as_array()).cloned())
+        .unwrap_or_default();
+    let mut decisions = match args.get("decisions").and_then(|d| d.as_array()) {
+        Some(new) => new.clone(),
+        None => old_decisions.clone(),
+    };
+    merge_decisions(&mut decisions, &old_decisions);
+
+    // Field precedence: explicit arg → existing value → default.
+    let inherit = |field: &str, default: &str| -> String {
+        args.get(field)
+            .and_then(|v| v.as_str())
+            .or_else(|| existing.and_then(|e| e.get(field).and_then(|v| v.as_str())))
+            .unwrap_or(default)
+            .to_string()
+    };
+    let created_at = existing
+        .and_then(|e| e.get("createdAt").and_then(|v| v.as_u64()))
+        .unwrap_or(now);
+    let revision = existing
+        .and_then(|e| e.get("revision").and_then(|v| v.as_u64()))
+        .unwrap_or(0)
+        + 1;
+    json!({
+        "version": 1,
+        "id": id,
+        "title": title,
+        "status": inherit("status", "draft"),
+        "summary": inherit("summary", ""),
+        "html": inherit("html", ""),
+        "decisions": decisions,
+        "project": project,
+        "createdAt": created_at,
+        "updatedAt": now,
+        "revision": revision,
+    })
+}
+
+fn unresolved_count(plan: &Value) -> u64 {
+    plan.get("decisions")
+        .and_then(|d| d.as_array())
+        .map(|a| {
+            a.iter()
+                .filter(|d| d.get("resolved").and_then(|r| r.as_bool()) != Some(true))
+                .count() as u64
+        })
+        .unwrap_or(0)
+}
+
+/// Flip a decision's resolved flag in place. Pure — callers persist.
+fn resolve_decision_in_plan(
+    plan: &mut Value,
+    decision_id: &str,
+    resolved: bool,
+    resolution: Option<&str>,
+    now: u64,
+) -> Result<(), String> {
+    let decisions = plan
+        .get_mut("decisions")
+        .and_then(|d| d.as_array_mut())
+        .ok_or("Plan has no decisions")?;
+    let decision = decisions
+        .iter_mut()
+        .find(|d| d.get("id").and_then(|i| i.as_str()) == Some(decision_id))
+        .ok_or_else(|| format!("Decision not found: {}", decision_id))?;
+    decision["resolved"] = json!(resolved);
+    if let Some(r) = resolution {
+        decision["resolution"] = json!(r);
+    } else if !resolved {
+        decision["resolution"] = Value::Null;
+    }
+    plan["updatedAt"] = json!(now);
+    Ok(())
+}
+
+/// Best-effort: tell the caller's session daemon a plan changed. The daemon
+/// fans a `plan_changed` envelope out over the workshop broadcast channel for
+/// the S4 Plans sidebar consumer — which is not built yet, so today the
+/// broadcast is a no-op emission. A plan write with no live session must
+/// still succeed — files are the source of truth.
+// ponytail: notifies the caller's session only, and silently skips when no
+// session resolves (several live sessions and no IMMORTERM_SESSION env) —
+// those cases catch up via list/fs.watch; project-wide fanout when S4 needs
+// it.
+fn notify_plan_changed(project: &str, id: &str, plan: &Value, rt: &tokio::runtime::Runtime) {
+    let Ok(session) = resolve_session(&json!({})) else {
+        return;
+    };
+    let _ = simple_ipc_query(
+        &session,
+        Request::NotifyPlanChanged {
+            project: project.to_string(),
+            id: id.to_string(),
+            status: plan.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            title: plan.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            summary: plan.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            unresolved_decisions: unresolved_count(plan),
+        },
+        rt,
+    );
+}
+
+/// Structural equality ignoring the write-tracking fields (`updatedAt`,
+/// `revision`) — the content-idempotency test for `immorterm_plan`.
+fn plan_content_eq(a: &Value, b: &Value) -> bool {
+    let strip = |v: &Value| {
+        let mut v = v.clone();
+        if let Some(o) = v.as_object_mut() {
+            o.remove("updatedAt");
+            o.remove("revision");
+        }
+        v
+    };
+    strip(a) == strip(b)
+}
+
+/// Create-or-update core of `immorterm_plan`, dir-scoped so tests can drive
+/// it without touching HOME. Returns the stored record plus whether anything
+/// was written. Callers hold the plan-dir lock.
+fn upsert_plan(
+    dir: &std::path::Path,
+    args: &Value,
+    project: &str,
+    id: &str,
+    title: &str,
+    now: u64,
+) -> Result<(Value, bool), String> {
+    let existing = match read_plan(dir) {
+        Ok(e) => e,
+        // A corrupt current.json must not brick the id forever: side-line it
+        // and treat the call as a fresh create. Only the writer recovers —
+        // read paths (list/resolve) keep strict propagation.
+        Err(e) if e.starts_with("Parse error") => {
+            let current = dir.join("current.json");
+            let _ = std::fs::rename(&current, dir.join("current.json.corrupt"));
+            None
+        }
+        Err(e) => return Err(e),
+    };
+    let plan = build_plan_record(existing.as_ref(), args, project, id, title, now);
+    // Content-idempotent: an identical record (minus updatedAt/revision) is a
+    // no-op — no write, no revision bump, no history entry.
+    if let Some(old) = existing
+        && plan_content_eq(&old, &plan)
+    {
+        return Ok((old, false));
+    }
+    write_plan(dir, &plan)?;
+    Ok((plan, true))
+}
+
+fn handle_plan(args: &Value, rt: &tokio::runtime::Runtime) -> Result<String, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing required field: id")?;
+    validate_plan_id(id)?;
+    let title = args
+        .get("title")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing required field: title")?;
+    let project = resolve_plan_project(args)?;
+    let dir = plan_dir(&project, id);
+    let lock = lock_plan_dir(&dir)?;
+    let (plan, wrote) = upsert_plan(&dir, args, &project, id, title, now_ms())?;
+    drop(lock);
+    if wrote {
+        notify_plan_changed(&project, id, &plan, rt);
+    }
+    Ok(format!(
+        "{} plan '{}' (rev {}, status {}). Reference: plan://{}/{} — file: {}",
+        if wrote { "Stored" } else { "Unchanged" },
+        title,
+        plan.get("revision").and_then(|v| v.as_u64()).unwrap_or(1),
+        plan.get("status").and_then(|v| v.as_str()).unwrap_or("draft"),
+        project,
+        id,
+        dir.join("current.json").display()
+    ))
+}
+
+fn handle_list_plans(args: &Value) -> Result<String, String> {
+    let project = resolve_plan_project(args)?;
+
+    // With `id`: full current record + history version stems as JSON.
+    if let Some(id) = args.get("id").and_then(|v| v.as_str()) {
+        validate_plan_id(id)?;
+        let dir = plan_dir(&project, id);
+        // With `history` too: that stored version's record instead of current.
+        if let Some(stem) = args.get("history").and_then(|v| v.as_str()) {
+            // Stems become path components — same validation as plan ids.
+            validate_plan_id(stem)?;
+            let path = dir.join("history").join(format!("{}.json", stem));
+            let content = std::fs::read_to_string(&path)
+                .map_err(|_| format!("History version not found: {}", stem))?;
+            let plan: Value =
+                serde_json::from_str(&content).map_err(|e| format!("Parse error: {}", e))?;
+            return serde_json::to_string(&json!({ "plan": plan })).map_err(|e| e.to_string());
+        }
+        let plan = read_plan(&dir)?.ok_or_else(|| format!("Plan not found: {}", id))?;
+        let mut history: Vec<String> = std::fs::read_dir(dir.join("history"))
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|e| e.path().file_stem().map(|s| s.to_string_lossy().to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Stems are `<updatedAt_ms>-r<revision>` — revision is strictly
+        // increasing, so it alone gives chronological order.
+        history.sort_by_key(|s| history_stem_revision(s));
+        return serde_json::to_string(&json!({ "plan": plan, "history": history }))
+            .map_err(|e| e.to_string());
+    }
+
+    // Without `id`: one compact row per plan (mirrors handle_list_tasks).
+    let status_filter = args.get("status").and_then(|v| v.as_str());
+    let mut plans: Vec<Value> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(plans_root().join(&project)) {
+        for entry in entries.flatten() {
+            if let Ok(Some(plan)) = read_plan(&entry.path()) {
+                if let Some(status) = status_filter
+                    && plan.get("status").and_then(|s| s.as_str()) != Some(status)
+                {
+                    continue;
+                }
+                plans.push(plan);
+            }
+        }
+    }
+    if plans.is_empty() {
+        return Ok("No plans found.".to_string());
+    }
+    plans.sort_by_key(|p| std::cmp::Reverse(p.get("updatedAt").and_then(|v| v.as_u64()).unwrap_or(0)));
+
+    let lines: Vec<String> = plans
+        .iter()
+        .map(|p| {
+            format!(
+                "[{}] {} — {} ({}, rev {}, {} open decisions)",
+                p.get("status").and_then(|v| v.as_str()).unwrap_or("?"),
+                p.get("title").and_then(|v| v.as_str()).unwrap_or("?"),
+                p.get("summary").and_then(|v| v.as_str()).unwrap_or(""),
+                p.get("id").and_then(|v| v.as_str()).unwrap_or("?"),
+                p.get("revision").and_then(|v| v.as_u64()).unwrap_or(1),
+                unresolved_count(p),
+            )
+        })
+        .collect();
+    Ok(format!("{} plan(s):\n{}", plans.len(), lines.join("\n")))
+}
+
+fn handle_resolve_plan_decision(args: &Value, rt: &tokio::runtime::Runtime) -> Result<String, String> {
+    let plan_id = args
+        .get("plan_id")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing required field: plan_id")?;
+    validate_plan_id(plan_id)?;
+    let decision_id = args
+        .get("decision_id")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing required field: decision_id")?;
+    let resolved = args.get("resolved").and_then(|v| v.as_bool()).unwrap_or(true);
+    let resolution = args.get("resolution").and_then(|v| v.as_str());
+
+    let project = resolve_plan_project(args)?;
+    let dir = plan_dir(&project, plan_id);
+    let lock = lock_plan_dir(&dir)?;
+    let mut plan = read_plan(&dir)?.ok_or_else(|| format!("Plan not found: {}", plan_id))?;
+    resolve_decision_in_plan(&mut plan, decision_id, resolved, resolution, now_ms())?;
+    // In-place atomic rewrite of current.json only — resolving a decision is
+    // not a supersede, so no history version is created.
+    atomic_write_json(&dir.join("current.json"), &plan)?;
+    drop(lock);
+    notify_plan_changed(&project, plan_id, &plan, rt);
+
+    Ok(if resolved {
+        format!(
+            "Resolved decision '{}' in plan '{}' → '{}'",
+            decision_id,
+            plan_id,
+            resolution.unwrap_or("(no resolution recorded)")
+        )
+    } else {
+        format!("Reopened decision '{}' in plan '{}'", decision_id, plan_id)
+    })
+}
+
 /// Count tasks by status.
 fn task_counts(tasks: &[immorterm_core::team::TeamTask]) -> (usize, usize, usize) {
     use immorterm_core::team::TaskStatus;
@@ -5068,5 +5628,235 @@ mod tests {
         ] {
             assert!(!is_dead_pipe(msg), "should NOT be dead-pipe: {msg}");
         }
+    }
+
+    #[test]
+    fn plan_id_rejects_traversal() {
+        let too_long = "x".repeat(65);
+        for bad in ["", "a/b", "a\\b", ".", "..", "x..y", too_long.as_str()] {
+            assert!(validate_plan_id(bad).is_err(), "should reject: {bad:?}");
+        }
+        assert!(validate_plan_id("s3-plans_v1.2").is_ok());
+    }
+
+    #[test]
+    fn plan_update_supersedes_and_keeps_history() {
+        let dir = std::env::temp_dir().join(format!(
+            "immorterm-plan-supersede-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let v1 = build_plan_record(None, &json!({}), "proj", "p1", "First", 1000);
+        write_plan(&dir, &v1).unwrap();
+        let stored = read_plan(&dir).unwrap().unwrap();
+        let v2 = build_plan_record(
+            Some(&stored),
+            &json!({ "status": "active" }),
+            "proj",
+            "p1",
+            "Second",
+            2000,
+        );
+        write_plan(&dir, &v2).unwrap();
+
+        let current = read_plan(&dir).unwrap().unwrap();
+        assert_eq!(current["title"], "Second");
+        assert_eq!(current["status"], "active");
+        assert_eq!(current["revision"], 2);
+        assert_eq!(current["createdAt"], 1000); // carried forward from v1
+
+        let history: Vec<_> = std::fs::read_dir(dir.join("history"))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(history.len(), 1);
+        // Named `<updatedAt>-r<revision>` of the superseded version.
+        assert_eq!(history[0].file_name().to_string_lossy(), "1000-r1.json");
+        let old: Value =
+            serde_json::from_str(&std::fs::read_to_string(history[0].path()).unwrap()).unwrap();
+        assert_eq!(old["title"], "First");
+        assert_eq!(old["revision"], 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_id_file_is_sanitized() {
+        let dir = std::env::temp_dir().join(format!(
+            "immorterm-project-id-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        std::fs::write(dir.join(".claude").join("project-id"), "../../../evil\n").unwrap();
+        // Traversal cannot escape — non-alphanumerics collapse to '-' and get
+        // trimmed, so the id is always a bare path component.
+        assert_eq!(project_id_from_file(&dir).unwrap(), "evil");
+        assert_eq!(sanitize_project_id("../.."), "unnamed-project");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plan_upsert_is_content_idempotent() {
+        let dir = std::env::temp_dir().join(format!(
+            "immorterm-plan-idempotent-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let args = json!({ "summary": "s", "html": "<b>x</b>" });
+        let (v1, wrote1) = upsert_plan(&dir, &args, "proj", "p1", "T", 1000).unwrap();
+        assert!(wrote1);
+        assert_eq!(v1["revision"], 1);
+
+        // Identical content later → stored record returned untouched: no
+        // write, no revision bump, no history entry.
+        let (v2, wrote2) = upsert_plan(&dir, &args, "proj", "p1", "T", 2000).unwrap();
+        assert!(!wrote2);
+        assert_eq!(v2["revision"], 1);
+        assert_eq!(v2["updatedAt"], 1000);
+        assert_eq!(
+            std::fs::read_dir(dir.join("history")).unwrap().flatten().count(),
+            0
+        );
+
+        // Changed content → supersedes as usual.
+        let (v3, wrote3) =
+            upsert_plan(&dir, &json!({ "summary": "s2" }), "proj", "p1", "T", 3000).unwrap();
+        assert!(wrote3);
+        assert_eq!(v3["revision"], 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_current_json_recovers_on_write() {
+        let dir = std::env::temp_dir().join(format!(
+            "immorterm-plan-corrupt-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("current.json"), "{ not json").unwrap();
+
+        // Read paths stay strict…
+        assert!(read_plan(&dir).is_err());
+        // …but the writer side-lines the corrupt file and recreates fresh.
+        let (v, wrote) = upsert_plan(&dir, &json!({}), "proj", "p1", "T", 1000).unwrap();
+        assert!(wrote);
+        assert_eq!(v["revision"], 1);
+        assert!(dir.join("current.json.corrupt").exists());
+        assert_eq!(read_plan(&dir).unwrap().unwrap()["title"], "T");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plan_history_is_capped() {
+        let dir = std::env::temp_dir().join(format!(
+            "immorterm-plan-history-cap-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        for i in 0..(PLAN_HISTORY_CAP as u64 + 5) {
+            let args = json!({ "summary": format!("v{}", i) });
+            upsert_plan(&dir, &args, "proj", "p1", "T", 1000 + i).unwrap();
+        }
+        let revisions: Vec<u64> = std::fs::read_dir(dir.join("history"))
+            .unwrap()
+            .flatten()
+            .filter_map(|e| {
+                e.path()
+                    .file_stem()
+                    .map(|s| history_stem_revision(&s.to_string_lossy()))
+            })
+            .collect();
+        // 25 writes → 24 superseded revisions, capped to the newest 20
+        // (oldest pruned first).
+        assert_eq!(revisions.len(), PLAN_HISTORY_CAP);
+        assert_eq!(revisions.iter().min(), Some(&5));
+        assert_eq!(revisions.iter().max(), Some(&24));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn popout_html_escapes_title() {
+        let dir = std::env::temp_dir().join(format!(
+            "immorterm-plan-title-escape-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let v = build_plan_record(None, &json!({}), "proj", "p1", "</title><script>&x", 1000);
+        write_plan(&dir, &v).unwrap();
+        let html = std::fs::read_to_string(dir.join("current.html")).unwrap();
+        assert!(html.contains("&lt;/title&gt;&lt;script&gt;&amp;x"));
+        assert!(!html.contains("</title><script>"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_decisions_preserves_resolved() {
+        let old = vec![json!({ "id": "d1", "label": "L", "resolved": true, "resolution": "A" })];
+        let mut new = vec![
+            json!({ "id": "d1", "label": "L2" }),
+            json!({ "id": "d2", "label": "M" }),
+        ];
+        merge_decisions(&mut new, &old);
+        assert_eq!(new[0]["resolved"], true);
+        assert_eq!(new[0]["resolution"], "A");
+        assert_eq!(new[1]["resolved"], false);
+        assert_eq!(new[1]["resolution"], Value::Null);
+    }
+
+    #[test]
+    fn resolve_decision_flips_in_place() {
+        let dir = std::env::temp_dir().join(format!(
+            "immorterm-plan-resolve-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let v1 = build_plan_record(
+            None,
+            &json!({ "decisions": [{ "id": "d1", "label": "Pick one", "options": ["A", "B"] }] }),
+            "proj",
+            "p1",
+            "T",
+            1000,
+        );
+        write_plan(&dir, &v1).unwrap();
+
+        let mut plan = read_plan(&dir).unwrap().unwrap();
+        resolve_decision_in_plan(&mut plan, "d1", true, Some("A"), 2000).unwrap();
+        atomic_write_json(&dir.join("current.json"), &plan).unwrap();
+
+        let stored = read_plan(&dir).unwrap().unwrap();
+        assert_eq!(stored["decisions"][0]["resolved"], true);
+        assert_eq!(stored["decisions"][0]["resolution"], "A");
+        assert_eq!(stored["updatedAt"], 2000);
+        // Resolution is not a supersede — history stays empty.
+        assert_eq!(std::fs::read_dir(dir.join("history")).unwrap().flatten().count(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn notify_plan_changed_request_serializes() {
+        let v = serde_json::to_value(Request::NotifyPlanChanged {
+            project: "proj".into(),
+            id: "s3-plans".into(),
+            status: "active".into(),
+            title: "T".into(),
+            summary: "S".into(),
+            unresolved_decisions: 2,
+        })
+        .unwrap();
+        assert_eq!(v["type"], "NotifyPlanChanged");
+        assert_eq!(v["unresolved_decisions"], 2);
     }
 }

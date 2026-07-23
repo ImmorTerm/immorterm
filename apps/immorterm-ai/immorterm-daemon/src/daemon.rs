@@ -3431,6 +3431,24 @@ async fn handle_client_connection(
             };
             send_response(&mut stream, &resp).await;
         }
+        Request::NotifyPlanChanged { project, id, status, title, summary, unresolved_decisions } => {
+            // Plans live on disk (~/.immorterm/plans/<project>/<id>/) — the
+            // daemon holds no plan state, it only fans the change event out
+            // over the existing workshop broadcast channel for the S4 Plans
+            // sidebar consumer. Not built yet: no client consumes the
+            // envelope, so the broadcast is a no-op today.
+            let envelope = serde_json::json!({
+                "event": "plan_changed",
+                "project": project,
+                "id": id,
+                "status": status,
+                "title": title,
+                "summary": summary,
+                "unresolved_decisions": unresolved_decisions,
+            }).to_string();
+            let _ = workshop_tx.send(Arc::new(envelope));
+            send_response(&mut stream, &Response::Ok(format!("plan event broadcast: {}", id))).await;
+        }
     }
 }
 
