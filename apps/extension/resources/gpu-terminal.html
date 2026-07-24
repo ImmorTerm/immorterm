@@ -15292,7 +15292,11 @@
                 sessionListEl,
                 sessions,
                 getActiveSessionName: () => activeSessionName,
-                onSwitch: (name) => switchSession(name),
+                // SESSIONS and SPACES are mutually-exclusive view modes: clicking
+                // a session drops out of any active Space into that session's
+                // single-terminal view. leaveSpace() first also frees the tile
+                // claims, so switchSession no longer refuses a tiled session.
+                onSwitch: (name) => { if (spaceMode) leaveSpace(); switchSession(name); },
                 onRename: (name, session, nameEl) => startSessionRename(name, session, nameEl),
                 onRemove: (name) => removeSession(name),
                 onContextMenu: (e, name) => showSessionContextMenu(e, name),
