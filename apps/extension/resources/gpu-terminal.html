@@ -9532,7 +9532,20 @@
         title.textContent = name || 'session';
         const status = document.createElement('span'); status.className = 'tile-status';
         status.setAttribute('data-state', 'disconnected'); status.textContent = 'gone';
-        hdr.append(grip, title, status); tile.appendChild(hdr);
+        // A "gone" placeholder (its session was closed/shelved elsewhere) had NO
+        // close button, so it stranded as an unremovable black pane. Give it the
+        // same remove-from-Space ✕ every tile gets — reference model: this drops
+        // the tile from the Space, it never touches a session (there's none here).
+        const spacer = document.createElement('span'); spacer.className = 'tile-spacer';
+        const closeBtn = document.createElement('button'); closeBtn.className = 'tile-close';
+        closeBtn.type = 'button'; closeBtn.title = 'Remove from Space'; closeBtn.textContent = '✕';
+        closeBtn.addEventListener('mousedown', (e) => e.preventDefault());
+        closeBtn.addEventListener('click', () => {
+          const p = dv && dv.panels.find((x) => x.id === panelId);
+          if (p) { try { dv.removePanel(p); } catch (_) {} }
+          tilePanels.delete(panelId); _builtPanels.delete(panelId); scheduleSpaceSave();
+        });
+        hdr.append(grip, title, status, spacer, closeBtn); tile.appendChild(hdr);
         const body = document.createElement('div'); body.className = 'tile-body';
         tile.appendChild(body);
         element.replaceChildren(tile);
@@ -9605,7 +9618,7 @@
       // this a dropped plan tile is permanent. Reuses buildSessionTile's onDestroy
       // removal path (L9513-9516): drop the dockview panel + binding, then persist.
       const closeBtn = el('button', 'tile-close');
-      closeBtn.type = 'button'; closeBtn.title = 'Close tile'; closeBtn.textContent = '✕';
+      closeBtn.type = 'button'; closeBtn.title = 'Remove from Space'; closeBtn.textContent = '✕';
       closeBtn.addEventListener('mousedown', (e) => e.preventDefault());
       closeBtn.addEventListener('click', () => {
         const p = dv && dv.panels.find((x) => x.id === panelId);

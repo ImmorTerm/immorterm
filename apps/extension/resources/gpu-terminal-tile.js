@@ -61,7 +61,7 @@ function tileHtml(canvasId, title) {
     <span class="tile-title"></span>
     <span class="tile-status" data-state="connecting">connecting</span>
     <span class="tile-spacer"></span>
-    <button class="tile-close" type="button" title="Close tile">✕</button>
+    <button class="tile-close" type="button" title="Remove from Space">✕</button>
   </div>
   <div class="tile-body">
     <canvas id="${canvasId}"></canvas>
