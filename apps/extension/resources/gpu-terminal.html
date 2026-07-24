@@ -9940,7 +9940,8 @@
       if (emptyState) emptyState.style.display = 'none';
       dvRoot = document.createElement('div');
       dvRoot.id = 'spaces-dv-root';
-      dvRoot.style.cssText = 'position:absolute;inset:0;z-index:2';
+      // §N3 — inset 22px at top for the breadcrumb bar (which shows in space mode).
+      dvRoot.style.cssText = 'position:absolute;inset:22px 0 0 0;z-index:2';
       dvRoot.className = document.documentElement.getAttribute('data-theme') === 'light'
         ? 'dockview-theme-light' : 'dockview-theme-dark';
       primaryCanvasHome = document.getElementById('terminal-area');
@@ -15595,6 +15596,10 @@
                   vscode.postMessage({ type: 'reorder-sessions', order: newOrder });
                   renderSidebar();
                 },
+                // §N4 — where a dropped session consumes: the tile under the drop
+                // point in a Space, else the active session. (getActiveSessionName
+                // above is highlight-only and null in a Space, so it can't serve.)
+                getShareTarget: () => consumeTargetName(),
                 onShareContext: (sourceName, targetName) => {
                   const s = sessions.get(sourceName);
                   if (_remoteName || IS_STANDALONE) {
@@ -15651,10 +15656,15 @@
                     const t = rec.tiles[pid];
                     if (!t) continue;
                     if (t.kind === 'primary') {
+                      // Label shows the borrowed active session (only while entered),
+                      // but the TARGET is always {primary:true}: the primary tile entry
+                      // carries kind:'primary' and NO sessionName, so focusSpaceTarget
+                      // can only match it by kind — a sessionName target would never hit.
                       const sname = (spaceMode === id) ? activeSessionName : null;
-                      kids.push(sname
-                        ? { key: pid, label: (sessions.get(sname)?.displayName) || sname, kind: 'primary', target: { sessionName: sname } }
-                        : { key: pid, label: 'Primary terminal', kind: 'primary', target: { primary: true } });
+                      kids.push({
+                        key: pid, kind: 'primary', target: { primary: true },
+                        label: sname ? ((sessions.get(sname)?.displayName) || sname) : 'Primary terminal',
+                      });
                     } else if (t.kind === 'plan') {
                       kids.push({ key: pid, label: (getPlanRecord(t.planId)?.title) || t.planId, kind: 'plan', target: { planId: t.planId } });
                     } else if (t.sessionName) {

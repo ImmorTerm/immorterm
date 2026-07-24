@@ -548,15 +548,15 @@ body.with-tab-bar #container {
 
 /* ── §N3 Space breadcrumb ───────────────────────────────────────────── */
 .space-breadcrumb {
-  position: absolute; top: 8px; left: 10px; z-index: 6;
+  /* Slim full-width bar ABOVE the dockview tab strip (the grid is inset to
+     match in enterSpace) — a floating chip collides with a tab at some split. */
+  position: absolute; top: 0; left: 0; right: 0; height: 22px; z-index: 6;
   display: none; align-items: center; gap: 6px;
-  padding: 3px 8px; border-radius: 8px;
-  background: color-mix(in srgb, var(--sidebar-bg, #181825) 82%, transparent);
-  border: 1px solid var(--sidebar-border, rgba(180, 130, 255, 0.18));
-  backdrop-filter: blur(6px);
-  font-size: 11px; line-height: 1.4;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
-  pointer-events: auto; max-width: 60%;
+  padding: 0 10px; box-sizing: border-box;
+  background: var(--sidebar-bg, #181825);
+  border-bottom: 1px solid var(--sidebar-border, rgba(180, 130, 255, 0.18));
+  font-size: 11px; line-height: 1;
+  pointer-events: auto;
 }
 .space-breadcrumb.visible { display: flex; }
 .space-breadcrumb .bc-crumb {

@@ -224,6 +224,8 @@ export function createRenderSidebar({
   onShareContext,
   onShareDragState,
   onShareModeSelect,
+  getShareTarget,   // §N4 — share/consume target on outside-drop (tile under the
+                    // drop point in a Space); decoupled from the highlight getter.
   getCharacterDefs,
   enableGridDrag,   // §6A — sessions list only: add a native-drag grip per row
   // §N2 — opt-in disclosure tree (Spaces list only). Sessions pass none of
@@ -314,11 +316,16 @@ export function createRenderSidebar({
         const outsideSidebar = sidebarRect && e.clientX < sidebarRect.left;
 
         if (outsideSidebar) {
-          const activeName = getActiveSessionName();
-          if (activeName && activeName !== _dragState.sessionName) {
+          // Share target resolution is SEPARATE from the row-highlight getter.
+          // getActiveSessionName is highlight-only and is null inside a Space
+          // (§N1 single-selection) — using it here would block every consume in a
+          // Space. getShareTarget (§N4) resolves to the tile under the drop point
+          // in a Space, or the active session otherwise; falls back when unset.
+          const shareTarget = getShareTarget ? getShareTarget() : getActiveSessionName();
+          if (shareTarget && shareTarget !== _dragState.sessionName) {
             // Always go directly to Static share — Interactive upgrade is on the badge
             if (onShareContext) {
-              onShareContext(_dragState.sessionName, activeName);
+              onShareContext(_dragState.sessionName, shareTarget);
             }
           }
         } else {
