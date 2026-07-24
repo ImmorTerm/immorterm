@@ -226,6 +226,16 @@ export function createRenderSidebar({
   onShareModeSelect,
   getCharacterDefs,
   enableGridDrag,   // §6A — sessions list only: add a native-drag grip per row
+  // §N2 — opt-in disclosure tree (Spaces list only). Sessions pass none of
+  // these, so their flat rendering is byte-for-byte unchanged. When
+  // getRowChildren returns a non-empty array a caret is prepended and, while
+  // expanded, indented child rows render beneath the row. Child rows use a
+  // distinct class (.tree-child) so they never enter the reorder/drop math
+  // (calcDropIndex only counts .session-item).
+  getRowChildren,   // (name) => [{ key, label, kind }] | null
+  isRowExpanded,    // (name) => boolean
+  onToggleExpand,   // (name) => void
+  onChildActivate,  // (name, child) => void
 }) {
   let _rendering = false;
   let _dragState = null; // { sessionName, startY, itemEl, dragging }
@@ -355,6 +365,27 @@ export function createRenderSidebar({
 
       const item = document.createElement('div');
       item.className = 'session-item' + (name === activeSessionName ? ' active' : '');
+
+      // §N2 disclosure caret (Spaces list only). The slot is reserved for every
+      // row so names stay aligned whether or not the row has member tiles. Its
+      // mousedown stopPropagation keeps the row's reorder-drag from arming.
+      let _children = null;
+      if (getRowChildren) {
+        _children = getRowChildren(name);
+        const caret = document.createElement('span');
+        caret.className = 'tree-caret';
+        if (_children && _children.length) {
+          const expanded = isRowExpanded && isRowExpanded(name);
+          caret.classList.add(expanded ? 'expanded' : 'collapsed');
+          caret.textContent = expanded ? '▾' : '▸';
+          caret.setAttribute('aria-hidden', 'true');
+          caret.addEventListener('mousedown', (e) => e.stopPropagation());
+          caret.addEventListener('click', (e) => { e.stopPropagation(); if (onToggleExpand) onToggleExpand(name); });
+        } else {
+          caret.classList.add('leaf');
+        }
+        item.appendChild(caret);
+      }
 
       // §6A — dedicated native-drag grip: drag it into the Spaces grid to spawn
       // a terminal tile (dockview's external-drop overlay accepts SESSION_MIME).
@@ -503,6 +534,28 @@ export function createRenderSidebar({
       });
 
       sessionListEl.appendChild(item);
+
+      // §N2 — expanded child rows: the Space's member tiles. Distinct .tree-child
+      // class (never .session-item) so they stay out of reorder/drop hit-testing.
+      // A child is a jump-into-the-Space-focused affordance; it carries no
+      // selection highlight (single-selection: the entered Space row owns it).
+      if (_children && _children.length && isRowExpanded && isRowExpanded(name)) {
+        for (const child of _children) {
+          const crow = document.createElement('div');
+          crow.className = 'tree-child';
+          crow.dataset.parent = name;
+          const icon = document.createElement('span');
+          icon.className = 'tree-child-icon';
+          icon.textContent = child.kind === 'plan' ? '◷' : (child.kind === 'primary' ? '◆' : '▪');
+          const clabel = document.createElement('span');
+          clabel.className = 'tree-child-label';
+          clabel.textContent = child.label || '';
+          clabel.title = child.label || '';
+          crow.append(icon, clabel);
+          crow.addEventListener('click', () => { if (onChildActivate) onChildActivate(name, child); });
+          sessionListEl.appendChild(crow);
+        }
+      }
     }
 
     // Re-apply drag state to the new DOM element after rebuild

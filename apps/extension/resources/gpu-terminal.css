@@ -509,6 +509,68 @@ body.with-tab-bar #container {
   flex: 1; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap;   /* font-size inherits from #sidebar → --ui-font-size */
 }
+
+/* ── §N2 Spaces disclosure tree ─────────────────────────────────────── */
+/* Caret slot is reserved on every Space row (even leaves) so names align. */
+.tree-caret {
+  flex-shrink: 0; width: 12px; text-align: center;
+  font-size: 9px; line-height: 1; color: var(--sidebar-muted, #7f849c);
+  cursor: pointer; transition: color 0.1s ease, transform 0.12s ease;
+  user-select: none;
+}
+.tree-caret.leaf { visibility: hidden; }         /* keep the slot, hide the glyph */
+.tree-caret:hover { color: var(--sidebar-text, #cdd6f4); }
+.tree-child {
+  display: flex; align-items: center; gap: 6px;
+  height: 20px; box-sizing: border-box;
+  padding: 0 8px 0 26px;                          /* indent under the caret+dot */
+  cursor: pointer; font-size: 11px;
+  color: var(--sidebar-muted, #7f849c);
+  border-left: 2px solid transparent;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+.tree-child:hover {
+  background: var(--sidebar-hover, #1e1e2e);
+  color: var(--sidebar-text, #cdd6f4);
+}
+.tree-child-icon { flex-shrink: 0; width: 10px; font-size: 9px; text-align: center; opacity: 0.8; }
+.tree-child-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── §N4 consume-target tile highlight (drag a session/task/file over it) ── */
+.tile.tile-consume-target,
+.dv-tile-host .tile-consume-target,
+.tile-consume-target {
+  outline: 2px solid var(--sidebar-accent, #b482ff);
+  outline-offset: -2px;
+  box-shadow: inset 0 0 0 9999px rgba(180, 130, 255, 0.10);
+  transition: box-shadow 0.1s ease, outline-color 0.1s ease;
+}
+
+/* ── §N3 Space breadcrumb ───────────────────────────────────────────── */
+.space-breadcrumb {
+  position: absolute; top: 8px; left: 10px; z-index: 6;
+  display: none; align-items: center; gap: 6px;
+  padding: 3px 8px; border-radius: 8px;
+  background: color-mix(in srgb, var(--sidebar-bg, #181825) 82%, transparent);
+  border: 1px solid var(--sidebar-border, rgba(180, 130, 255, 0.18));
+  backdrop-filter: blur(6px);
+  font-size: 11px; line-height: 1.4;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  pointer-events: auto; max-width: 60%;
+}
+.space-breadcrumb.visible { display: flex; }
+.space-breadcrumb .bc-crumb {
+  background: none; border: none; padding: 0; cursor: pointer;
+  font: inherit; font-weight: 600;
+  color: var(--sidebar-accent, #b482ff);
+  transition: color 0.1s ease;
+}
+.space-breadcrumb .bc-crumb:hover { color: var(--sidebar-text, #cdd6f4); text-decoration: underline; }
+.space-breadcrumb .bc-sep { color: var(--sidebar-muted, #7f849c); }
+.space-breadcrumb .bc-leaf {
+  color: var(--sidebar-text, #cdd6f4);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px;
+}
 .session-item .close {
   opacity: 0; background: none; border: none;
   color: var(--sidebar-muted, #a6adc8); cursor: pointer; font-size: 14px;

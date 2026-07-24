@@ -4163,6 +4163,32 @@
     shareDropZone.className = 'share-drop-zone';
     document.getElementById('terminal-area').appendChild(shareDropZone);
 
+    // ── §N3 Space breadcrumb ──
+    // Orientation for the grid: names the entered Space (click → back to all
+    // sessions) and, when a tile is focused, the leaf terminal. Hidden in
+    // single-session mode (the tab bar / sidebar already name that view).
+    const spaceBreadcrumb = document.createElement('div');
+    spaceBreadcrumb.className = 'space-breadcrumb';
+    document.getElementById('terminal-area').appendChild(spaceBreadcrumb);
+    function updateSpaceBreadcrumb() {
+      if (!spaceMode) { spaceBreadcrumb.classList.remove('visible'); spaceBreadcrumb.replaceChildren(); return; }
+      const rec = spacesIndex.spaces[spaceMode];
+      spaceBreadcrumb.replaceChildren();
+      const root = document.createElement('button');
+      root.type = 'button'; root.className = 'bc-crumb';
+      root.textContent = '◧ ' + ((rec && rec.name) || 'Space');
+      root.title = 'Back to all sessions';
+      root.addEventListener('click', () => leaveSpace());
+      spaceBreadcrumb.appendChild(root);
+      if (_activeTileSession) {
+        const sep = document.createElement('span'); sep.className = 'bc-sep'; sep.textContent = '›';
+        const leaf = document.createElement('span'); leaf.className = 'bc-leaf';
+        leaf.textContent = (sessions.get(_activeTileSession)?.displayName) || _activeTileSession;
+        spaceBreadcrumb.append(sep, leaf);
+      }
+      spaceBreadcrumb.classList.add('visible');
+    }
+
     // ── Share pills (stacked) ──
     // Multiple shares (files / sessions / tasks) can be pending on one
     // terminal at once. Each is its own pill, keyed by the extension-issued
@@ -4222,18 +4248,46 @@
     }
 
 
+    // §N4 — the tile hosting a given session in the active Space (primary shows
+    // the borrowed active session), or null. Lets a consumed item's pill pin to
+    // the terminal it was dropped on instead of the shared bottom-right stack.
+    function tileElForSession(name) {
+      if (!spaceMode || !name) return null;
+      for (const [, e] of tilePanels) {
+        if ((e.kind === 'primary' && name === activeSessionName) || e.sessionName === name) {
+          return e.el || (e.tileHandle && e.tileHandle.el) || null;
+        }
+      }
+      return null;
+    }
+
     // Stack all pills for the ACTIVE session bottom-up, above the pomodoro pill;
-    // hide pills that belong to other sessions.
+    // hide pills that belong to other sessions. In a Space, a pill whose target
+    // is a live tile pins to that tile's bottom-left (so multi-terminal grids
+    // show each queued item on the terminal it will feed).
     function layoutShareBadges() {
       const termArea = document.getElementById('terminal-area');
       const pw = termArea.querySelector('.pomo-pill-wrapper');
       const base = (pw && pw.offsetHeight > 0) ? 32 + pw.offsetHeight + 8 : 32;
+      const areaRect = termArea.getBoundingClientRect();
+      const tileStack = new Map();
       let i = 0;
       for (const b of shareBadges.values()) {
-        if (b.targetSession !== activeSessionName) { b.el.style.display = 'none'; continue; }
+        const tileEl = tileElForSession(b.targetSession);
+        if (b.targetSession !== activeSessionName && !tileEl) { b.el.style.display = 'none'; continue; }
         b.el.style.display = '';
-        b.el.style.bottom = (base + i * 34) + 'px';
-        i++;
+        if (tileEl) {
+          const r = tileEl.getBoundingClientRect();
+          const n = tileStack.get(tileEl) || 0; tileStack.set(tileEl, n + 1);
+          b.el.style.left = (r.left - areaRect.left + 8) + 'px';
+          b.el.style.right = 'auto';
+          b.el.style.bottom = (areaRect.bottom - r.bottom + 8 + n * 34) + 'px';
+        } else {
+          b.el.style.left = '';
+          b.el.style.right = '8px';
+          b.el.style.bottom = (base + i * 34) + 'px';
+          i++;
+        }
       }
     }
 
@@ -9436,6 +9490,8 @@
     let activeSpaceId = null;          // persisted `active` — the entered space (null in classic)
     const spaceOrder = [];             // spaceId[] display order (mirrors sessionOrder)
     const spacesMap = new Map();       // spaceId -> session-shaped pseudo-row for createRenderSidebar
+    const _expandedSpaces = new Set(); // §N2 spaceIds whose disclosure tree is open (ephemeral)
+    let _activeTileSession = null;     // §N4 session of the focused grid tile (consume target); null → activeSessionName
     let spacesIndex = { version: 1, order: [], active: null, spaces: {} }; // full persisted model
     let _renamingSpace = null;
     let renderSpaces = () => {};       // replaced with a createRenderSidebar instance when utils loads
@@ -9860,7 +9916,7 @@
     }
 
     let _enteringSpace = false;
-    async function enterSpace(spaceId) {
+    async function enterSpace(spaceId, focusTarget) {
       // Synchronous re-entrancy guard: loadDockview() awaits a dynamic import
       // that spans macrotasks on first entry — without this, a second call
       // (fast click / restore racing a click) would start a parallel enter and
@@ -10009,7 +10065,9 @@
       for (const g of dv.groups.slice()) {          // slice: removeGroup mutates dv.groups
         if (g.panels.length === 0) { try { dv.removeGroup(g); } catch (_) {} }
       }
-      dvSubs.push(dv.onDidLayoutChange(() => { scheduleSpaceSave(); reconfigureAllTiles(); }));
+      dvSubs.push(dv.onDidLayoutChange(() => { scheduleSpaceSave(); reconfigureAllTiles(); refreshExpandedTree(); }));
+      // §N4 — clicking a tile makes it the consume target (+ breadcrumb leaf).
+      try { dvSubs.push(dv.onDidActivePanelChange((p) => updateActiveTileSession(p))); } catch (_) {}
       // RO width/height source flips to the primary panel body (§4.4).
       if (primaryPanelBodyEl) { try { resizeObserver.observe(primaryPanelBodyEl); } catch (_) {} }
       // Primary's WebGPU surface is stale (black) after a fromJSON restore:
@@ -10032,6 +10090,10 @@
       });
       reconfigurePrimarySurface();
       saveSpaces(); renderSpaces(); renderSidebar(); syncLockGridBtn();
+      updateSpaceBreadcrumb();                                   // §N3
+      // §N2 — a child-row click enters the Space with that tile focused. Session
+      // tiles build async (buildSessionTile), so retry a few frames for the handle.
+      if (focusTarget) focusSpaceTarget(focusTarget, 8);
     }
 
     function leaveSpace() {
@@ -10055,9 +10117,61 @@
       if (dvRoot) { dvRoot.remove(); dvRoot = null; }
       tilePanels.clear(); _builtPanels.clear();
       spaceMode = null; activeSpaceId = null;
+      _activeTileSession = null;                                 // §N4 back to single-session consume target
+      _lastTileSig = '';                                         // §N2 tree signature resets per Space
       if (emptyState) emptyState.style.display = sessions.size ? 'none' : '';
       reconfigurePrimarySurface();
       saveSpaces(); renderSpaces(); renderSidebar(); syncLockGridBtn();
+      updateSpaceBreadcrumb();                                   // §N3 hide
+    }
+
+    // §N2 — keep the open disclosure tree honest when tiles are added/removed.
+    // Driven off onDidLayoutChange (fires on every structural change) but gated
+    // on a membership signature so pure resizes/moves — which fire it constantly
+    // — never repaint the sidebar. Only a change in the set of tiles re-renders.
+    let _lastTileSig = '';
+    function refreshExpandedTree() {
+      if (!(spaceMode && _expandedSpaces.has(spaceMode))) { _lastTileSig = ''; return; }
+      let sig = '';
+      for (const [id, e] of tilePanels) sig += id + ':' + (e.sessionName || e.planId || e.kind) + '|';
+      if (sig === _lastTileSig) return;
+      _lastTileSig = sig;
+      renderSpaces();
+    }
+
+    // §N2 — enter a Space with a specific tile focused (or, if already inside it,
+    // just focus that tile). enterSpace applies the focus itself once built.
+    async function enterSpaceFocused(spaceId, target) {
+      if (spaceMode === spaceId) focusSpaceTarget(target, 8);
+      else await enterSpace(spaceId, target);
+    }
+
+    // Highlight + focus the grid tile matching a tree-child target. dockview's
+    // setActive gives the visible active state immediately; the live terminal's
+    // keyboard focus follows once its async tile handle exists — retry a few
+    // frames (tries>0) so a jump into a restored Space still lands on the tile.
+    function focusSpaceTarget(target, tries) {
+      if (!dv || !target) return;
+      let panelId = null, entry = null;
+      for (const [pid, e] of tilePanels) {
+        if ((target.primary && e.kind === 'primary')
+          || (target.sessionName && e.sessionName === target.sessionName)
+          || (target.planId && e.planId === target.planId)) { panelId = pid; entry = e; break; }
+      }
+      if (!panelId) { if (tries > 0) requestAnimationFrame(() => focusSpaceTarget(target, tries - 1)); return; }
+      try { entry.panel && entry.panel.api && entry.panel.api.setActive(); } catch (_) {}
+      if (entry.tileHandle && entry.tileHandle.focus) entry.tileHandle.focus();
+      else if (entry.kind !== 'primary' && tries > 0) { requestAnimationFrame(() => focusSpaceTarget(target, tries - 1)); return; }
+      updateActiveTileSession(entry.panel);                      // §N4 retarget consume
+    }
+
+    // §N4 — track which tile owns keyboard/consume focus. The consume path
+    // (shareItemToTerminal / attachFileToTerminal) routes into this session so a
+    // dragged session/task/file lands in the FOCUSED tile, not always the primary.
+    function updateActiveTileSession(panel) {
+      const e = panel && tilePanels.get(panel.id);
+      _activeTileSession = e ? (e.kind === 'primary' ? activeSessionName : (e.sessionName || null)) : null;
+      updateSpaceBreadcrumb();                                   // §N3 reflect focused leaf
     }
 
     // ── Remove-from-Space undo toast (N2.5b behavior 3) ──────────────
@@ -12083,7 +12197,7 @@
     // the prompt — visible in scrollback. No chooser, no queue, no hook.
     function attachFileToTerminal(absPath) {
       hideShareDropZone(); // the drop completed - clear the dashed drag pill
-      const session = sessions.get(activeSessionName);
+      const session = sessions.get(consumeTargetName());         // §N4 rel-path vs the dropped-on tile's cwd
       const cwd = (session && session.cwd) ? String(session.cwd) : '';
       const relPath = (cwd && absPath.startsWith(cwd))
         ? (absPath.slice(cwd.length).replace(/^\//, '') || '.')
@@ -12099,12 +12213,65 @@
     //   • Standalone / REMOTE → write_share_item over the (possibly remote)
     //     daemon WS, so it lands in the RIGHT host's pending-share where that
     //     session's hook runs — mirrors clipboard_save_image_bytes for images.
+    // ── §N4 tile-aware consume ─────────────────────────────────────────
+    // In a Space the grid holds many terminals; a dragged session/task/file
+    // should land in the tile it's dropped ON, not always the primary. We track
+    // the live pointer during any consume drag and hit-test it against tile
+    // hosts. Single chokepoint: consumeTargetName() — every consume path
+    // (shareItemToTerminal / attachFileToTerminal) routes through it.
+    const _lastDragPoint = { x: 0, y: 0 };
+    let _consumeHoverTile = null;
+    function spaceTileEntryAtPoint(x, y) {
+      if (!spaceMode) return null;
+      for (const [, e] of tilePanels) {
+        const host = e.el || (e.tileHandle && e.tileHandle.el);
+        if (!host || !host.getBoundingClientRect) continue;
+        const r = host.getBoundingClientRect();
+        if (r.width && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return { entry: e, host };
+      }
+      return null;
+    }
+    // Session under the current drop point (null over a plan tile / no tile).
+    function pointConsumeSession() {
+      const hit = spaceTileEntryAtPoint(_lastDragPoint.x, _lastDragPoint.y);
+      if (!hit) return null;
+      if (hit.entry.kind === 'plan') return null;                // plans don't consume
+      return hit.entry.kind === 'primary' ? activeSessionName : (hit.entry.sessionName || null);
+    }
+    function consumeTargetName() {
+      if (spaceMode) return pointConsumeSession() || _activeTileSession || activeSessionName;
+      return activeSessionName;
+    }
+    function clearConsumeHover() {
+      if (_consumeHoverTile) { _consumeHoverTile.classList.remove('tile-consume-target'); _consumeHoverTile = null; }
+    }
+    function updateConsumeHover() {
+      // Only while a consume drag is live (the dashed drop zone is the signal
+      // every drag source raises via showShareDropZone) and a Space is open.
+      if (!(spaceMode && shareDropZone.classList.contains('visible'))) { clearConsumeHover(); return; }
+      const hit = spaceTileEntryAtPoint(_lastDragPoint.x, _lastDragPoint.y);
+      const host = (hit && hit.entry.kind !== 'plan') ? hit.host : null;
+      if (host === _consumeHoverTile) return;
+      clearConsumeHover();
+      if (host) { host.classList.add('tile-consume-target'); _consumeHoverTile = host; }
+    }
+    // Both mousemove (synthetic session-row drag) and dragover (native HTML5
+    // file/task drag) keep the point fresh — one of the two always fires.
+    document.addEventListener('mousemove', (e) => { _lastDragPoint.x = e.clientX; _lastDragPoint.y = e.clientY; updateConsumeHover(); }, true);
+    document.addEventListener('dragover', (e) => { _lastDragPoint.x = e.clientX; _lastDragPoint.y = e.clientY; updateConsumeHover(); }, true);
+    document.addEventListener('mouseup', clearConsumeHover, true);
+    document.addEventListener('drop', clearConsumeHover, true);
+    document.addEventListener('dragend', clearConsumeHover, true);
+
     function shareItemToTerminal(item, label) {
-      const session = sessions.get(activeSessionName);
+      const targetName = consumeTargetName();                    // §N4 dropped-on tile, else active
+      const session = sessions.get(targetName);
       const windowId = session && session.windowId;
       if (_remoteName || IS_STANDALONE) {
         const id = 'att-' + Date.now() + '-' + Math.random().toString(16).slice(2, 8);
-        const ws = (typeof getActiveWs === 'function') ? getActiveWs() : null;
+        // Target the DROPPED-ON session's socket (not always the active one).
+        const ws = (session && session.ws && session.connected) ? session.ws
+          : ((typeof getActiveWs === 'function') ? getActiveWs() : null);
         if (!windowId || !ws || ws.readyState !== WebSocket.OPEN) return;
         item.id = id; item.timestamp = Date.now();
         // The queue-file write is an async WS round-trip. Track it as unconfirmed
@@ -12113,7 +12280,7 @@
         unconfirmedShareWrites.add(id);
         ws.send(JSON.stringify({ type: 'write_share_item', request_id: id, window_id: windowId, item }));
         // staged:true → consumed on submit, but ONLY once the write is acked.
-        showShareBadge({ id, kind: item.kind, label, staged: true }, activeSessionName);
+        showShareBadge({ id, kind: item.kind, label, staged: true }, targetName);
         return;
       }
       // VS Code local — extension writes the queue (kind-specific messages it
@@ -12121,7 +12288,7 @@
       if (item.kind === 'file') {
         vscode.postMessage({
           type: 'share-file-context',
-          kind: 'file', filePath: item.file_path, relPath: item.rel_path, targetName: activeSessionName,
+          kind: 'file', filePath: item.file_path, relPath: item.rel_path, targetName,
         });
       }
     }
@@ -15472,6 +15639,36 @@
                 onReorder: (o) => { spaceOrder.length = 0; spaceOrder.push(...o); saveSpaces(); renderSpaces(); },
                 onShareContext: () => {},   // no-op: dragging a space onto the terminal is meaningless
                 onShareDragState: () => {}, // no-op
+                // §N2 disclosure tree — a Space's member tiles, from the persisted
+                // binding map (spacesIndex.spaces[id].tiles). Reference model: the
+                // primary slot shows the borrowed active session only while THIS
+                // space is entered (it has no fixed session otherwise).
+                getRowChildren: (id) => {
+                  const rec = spacesIndex.spaces[id];
+                  if (!rec || !rec.tiles) return null;
+                  const kids = [];
+                  for (const pid in rec.tiles) {
+                    const t = rec.tiles[pid];
+                    if (!t) continue;
+                    if (t.kind === 'primary') {
+                      const sname = (spaceMode === id) ? activeSessionName : null;
+                      kids.push(sname
+                        ? { key: pid, label: (sessions.get(sname)?.displayName) || sname, kind: 'primary', target: { sessionName: sname } }
+                        : { key: pid, label: 'Primary terminal', kind: 'primary', target: { primary: true } });
+                    } else if (t.kind === 'plan') {
+                      kids.push({ key: pid, label: (getPlanRecord(t.planId)?.title) || t.planId, kind: 'plan', target: { planId: t.planId } });
+                    } else if (t.sessionName) {
+                      kids.push({ key: pid, label: (sessions.get(t.sessionName)?.displayName) || t.sessionName, kind: 'session', target: { sessionName: t.sessionName } });
+                    }
+                  }
+                  return kids.length ? kids : null;
+                },
+                isRowExpanded: (id) => _expandedSpaces.has(id),
+                onToggleExpand: (id) => {
+                  if (_expandedSpaces.has(id)) _expandedSpaces.delete(id); else _expandedSpaces.add(id);
+                  renderSpaces();
+                },
+                onChildActivate: (id, child) => enterSpaceFocused(id, child.target),
               });
               const newSpaceBtn = document.getElementById('new-space-btn');
               if (newSpaceBtn) newSpaceBtn.addEventListener('click', () => createSpace());
