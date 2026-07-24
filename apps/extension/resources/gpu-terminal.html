@@ -7693,6 +7693,34 @@
       const session = sessions.get(sessionName);
       if (!session) return;
 
+      // Reference model: a dead/shelved session must leave no tile behind.
+      // Active space: remove its live tile(s) now (mirrors the ✕ path); persisted
+      // spaces: drop the binding so a later enterSpace can't rebuild a gone tile.
+      _removingSession = true;
+      try {
+        if (spaceMode && dv) {
+          for (const [pid, e] of Array.from(tilePanels)) {
+            if (e.sessionName !== sessionName) continue;      // never touch primary/plan
+            if (e.tileHandle) { try { e.tileHandle.destroy(); } catch (_) {} } // → onDestroy removePanel+save
+            else {                                            // defensive: placeholder tile, no handle
+              const p = dv.panels.find((x) => x.id === pid);
+              if (p) { try { dv.removePanel(p); } catch (_) {} }
+              tilePanels.delete(pid); _builtPanels.delete(pid); scheduleSpaceSave();
+            }
+          }
+        }
+        for (const id in spacesIndex.spaces) {                // persisted (non-active) spaces
+          if (id === spaceMode) continue;                     // active handled above (save re-snapshots tiles)
+          const rec = spacesIndex.spaces[id];
+          if (!rec || !rec.tiles) continue;
+          let dropped = false;
+          for (const pid in rec.tiles) {
+            if (rec.tiles[pid] && rec.tiles[pid].sessionName === sessionName) { delete rec.tiles[pid]; dropped = true; }
+          }
+          if (dropped) saveSpaces();
+        }
+      } finally { _removingSession = false; }
+
       if (session.pingInterval) clearInterval(session.pingInterval);
       if (session.ws) {
         session.ws.onclose = null; // prevent reconnect
@@ -9424,6 +9452,7 @@
     let _savedStatusBarMode = null;    // classic statusBarMode stashed while a space hides it
     let _spaceSaveTimer = null;
     let _tearingDown = false;          // true during leaveSpace so tile onDestroy doesn't re-enter removePanel
+    let _removingSession = false;      // true while removeSession tears its tiles down, so onDestroy skips the undo toast
     // The canvas + every canvas-anchored overlay move TOGETHER so they keep a
     // shared coordinate system (offset parent = the panel body). PROOF #2.
     const PRIMARY_MOVE_IDS = ['terminal-canvas', 'kb-input', 'title-tooltip', 'link-tooltip',
@@ -9542,8 +9571,10 @@
         closeBtn.addEventListener('mousedown', (e) => e.preventDefault());
         closeBtn.addEventListener('click', () => {
           const p = dv && dv.panels.find((x) => x.id === panelId);
+          const undo = p ? captureTileUndo(p, panelId) : null;
           if (p) { try { dv.removePanel(p); } catch (_) {} }
           tilePanels.delete(panelId); _builtPanels.delete(panelId); scheduleSpaceSave();
+          if (undo) showRemovedFromSpaceToast(undo);
         });
         hdr.append(grip, title, status, spacer, closeBtn); tile.appendChild(hdr);
         const body = document.createElement('div'); body.className = 'tile-body';
@@ -9569,11 +9600,13 @@
           onDestroy: () => {
             // The tile ✕ freed the engine; drop the now-empty dockview panel
             // and persist. Skipped during leaveSpace (whole grid is disposing).
-            if (_tearingDown) return;
+            if (_tearingDown) return;                             // leaveSpace: whole grid disposing
             const p = dv && dv.panels.find((x) => x.id === panelId);
+            const undo = (!_removingSession && p) ? captureTileUndo(p, panelId) : null; // user ✕ only
             if (p) { try { dv.removePanel(p); } catch (_) {} }
-            tilePanels.delete(panelId);
+            tilePanels.delete(panelId); _builtPanels.delete(panelId);
             scheduleSpaceSave();
+            if (undo) showRemovedFromSpaceToast(undo);
           },
         });
         const entry = tilePanels.get(panelId) || { kind: 'session', sessionName: name };
@@ -9622,8 +9655,10 @@
       closeBtn.addEventListener('mousedown', (e) => e.preventDefault());
       closeBtn.addEventListener('click', () => {
         const p = dv && dv.panels.find((x) => x.id === panelId);
+        const undo = p ? captureTileUndo(p, panelId) : null;
         if (p) { try { dv.removePanel(p); } catch (_) {} }
         tilePanels.delete(panelId); _builtPanels.delete(panelId); scheduleSpaceSave();
+        if (undo) showRemovedFromSpaceToast(undo);
       });
       hdr.append(grip, title, status, spacer, lockBtn, closeBtn);
       const body = el('div', 'tile-body');
@@ -9933,6 +9968,12 @@
         rec.tiles = rec.tiles || {};
         rec.tiles.panel_primary = rec.tiles.panel_primary || { kind: 'primary' };
       }
+      // Guarantee the primary binding on EVERY path: a legacy/partial restored
+      // blob can carry layout.panel_primary with NO rec.tiles entry, and without
+      // this the stranded-panel sweep below would removePanel(primary) and tear
+      // the reparented live canvas out of the DOM (leaveSpace could never find it).
+      rec.tiles = rec.tiles || {};
+      rec.tiles.panel_primary = rec.tiles.panel_primary || { kind: 'primary' };
       // Reconcile restored panels: fromJSON recreates the panel HOSTS but does
       // NOT reliably run our createComponent.init content-builder for every
       // panel (observed: the non-primary panel's content host came back empty).
@@ -9940,6 +9981,10 @@
       // from it. Idempotent: panels init already filled are skipped.
       if (restored) {
         for (const panel of dv.panels) {
+          if (panel.id !== 'panel_primary' && (!rec.tiles || !rec.tiles[panel.id])) {   // binding dropped (dead session) → stranded panel; NEVER the primary
+            try { dv.removePanel(panel); } catch (_) {} // removeEmptyGroup:true collapses + reflows
+            continue;
+          }
           let host = null;
           try { host = panel.view && panel.view.content && panel.view.content.element; } catch (_) {}
           if (!host || host.childElementCount > 0) continue; // already built
@@ -9958,6 +10003,11 @@
         const e = tilePanels.get(panel.id) || {};
         e.panel = panel; tilePanels.set(panel.id, e);
         wirePanelHooks(panel);
+      }
+      // ponytail: belt-and-suspenders — normal removePanel path already auto-collapses
+      // empty groups; this only catches a pre-existing empty group in an old/malformed blob.
+      for (const g of dv.groups.slice()) {          // slice: removeGroup mutates dv.groups
+        if (g.panels.length === 0) { try { dv.removeGroup(g); } catch (_) {} }
       }
       dvSubs.push(dv.onDidLayoutChange(() => { scheduleSpaceSave(); reconfigureAllTiles(); }));
       // RO width/height source flips to the primary panel body (§4.4).
@@ -9986,6 +10036,7 @@
 
     function leaveSpace() {
       if (!spaceMode) return;
+      if (_undoToast) { try { _undoToast.remove(); } catch (_) {} _undoToast = null; }
       captureLayout();                            // snapshot geometry + bindings before teardown
       const home = primaryCanvasHome || document.getElementById('terminal-area');
       reparentPrimaryInto(home);                  // ⚠ PROOF #1 — the return leg
@@ -10008,6 +10059,59 @@
       reconfigurePrimarySurface();
       saveSpaces(); renderSpaces(); renderSidebar(); syncLockGridBtn();
     }
+
+    // ── Remove-from-Space undo toast (N2.5b behavior 3) ──────────────
+    // Captures enough of a removed tile's binding to re-add it (view-only —
+    // the session never left, so re-adding is always safe).
+    function captureTileUndo(panel, panelId) {
+      const e = tilePanels.get(panelId) || {};
+      if (!e.kind || e.kind === 'primary') return null;        // never undo the primary
+      const grp = panel && panel.group;
+      const sibs = grp ? grp.panels.filter((p) => p.id !== panelId) : [];
+      const position = sibs.length
+        ? { referencePanel: sibs[0].id, direction: 'within' }   // re-tab into surviving group
+        : { referencePanel: 'panel_primary', direction: 'right' }; // its group collapsed → beside primary
+      // ponytail: approximate placement — split ratios aren't restored (reflow already changed them).
+      return { kind: e.kind, sessionName: e.sessionName, planId: e.planId, position, spaceId: spaceMode };
+    }
+
+    function readdTile(u) {
+      if (!dv || !spaceMode || u.spaceId !== spaceMode) return; // left/changed space → no-op
+      // The captured sibling referencePanel may have been removed within the 6s
+      // undo window (another ✕, or a session death) → dockview addPanel would
+      // throw "referencePanel does not exist". Re-validate; fall back beside the
+      // primary (always present). try/catch so Undo can never throw + strand the toast.
+      let pos = u.position;
+      if (pos && pos.referencePanel && !dv.panels.some((p) => p.id === pos.referencePanel)) {
+        pos = { referencePanel: 'panel_primary', direction: 'right' };
+      }
+      try {
+        if (u.kind === 'plan') { if (u.planId) addPlanTile(u.planId, pos); }
+        else if (u.sessionName && sessions.get(u.sessionName)) addSessionTile(u.sessionName, undefined, pos);
+      } catch (_) { /* best-effort re-add */ }
+    }
+
+    let _undoToast = null;
+    function showRemovedFromSpaceToast(undo) {
+      if (_undoToast) { try { _undoToast.remove(); } catch (_) {} _undoToast = null; }
+      const reduce = matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const toast = el('div');
+      toast.style.cssText = 'position:fixed;left:12px;bottom:12px;z-index:9999;display:flex;align-items:center;gap:12px;'
+        + 'background:var(--sidebar-bg,#181825);color:var(--sidebar-fg,#cdd6f4);padding:8px 12px;border-radius:8px;'
+        + 'font:12px/1.4 -apple-system,system-ui,sans-serif;border:1px solid var(--sidebar-accent,#b482ff);'
+        + 'box-shadow:0 8px 18px rgba(0,0,0,.45);' + (reduce ? '' : 'animation:errorSlideUp .2s ease-out;');
+      const label = el('span', '', 'Removed from Space');
+      const btn = el('button', ''); btn.type = 'button'; btn.textContent = 'Undo';
+      btn.style.cssText = 'background:none;border:none;color:var(--sidebar-accent,#b482ff);font:inherit;font-weight:600;cursor:pointer;padding:0;';
+      const dismiss = () => { clearTimeout(t); if (toast.parentNode) toast.remove(); if (_undoToast === toast) _undoToast = null; };
+      btn.addEventListener('click', () => { readdTile(undo); dismiss(); });
+      toast.append(label, btn);
+      document.body.appendChild(toast);
+      _undoToast = toast;
+      const t = setTimeout(dismiss, 6000);
+    }
+    // ponytail: bottom-LEFT (not centered) so it reuses errorSlideUp's translateY without
+    // clobbering a translateX centering. Center would need its own keyframe.
 
     // ── Add-tile affordance (SP2 is a picker; section→grid drag is SP3). ──
     function addSessionTile(sessionName, referencePanelId, position) {
