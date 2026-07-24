@@ -9968,7 +9968,7 @@
         }
       });
       reconfigurePrimarySurface();
-      saveSpaces(); renderSpaces(); syncLockGridBtn();
+      saveSpaces(); renderSpaces(); renderSidebar(); syncLockGridBtn();
     }
 
     function leaveSpace() {
@@ -9993,7 +9993,7 @@
       spaceMode = null; activeSpaceId = null;
       if (emptyState) emptyState.style.display = sessions.size ? 'none' : '';
       reconfigurePrimarySurface();
-      saveSpaces(); renderSpaces(); syncLockGridBtn();
+      saveSpaces(); renderSpaces(); renderSidebar(); syncLockGridBtn();
     }
 
     // ── Add-tile affordance (SP2 is a picker; section→grid drag is SP3). ──
@@ -15291,7 +15291,10 @@
               renderSidebar = utils.createRenderSidebar({
                 sessionListEl,
                 sessions,
-                getActiveSessionName: () => activeSessionName,
+                // Single-selection: while a Space is entered, NO session is
+                // highlighted (the Space owns the highlight). Exactly one thing
+                // is selected across the whole sidebar, ever.
+                getActiveSessionName: () => (spaceMode ? null : activeSessionName),
                 // SESSIONS and SPACES are mutually-exclusive view modes: clicking
                 // a session drops out of any active Space into that session's
                 // single-terminal view. leaveSpace() first also frees the tile
