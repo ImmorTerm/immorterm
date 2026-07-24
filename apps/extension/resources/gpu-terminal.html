@@ -54,6 +54,15 @@
        with the project's selected theme accent. -->
   <div id="tab-bar" style="display:none;">
     <div id="tab-strip"></div>
+    <!-- Layout controls live in the title strip (VS Code puts them here), right-
+         aligned before the new-project button — a line of their own, never over
+         the terminal. Workshop-panel toggle omitted (on-demand pane; needs
+         disabled-when-empty semantics before it earns a slot). -->
+    <div id="layout-cluster" role="group" aria-label="Layout">
+      <button class="layout-btn" id="layout-files" type="button" title="Toggle file browser" aria-pressed="false"><span class="codicon codicon-layout-sidebar-left"></span></button>
+      <button class="layout-btn" id="layout-sidebar" type="button" title="Toggle sessions sidebar" aria-pressed="false"><span class="codicon codicon-layout-sidebar-right"></span></button>
+      <button class="layout-btn" id="layout-rails" type="button" title="Toggle activity bar" aria-pressed="false"><span class="codicon codicon-layout-activitybar-left"></span></button>
+    </div>
     <button id="tab-new" class="tab-btn" title="Open project (⌘T)">+</button>
   </div>
   <!-- Per-project trust banner. Shown only in standalone Tauri, only
@@ -1372,17 +1381,6 @@
       <div id="status-indicator"></div>
       <button id="sidebar-expand-btn" title="Show sessions">&lsaquo;</button>
       <button id="file-browser-expand-btn" title="Show files">&rsaquo;</button>
-      <!-- Layout cluster: toggles for the always-present panes only. A workshop-
-           panel toggle is deliberately omitted — #workshop-panel is an on-demand
-           surface (auto-hidden when the active session has zero open workshops),
-           so a layout toggle for it would report a visible pane while none shows
-           and no-op on click. It needs a product decision (disabled-when-empty
-           semantics) before it earns a slot here. -->
-      <div id="layout-cluster" role="group" aria-label="Layout">
-        <button class="layout-btn" id="layout-files" type="button" title="Toggle file browser" aria-pressed="false"><span class="codicon codicon-layout-sidebar-left"></span></button>
-        <button class="layout-btn" id="layout-sidebar" type="button" title="Toggle sessions sidebar" aria-pressed="false"><span class="codicon codicon-layout-sidebar-right"></span></button>
-        <button class="layout-btn" id="layout-rails" type="button" title="Toggle activity bar" aria-pressed="false"><span class="codicon codicon-layout-activitybar-left"></span></button>
-      </div>
     </div>
     <!-- Workshop panel: dedicated column for AI-authored persistent webview
          panes. Lives between the terminal area and the sessions sidebar so
