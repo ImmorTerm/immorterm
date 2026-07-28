@@ -56,16 +56,27 @@ function getGitRemoteRepoName(workspacePath: string): string | null {
 }
 
 /**
- * Read project ID from .claude/project-id file if it exists.
+ * Directories probed for a saved project-id, in order. `.immorterm/` is the
+ * canonical home; `.claude/` is where it used to live and is still read,
+ * because relocating it would change the slug — and therefore the plans and
+ * tasks directories — under every project that already has one.
+ *
+ * Must stay in step with the daemon's `project_id_from_file` (mcp.rs) and the
+ * hub's `read_project_id_file` (routes/project_id.rs).
+ */
+const PROJECT_ID_DIRS = ['.immorterm', '.claude'] as const;
+
+/**
+ * Read the saved project ID if one exists, preferring the canonical location.
  *
  * @param workspacePath Path to the workspace folder
  * @returns Saved project ID or null if not found
  */
 function readProjectIdFile(workspacePath: string): string | null {
-  const projectIdPath = path.join(workspacePath, '.claude', 'project-id');
-
-  try {
-    if (fs.existsSync(projectIdPath)) {
+  for (const dir of PROJECT_ID_DIRS) {
+    const projectIdPath = path.join(workspacePath, dir, 'project-id');
+    try {
+      if (!fs.existsSync(projectIdPath)) continue;
       const content = fs.readFileSync(projectIdPath, 'utf8').trim();
       if (content) {
         // Sanitize instead of reject — MUST match the daemon's
@@ -79,29 +90,32 @@ function readProjectIdFile(workspacePath: string): string | null {
           .replace(/^-+|-+$/g, '');
         return sanitized ? sanitized.slice(0, 50) : 'unnamed-project';
       }
+    } catch {
+      // Unreadable — try the next candidate.
     }
-  } catch {
-    // File doesn't exist or can't be read
   }
 
   return null;
 }
 
 /**
- * Save project ID to .claude/project-id file.
- * Creates .claude directory if it doesn't exist.
+ * Save project ID to `<workspace>/.immorterm/project-id`.
+ *
+ * Writes only the canonical location. An existing `.claude/project-id` is left
+ * exactly where it is — readProjectIdFile still finds it, so no project's slug
+ * moves; over time only new projects stop growing a `.claude/` they may never
+ * otherwise need (a Codex-only user has no other reason for one).
  *
  * @param workspacePath Path to the workspace folder
  * @param projectId The project ID to save
  */
 function writeProjectIdFile(workspacePath: string, projectId: string): void {
-  const claudeDir = path.join(workspacePath, '.claude');
-  const projectIdPath = path.join(claudeDir, 'project-id');
+  const stateDir = path.join(workspacePath, '.immorterm');
+  const projectIdPath = path.join(stateDir, 'project-id');
 
   try {
-    // Create .claude directory if it doesn't exist
-    if (!fs.existsSync(claudeDir)) {
-      fs.mkdirSync(claudeDir, { recursive: true });
+    if (!fs.existsSync(stateDir)) {
+      fs.mkdirSync(stateDir, { recursive: true });
     }
 
     fs.writeFileSync(projectIdPath, projectId, 'utf8');

@@ -7,6 +7,7 @@ pub mod files_api;
 pub mod legacy;
 pub mod modal_api;
 pub mod plans;
+pub mod project_id;
 pub mod registry;
 pub mod remote_api;
 pub mod spaces;

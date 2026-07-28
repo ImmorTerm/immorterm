@@ -4853,18 +4853,28 @@ fn get_stable_project_id() -> Result<String, String> {
     Ok(sanitize_project_id(&folder))
 }
 
-/// Branch 2 of `get_stable_project_id`: the optional `.claude/project-id`
-/// override file. Sanitized — the file is repo-controlled content that becomes
-/// a path component under ~/.immorterm (tasks AND plans), so raw traversal
-/// like `../../../evil` must not pass through.
+/// Branch 2 of `get_stable_project_id`: the optional saved project-id override.
+///
+/// Canonically `<project>/.immorterm/project-id`; `<project>/.claude/project-id`
+/// is still read because that is where it used to live and moving it would
+/// change the slug — and therefore the plans and tasks directories — under
+/// every project that already has one. Nothing here writes or deletes; only
+/// newly-initialized projects get the new path.
+///
+/// Sanitized — the file is repo-controlled content that becomes a path
+/// component under ~/.immorterm (tasks AND plans), so raw traversal like
+/// `../../../evil` must not pass through.
 fn project_id_from_file(cwd: &std::path::Path) -> Option<String> {
-    let id = std::fs::read_to_string(cwd.join(".claude").join("project-id")).ok()?;
-    let id = id.trim();
-    if id.is_empty() {
-        None
-    } else {
-        Some(sanitize_project_id(id))
+    for rel in [".immorterm", ".claude"] {
+        let Ok(id) = std::fs::read_to_string(cwd.join(rel).join("project-id")) else {
+            continue;
+        };
+        let id = id.trim();
+        if !id.is_empty() {
+            return Some(sanitize_project_id(id));
+        }
     }
+    None
 }
 
 fn extract_user_repo(url: &str) -> Option<String> {
@@ -6039,5 +6049,45 @@ mod tests {
         .unwrap();
         assert_eq!(v["type"], "NotifyPlanChanged");
         assert_eq!(v["unresolved_decisions"], 2);
+    }
+
+    /// T26: the saved project-id moved to `.immorterm/`, but `.claude/` must
+    /// still resolve — the slug is a path component of ~/.immorterm/plans and
+    /// ~/.immorterm/tasks, so losing it would orphan an existing project's
+    /// plans and tasks. Must agree with the hub's read_project_id_file and the
+    /// extension's readProjectIdFile.
+    #[test]
+    fn project_id_file_prefers_immorterm_but_still_reads_claude() {
+        let base = std::env::temp_dir().join(format!("immorterm-pidfile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        // Legacy only — must still resolve.
+        let legacy = base.join("legacy");
+        std::fs::create_dir_all(legacy.join(".claude")).unwrap();
+        std::fs::write(legacy.join(".claude").join("project-id"), "old-proj\n").unwrap();
+        assert_eq!(project_id_from_file(&legacy).as_deref(), Some("old-proj"));
+
+        // Both present — canonical wins.
+        let both = base.join("both");
+        std::fs::create_dir_all(both.join(".claude")).unwrap();
+        std::fs::create_dir_all(both.join(".immorterm")).unwrap();
+        std::fs::write(both.join(".claude").join("project-id"), "old-proj\n").unwrap();
+        std::fs::write(both.join(".immorterm").join("project-id"), "new-proj\n").unwrap();
+        assert_eq!(project_id_from_file(&both).as_deref(), Some("new-proj"));
+
+        // Traversal is still sanitized out of BOTH locations.
+        let evil = base.join("evil");
+        std::fs::create_dir_all(evil.join(".immorterm")).unwrap();
+        std::fs::write(evil.join(".immorterm").join("project-id"), "../../../evil\n").unwrap();
+        let got = project_id_from_file(&evil).unwrap();
+        assert!(!got.contains(".."), "traversal survived sanitization: {got}");
+        assert!(!got.contains('/'), "separator survived sanitization: {got}");
+
+        // Neither.
+        let none = base.join("none");
+        std::fs::create_dir_all(&none).unwrap();
+        assert_eq!(project_id_from_file(&none), None);
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

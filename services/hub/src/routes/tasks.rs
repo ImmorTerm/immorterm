@@ -23,14 +23,12 @@ fn sanitize_project_id(raw: &str) -> String {
 }
 
 /// Resolve projectId the same way the extension does: prefer a saved
-/// `<project_dir>/.claude/project-id`, fall back to sanitized basename.
+/// saved project-id (`.immorterm/`, legacy `.claude/`), fall back to sanitized basename.
 fn resolve_project_id(project_dir: &str) -> String {
-    let saved = PathBuf::from(project_dir).join(".claude/project-id");
-    if let Ok(s) = std::fs::read_to_string(&saved) {
-        let trimmed = s.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
+    // NOTE: returned UNSANITIZED, unlike plans/spaces. Sanitizing here would
+    // relocate every existing project's task files.
+    if let Some(saved) = super::project_id::read_project_id_file(project_dir) {
+        return saved;
     }
     let basename = PathBuf::from(project_dir)
         .file_name()

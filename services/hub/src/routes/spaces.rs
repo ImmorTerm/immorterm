@@ -91,12 +91,9 @@ fn resolve_project_id(project_dir: &str) -> String {
             }
         }
     }
-    // 2. .claude/project-id — SANITIZED (traversal-safe)
-    if let Ok(s) = std::fs::read_to_string(PathBuf::from(project_dir).join(".claude/project-id")) {
-        let t = s.trim();
-        if !t.is_empty() {
-            return sanitize_project_id(t);
-        }
+    // 2. saved project-id (.immorterm/, legacy .claude/) — SANITIZED (traversal-safe)
+    if let Some(saved) = super::project_id::read_project_id_file(project_dir) {
+        return sanitize_project_id(&saved);
     }
     // 3. folder basename
     sanitize_project_id(
