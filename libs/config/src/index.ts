@@ -200,9 +200,14 @@ export interface ProjectConfig {
 	services: {
 		memory: MemoryServiceConfig;
 		mcpGateway: ServiceConfig;
-		/** v3+ — per-vendor enable flags. All default `enabled: true` (opt-OUT model).
-		 * Installer writes per-vendor config files only when the flag is true. */
+		/** v3+ — per-vendor enable flags. Only Claude Code defaults on (opt-IN);
+		 * enabling a vendor drops config files into the project root, so it stays
+		 * a deliberate choice. Installer writes a vendor's config only when true. */
 		vendors: VendorsConfig;
+		/** Set once the user has actually been through the Vendors picker. Tells
+		 * `resolveVendors` to honour an all-enabled map instead of treating it as
+		 * the legacy auto-written opt-out default and resetting it. */
+		vendorsChosen?: boolean;
 		/** v3+ — digest LLM selection. Optional; populated by first-run wizard.
 		 * When absent, digester auto-detects (`claude` on PATH → anthropic-cli, etc.). */
 		digest?: DigestConfig;

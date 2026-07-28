@@ -27,6 +27,17 @@ pub struct VendorProbe {
     /// Path where vendor stores its OAuth/auth config; presence implies the
     /// user has logged in interactively at least once.
     pub config_path: Option<String>,
+    /// Whether this vendor gates hook execution behind an interactive trust
+    /// prompt that the user has not yet accepted for this project.
+    ///
+    /// Only Codex does this today: it fingerprints each hook in
+    /// `.codex/hooks.json` and runs NONE of them until the user picks
+    /// "Trust all and continue", recording approval in `~/.codex/config.toml`
+    /// under `[hooks.state."<abs path>:<event>:0:0"]`. Without surfacing it,
+    /// the wizard's promise that ticking a vendor feeds memory is silently
+    /// false. `None` = the vendor has no such gate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hooks_trusted: Option<bool>,
 }
 
 const VENDORS: &[(&str, &str, &str, &[&str])] = &[
@@ -80,7 +91,41 @@ fn first_existing_config(home: &Path, paths: &[&str]) -> Option<String> {
     None
 }
 
-pub async fn detect_vendors() -> Json<Value> {
+/// Whether Codex has any trusted hook entries for `project_dir`.
+///
+/// Reads `[hooks.state."<abs>/.codex/hooks.json:<event>:0:0"]` keys out of
+/// `~/.codex/config.toml`. Matching on the path prefix is enough — we only
+/// need to know whether the user has been through the trust prompt, not which
+/// specific hooks were approved. Deliberately does NOT parse or verify
+/// `trusted_hash`: that is Codex's security control, and reproducing it would
+/// both defeat the control and break on any version bump.
+fn codex_hooks_trusted(home: &Path, project_dir: Option<&str>) -> Option<bool> {
+    let project_dir = project_dir?;
+    let config = std::fs::read_to_string(home.join(".codex").join("config.toml")).ok()?;
+    let needle = format!("{}/.codex/hooks.json:", project_dir.trim_end_matches('/'));
+    Some(
+        config
+            .lines()
+            .filter(|l| l.trim_start().starts_with("[hooks.state."))
+            .any(|l| l.contains(&needle)),
+    )
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct DetectQuery {
+    /// Absolute project path. Optional — omit for a host-wide probe.
+    pub project_dir: Option<String>,
+}
+
+pub async fn detect_vendors(
+    axum::extract::Query(q): axum::extract::Query<DetectQuery>,
+) -> Json<Value> {
+    detect_vendors_for(q.project_dir.as_deref()).await
+}
+
+/// Same probe, scoped to a project so per-project state (Codex's hook trust)
+/// can be reported. `project_dir` must be an absolute path.
+pub async fn detect_vendors_for(project_dir: Option<&str>) -> Json<Value> {
     let home = home_dir();
     let probes: Vec<VendorProbe> = VENDORS
         .iter()
@@ -89,6 +134,12 @@ pub async fn detect_vendors() -> Json<Value> {
             let config_path = home
                 .as_ref()
                 .and_then(|h| first_existing_config(h, paths));
+            let hooks_trusted = if *id == "codex" {
+                home.as_ref()
+                    .and_then(|h| codex_hooks_trusted(h, project_dir))
+            } else {
+                None
+            };
             VendorProbe {
                 id,
                 display,
@@ -96,6 +147,7 @@ pub async fn detect_vendors() -> Json<Value> {
                 installed,
                 configured: config_path.is_some(),
                 config_path,
+                hooks_trusted,
             }
         })
         .collect();
@@ -125,6 +177,46 @@ mod tests {
         assert!(!is_on_path("claude;rm -rf /"));
         assert!(!is_on_path("$(whoami)"));
         assert!(!is_on_path(".."));
+    }
+
+    /// Codex runs NO hooks until the user accepts its trust prompt, and
+    /// records approval in ~/.codex/config.toml. The wizard has to be able to
+    /// tell "hooks installed" from "hooks installed and actually running".
+    #[test]
+    fn codex_hook_trust_is_read_from_config_toml() {
+        let tmp = std::env::temp_dir().join(format!("imvend-{}", std::process::id()));
+        let codex = tmp.join(".codex");
+        std::fs::create_dir_all(&codex).unwrap();
+        let project = "/Users/u/Development/proj";
+
+        // No config at all → nothing trusted.
+        assert_eq!(codex_hooks_trusted(&tmp, Some(project)), None);
+
+        // Config present but this project has never been trusted.
+        std::fs::write(
+            codex.join("config.toml"),
+            "[projects.\"/Users/u/other\"]\ntrust_level = \"trusted\"\n",
+        )
+        .unwrap();
+        assert_eq!(codex_hooks_trusted(&tmp, Some(project)), Some(false));
+
+        // Real shape, transcribed from a live 0.145 config after accepting.
+        std::fs::write(
+            codex.join("config.toml"),
+            format!(
+                "[hooks.state]\n\n[hooks.state.\"{project}/.codex/hooks.json:session_start:0:0\"]\n\
+                 trusted_hash = \"sha256:912cfdc0\"\n"
+            ),
+        )
+        .unwrap();
+        assert_eq!(codex_hooks_trusted(&tmp, Some(project)), Some(true));
+
+        // A different project's trust must not count as this one's.
+        assert_eq!(codex_hooks_trusted(&tmp, Some("/Users/u/elsewhere")), Some(false));
+        // No project scope → nothing to report.
+        assert_eq!(codex_hooks_trusted(&tmp, None), None);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

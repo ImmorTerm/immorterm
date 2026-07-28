@@ -129,6 +129,8 @@ const FONT_HEBREW_BOLD: &[u8] = include_bytes!("fonts/Heebo-Bold.ttf");
 /// at init time so glyphs are crisp on HiDPI screens.
 const DEFAULT_FONT_SIZE: f32 = 16.0;
 
+use immorterm_core::dialect::{row_is_blank, row_is_menu_option, AiDialect};
+
 /// GPU state — initialized asynchronously after canvas is available.
 struct GpuState {
     device: wgpu::Device,
@@ -147,6 +149,8 @@ struct BackgroundState {
     last_activity_ms: f64,
     ai_stats: String,
     ai_ctx_pct: f32,
+    /// Which agent's TUI conventions to assume when reading the grid.
+    ai_dialect: AiDialect,
     session_title: String,
     immorterm_id: String,
     /// Accumulated time for title marquee animation (seconds).
@@ -217,6 +221,9 @@ pub struct WasmTerminalInner {
     ai_stats: String,
     /// CTX usage percentage (0.0 = no bar, 1–100 = show progress bar behind center section)
     ai_ctx_pct: f32,
+    /// Which agent's TUI conventions to assume when reading structure out of
+    /// the grid. Per-session: each tab can host a different agent.
+    ai_dialect: AiDialect,
     /// Epoch millis (from js_sys::Date::now()) of last PTY data received.
     /// Used to display "Xs ago" / "Xm ago" in the status bar.
     last_activity_ms: f64,
@@ -292,6 +299,7 @@ impl WasmTerminalInner {
             custom_font_name: None,
             ai_stats: String::new(),
             ai_ctx_pct: 0.0,
+            ai_dialect: AiDialect::default(),
             last_activity_ms: 0.0,
             pending_border_enabled: true,
             pending_border_opacity: 1.0,
@@ -1501,6 +1509,20 @@ impl WasmTerminalInner {
     /// grid upward to find the last INVERSE cell — that's the visual cursor.
     /// Returns (col, grid_row) or None if no INVERSE cell found.
     fn find_visual_cursor(&self) -> Option<(usize, usize)> {
+        // Codex leaves the terminal's real cursor visible and parked in the
+        // composer, and paints no INVERSE cell anywhere — verified against a
+        // live 0.145 frame, where the whole composer row carries DIM (log
+        // attr 16) and never the inverse bit (32). The scan below would
+        // therefore return None for every Codex session, so use the cursor the
+        // terminal already tracks.
+        if self.ai_dialect == AiDialect::Codex {
+            let cursor = &self.terminal.cursor;
+            if cursor.row < self.rows {
+                return Some((cursor.col, cursor.row));
+            }
+            return None;
+        }
+
         // Scan from bottom of grid upward — the cursor is typically near the bottom
         for grid_row in (0..self.rows).rev() {
             if let Some(row) = self.terminal.grid.row(grid_row) {
@@ -1809,12 +1831,19 @@ impl WasmTerminalInner {
     /// right after `❯ ` where user input begins.
     fn find_prompt_row(&self) -> Option<(usize, usize)> {
         let grid = &self.terminal.grid;
+        let sentinel = self.ai_dialect.prompt_sentinel();
         // Scan from bottom up — prompt is near the bottom
         for r in (0..grid.num_rows()).rev() {
             if let Some(row) = grid.row(r) {
                 for (c, cell) in row.cells.iter().enumerate() {
-                    if cell.grapheme == '❯' {
-                        // Input starts after "❯ " (prompt + space)
+                    if cell.grapheme == sentinel {
+                        // Codex reuses `›` as the highlighted-row marker in its
+                        // menus ("› 1. Yes, continue" on the hook trust prompt).
+                        // Latching onto one would aim every edit at a menu row.
+                        if self.ai_dialect == AiDialect::Codex && row_is_menu_option(row, c) {
+                            continue;
+                        }
+                        // Input starts after the sentinel + space
                         return Some((r, c + 2));
                     }
                 }
@@ -1830,6 +1859,27 @@ impl WasmTerminalInner {
     fn find_input_end_row(&self, start_row: usize) -> usize {
         let grid = &self.terminal.grid;
         let num_rows = grid.num_rows();
+
+        // Codex draws no rule beneath its composer — the region simply ends at
+        // the blank row before the `<model> <effort> · <cwd>` footer. Hunting
+        // for a `─` row here would run to the bottom of the grid and pull the
+        // footer into the "input area".
+        if self.ai_dialect == AiDialect::Codex {
+            let mut end = num_rows.saturating_sub(1);
+            for r in (start_row + 1)..num_rows {
+                let Some(row) = grid.row(r) else { continue };
+                if row_is_blank(row) {
+                    // A blank row only ends the composer if something follows
+                    // it; a trailing blank is just unused grid.
+                    if ((r + 1)..num_rows).any(|k| grid.row(k).is_some_and(|n| !row_is_blank(n))) {
+                        end = r.saturating_sub(1);
+                        break;
+                    }
+                }
+            }
+            return end.max(start_row);
+        }
+
         for r in (start_row + 1)..num_rows {
             if let Some(row) = grid.row(r) {
                 // Count horizontal-rule characters in this row
@@ -2125,12 +2175,26 @@ impl WasmTerminalInner {
                     serde_json::to_string(hex).unwrap_or_default(),
                     display_row, span.start, span.end
                 ),
-                LinkKind::ClaudeImage(n) => format!(
-                    "{{\"kind\":\"claude-image\",\"text\":\"[Image #{n}]\",\"n\":{n},\"row\":{},\"start\":{},\"end\":{}}}",
-                    display_row, span.start, span.end
-                ),
+                LinkKind::ClaudeImage(n) => {
+                    // Claude Code's paste pill, and only its. Reporting it for
+                    // another agent sends the hover to ~/.claude/image-cache,
+                    // which has nothing to do with that agent's session.
+                    if self.ai_dialect != AiDialect::Claude {
+                        return String::new();
+                    }
+                    format!(
+                        "{{\"kind\":\"claude-image\",\"text\":\"[Image #{n}]\",\"n\":{n},\"row\":{},\"start\":{},\"end\":{}}}",
+                        display_row, span.start, span.end
+                    )
+                }
             },
             None => {
+                // Everything below reads Claude Code's TodoWrite rendering —
+                // its summary line and its status-glyph rows, indented with `⎿`.
+                // No other agent draws these, so don't hunt for them.
+                if self.ai_dialect != AiDialect::Claude {
+                    return String::new();
+                }
                 // Task summary line: "N tasks (X done, ...)" or "… +N completed"
                 // Shows an at-a-glance overview of all session tasks on hover.
                 if let Some(row) = get_row(content_row) {
@@ -4279,6 +4343,17 @@ impl WasmTerminalInner {
         self.ai_ctx_pct = pct;
     }
 
+    /// Tell the renderer which agent is running, so grid reads use that
+    /// agent's TUI conventions.
+    ///
+    /// Pass the daemon's `AiTool::name()` value (`claude`, `codex`, …) — it
+    /// already rides the control payload as `claudeRaw.tool`. An empty or
+    /// unrecognised value keeps Claude's behaviour, which is what shipped
+    /// before dialects existed.
+    pub fn set_ai_tool(&mut self, tool: &str) {
+        self.ai_dialect = AiDialect::from_tool(tool);
+    }
+
     /// Replace the AI layer primitives with a fresh set from the daemon.
     ///
     /// The daemon broadcasts the full primitives list (with already-animated values)
@@ -4632,6 +4707,7 @@ impl WasmTerminalInner {
                 &mut self.terminal,
                 Terminal::new(self.cols, self.rows),
             ),
+            ai_dialect: std::mem::take(&mut self.ai_dialect),
             scroll_offset: std::mem::replace(&mut self.scroll_offset, 0),
             selection: std::mem::take(&mut self.selection),
             last_activity_ms: std::mem::replace(&mut self.last_activity_ms, 0.0),
@@ -4674,6 +4750,7 @@ impl WasmTerminalInner {
         self.last_activity_ms = state.last_activity_ms;
         self.ai_stats = state.ai_stats;
         self.ai_ctx_pct = state.ai_ctx_pct;
+        self.ai_dialect = state.ai_dialect;
         self.session_title = state.session_title;
         self.immorterm_id = state.immorterm_id;
         self.title_marquee_time = state.title_marquee_time;
@@ -4772,6 +4849,7 @@ impl WasmTerminalInner {
             last_activity_ms: js_sys::Date::now(),
             ai_stats: String::new(),
             ai_ctx_pct: 0.0,
+            ai_dialect: AiDialect::default(),
             session_title: String::new(),
             immorterm_id: String::new(),
             title_marquee_time: 0.0,
@@ -5043,9 +5121,10 @@ impl WasmTerminalInner {
                 // is `❯` — often wrapped in a box (`│ ❯ …`) so we scan the
                 // first ~10 cells, not just the first non-space position.
                 let sentinel_window = cells.len().min(10);
+                let sentinel = self.ai_dialect.prompt_sentinel();
                 let is_sentinel_row = cells[..sentinel_window]
                     .iter()
-                    .any(|c| c.grapheme == '❯');
+                    .any(|c| c.grapheme == sentinel);
 
                 if is_sentinel_row {
                     sentinel_count += 1;
@@ -5430,7 +5509,7 @@ impl WasmTerminalInner {
                 // the live input prompt; we skip it. Second `❯` is the
                 // previous turn — that's our hard stop.
                 let win = cells.len().min(10);
-                if cells[..win].iter().any(|c| c.grapheme == '❯') {
+                if cells[..win].iter().any(|c| c.grapheme == self.ai_dialect.prompt_sentinel()) {
                     sentinel_count += 1;
                     sentinel_rows.push(content_row);
                     if sentinel_count >= 2 {
@@ -6296,6 +6375,12 @@ impl WasmTerminal {
         }
     }
 
+    pub fn set_ai_tool(&self, tool: &str) {
+        if let Ok(mut i) = self.inner.try_borrow_mut() {
+            i.set_ai_tool(tool);
+        }
+    }
+
     pub fn update_ai_primitives(&self, json: &str, daemon_sb_len: usize) {
         if let Ok(mut i) = self.inner.try_borrow_mut() {
             i.update_ai_primitives(json, daemon_sb_len);
@@ -6566,3 +6651,4 @@ impl WasmTerminal {
         }
     }
 }
+

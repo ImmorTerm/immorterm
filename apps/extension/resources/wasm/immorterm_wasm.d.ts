@@ -168,6 +168,7 @@ export class WasmTerminal {
     selection_update(css_x: number, css_y: number): void;
     set_ai_ctx_pct(pct: number): void;
     set_ai_stats(stats: string): void;
+    set_ai_tool(tool: string): void;
     set_animations_enabled(enabled: boolean): void;
     set_ansi_colors(colors: Float32Array): void;
     set_background_ai_stats(id: number, stats: string): void;
@@ -303,6 +304,7 @@ export interface InitOutput {
     readonly wasmterminal_selection_update: (a: number, b: number, c: number) => void;
     readonly wasmterminal_set_ai_ctx_pct: (a: number, b: number) => void;
     readonly wasmterminal_set_ai_stats: (a: number, b: number, c: number) => void;
+    readonly wasmterminal_set_ai_tool: (a: number, b: number, c: number) => void;
     readonly wasmterminal_set_animations_enabled: (a: number, b: number) => void;
     readonly wasmterminal_set_ansi_colors: (a: number, b: number, c: number) => void;
     readonly wasmterminal_set_background_ai_stats: (a: number, b: number, c: number, d: number) => void;

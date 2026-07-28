@@ -4437,6 +4437,13 @@
     function formatRuntime(secs) { return utils.formatRuntime(secs); }
     function contextBar(pct) { return utils.contextBar(pct); }
 
+    // Which agent is in this terminal. `claudeRaw` is truthy for EVERY vendor,
+    // so gate Claude-shaped behaviour on isClaudeCode() and vendor-neutral
+    // behaviour on isAiActive() — never on `claudeRaw` itself.
+    function aiTool(session) { return utils.aiTool(session); }
+    function isClaudeCode(session) { return utils.isClaudeCode(session); }
+    function isAiActive(session) { return utils.isAiActive(session); }
+
     // ── Background Control Mode ──
     // When true (default), background sessions use subscribe_control (JSON only)
     // instead of subscribe_raw (full PTY). Prevents WASM memory growth crash.
@@ -6166,7 +6173,7 @@
       // paste markers. Refuse rather than silently mangling the session.
       if (hasImages) {
         const sessNow = sessions.get(activeSessionName);
-        if (!sessNow || !sessNow.claudeRaw) {
+        if (!isClaudeCode(sessNow)) {
           console.warn('[comments] image paste needs an active Claude TUI; aborting send');
           return;
         }
@@ -7491,6 +7498,9 @@
                 if (s && msg.event === 'claude_exited') {
                   s.claudeRaw = null;
                   s.aiStats = '';
+                  if (terminal && activeSessionName === sessionName) {
+                    terminal.set_ai_tool('');
+                  }
                   if (s.bgStateId !== null && terminal) {
                     try { terminal.set_background_ai_stats(s.bgStateId, ''); }
                     catch (e) { /* ignore */ }
@@ -7501,6 +7511,11 @@
                 } else if (s && msg.claude.active) {
                   s.claudeRaw = msg.claude;
                   s.aiStats = formatCurrentStats(msg.claude);
+                  // Tell the renderer whose TUI it is reading (`❯` vs `›`, rule
+                  // row vs none, `[Image #N]` vs nothing).
+                  if (terminal && activeSessionName === sessionName) {
+                    terminal.set_ai_tool(msg.claude.tool || '');
+                  }
                   startHealthChecks();
                   startAutoCycle();
                   // Update background session AI stats in WASM
@@ -8535,6 +8550,7 @@
             const s = sessions.get(activeSessionName);
             if (c.active) {
               if (s) { s.claudeRaw = c; s.aiStats = formatCurrentStats(c); }
+              if (terminal) terminal.set_ai_tool(c.tool || '');
               setAiStatsWithOverlay(s ? s.aiStats : formatCurrentStats(c));
               if (terminal) terminal.set_ai_ctx_pct(c.context_pct || 0);
               startHealthChecks();
@@ -11467,7 +11483,7 @@
       const _imgStaged = !!(composeImagePaste && composeImagePaste.blobs && composeImagePaste.blobs.length > 0);
       if (e.key === 'Enter' && !e.shiftKey && !e.altKey
           && ((stagedComments && stagedComments.length > 0) || (hasAttachmentPills() && !_imgStaged))
-          && _sessForEnter && _sessForEnter.claudeRaw) {
+          && isAiActive(_sessForEnter)) {
         e.preventDefault();
         const taEl = commentComposeEl
           ? commentComposeEl.querySelector('.cm-prompt-textarea')
@@ -11530,7 +11546,7 @@
       // title-only tasks from terminal context.
       if (e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey && e.key === 'd' && !terminal.has_selection()) {
         const sd = sessions.get(activeSessionName);
-        const claudeActiveD = !!(sd && sd.claudeRaw);
+        const claudeActiveD = isClaudeCode(sd);
         const hasMultiCursorD = terminal.has_pseudo_cursors && terminal.has_pseudo_cursors();
         if (claudeActiveD && !hasMultiCursorD) {
           // Cmd+D no-selection prefers BULLET MARKERS (`-`, `*`, `1.`)
@@ -11583,7 +11599,7 @@
           && (e.code === 'KeyE' || e.key === 'e' || e.key === 'E'
               || e.key === 'Dead' || e.key === '´')) {
         const ss = sessions.get(activeSessionName);
-        const claudeActiveS = !!(ss && ss.claudeRaw);
+        const claudeActiveS = isClaudeCode(ss);
         const hasMultiCursorS = terminal.has_pseudo_cursors && terminal.has_pseudo_cursors();
         if (claudeActiveS && !hasMultiCursorS && typeof terminal.detect_claude_bullets === 'function') {
           // Optional row filter — only set when the user has a real selection.
@@ -11650,7 +11666,7 @@
           && (e.code === 'KeyD' || e.key === 'd' || e.key === 'D'
               || e.key === '∂')) {
         const sd2 = sessions.get(activeSessionName);
-        const claudeActiveD2 = !!(sd2 && sd2.claudeRaw);
+        const claudeActiveD2 = isClaudeCode(sd2);
         const hasMultiCursorD2 = terminal.has_pseudo_cursors && terminal.has_pseudo_cursors();
         if (claudeActiveD2 && !hasMultiCursorD2) {
           let selStartRowD = -1, selEndRowD = -1;
@@ -11747,7 +11763,7 @@
       // bullets bounded by a `❯` user-prompt sentinel.
       if (e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'e' && !terminal.has_selection()) {
         const s = sessions.get(activeSessionName);
-        const claudeActive = !!(s && s.claudeRaw);
+        const claudeActive = isClaudeCode(s);
         const hasMultiCursor = terminal.has_pseudo_cursors && terminal.has_pseudo_cursors();
         try {
           const dbgInfo = (typeof terminal.debug_claude_bullets === 'function')
@@ -12149,7 +12165,9 @@
     function formatPathRef(absPath) {
       const session = sessions.get(activeSessionName);
       const sessionCwd = (session && session.cwd) ? String(session.cwd) : '';
-      const claudeActive = !!(session && session.claudeRaw);
+      // `@path` is Claude Code's mention syntax. Other agents get the bare
+      // quoted path, which every one of them treats as a literal path.
+      const claudeActive = isClaudeCode(session);
       let p = absPath;
       if (sessionCwd && p.startsWith(sessionCwd)) {
         let rel = p.slice(sessionCwd.length);
@@ -12586,7 +12604,7 @@
         // TUI prompt to submit into — in a plain shell it'd dump the
         // citation block as a shell command. Hidden in shell mode entirely.
         const sessForComment = sessions.get(activeSessionName);
-        if (sessForComment && sessForComment.claudeRaw) {
+        if (isAiActive(sessForComment)) {
           const commentItem = el('div', 'sb-context-menu-item', '💬  Add comment');
           commentItem.addEventListener('click', () => {
             menu.remove();
@@ -13956,7 +13974,9 @@
         // [Image #N] hover preview actions. Resolves the cached file path
         // from the active session's Claude UUID + the link's `n` counter.
         const sessForImg = sessions.get(activeSessionName);
-        const imgUuid = sessForImg && sessForImg.claudeRaw && sessForImg.claudeRaw.session_id;
+        // `~/.claude/image-cache/` only exists for Claude Code. A Codex or
+        // Cursor session has no business resolving a hover against it.
+        const imgUuid = isClaudeCode(sessForImg) && sessForImg.claudeRaw.session_id;
         const filePath = imgUuid ? '~/.claude/image-cache/' + imgUuid + '/' + link.n + '.png' : null;
         actionsRow.appendChild(mkBtn('Copy image', async (btn) => {
           // meta.imageDataUrl is either the hub URL (standalone) or a
@@ -14198,7 +14218,8 @@
           //                             since the standalone shim only does
           //                             existence checks, not image serving.
           const sess = sessions.get(activeSessionName);
-          const uuid = sess && sess.claudeRaw && sess.claudeRaw.session_id;
+          // Claude-only cache path — see isClaudeCode().
+          const uuid = isClaudeCode(sess) && sess.claudeRaw.session_id;
           // On REMOTE tabs the daemon's jsonl-tail tracker often can't
           // populate session_id (the container's `~/.claude/projects/`
           // is sometimes empty even though Claude is running). Fall back
@@ -15440,7 +15461,7 @@
                 // `[Image #N]` text. Rebuild the key to match what was sent
                 // to check-link-exists.
                 const sess = sessions.get(activeSessionName);
-                const uuid = sess && sess.claudeRaw && sess.claudeRaw.session_id;
+                const uuid = isClaudeCode(sess) && sess.claudeRaw.session_id;
                 if (uuid) {
                   hoverKey = '~/.claude/image-cache/' + uuid + '/'
                     + linkHoverState.link.n + '.png|0';
@@ -16306,7 +16327,7 @@
             if (!ws || paths.length === 0) break;
             const session = sessions.get(activeSessionName);
             const sessionCwd = (session && session.cwd) ? String(session.cwd) : '';
-            const claudeActive = !!(session && session.claudeRaw);
+            const claudeActive = isClaudeCode(session);
             const formatted = paths
               .filter((p) => typeof p === 'string' && p.length > 0)
               .map((abs) => {

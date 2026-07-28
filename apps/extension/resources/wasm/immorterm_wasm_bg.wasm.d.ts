@@ -80,6 +80,7 @@ export const wasmterminal_selection_start_block: (a: number, b: number, c: numbe
 export const wasmterminal_selection_update: (a: number, b: number, c: number) => void;
 export const wasmterminal_set_ai_ctx_pct: (a: number, b: number) => void;
 export const wasmterminal_set_ai_stats: (a: number, b: number, c: number) => void;
+export const wasmterminal_set_ai_tool: (a: number, b: number, c: number) => void;
 export const wasmterminal_set_animations_enabled: (a: number, b: number) => void;
 export const wasmterminal_set_ansi_colors: (a: number, b: number, c: number) => void;
 export const wasmterminal_set_background_ai_stats: (a: number, b: number, c: number, d: number) => void;

@@ -375,6 +375,13 @@ impl AiExtractor {
     }
 
     /// Classify a single line's role based on tool-specific markers.
+    /// True for a Codex menu row like `1. Yes, continue` — the text that
+    /// follows `›` when it marks the highlighted option rather than a prompt.
+    fn is_codex_menu_row(rest: &str) -> bool {
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        !digits.is_empty() && rest[digits.len()..].starts_with(". ")
+    }
+
     fn classify_line(&self, line: &str) -> LineRole {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -421,20 +428,45 @@ impl AiExtractor {
                     LineRole::None
                 }
             }
+            // Codex's glyph table, captured from a live 0.145 session:
+            //   › <text>   user turn        (U+203A SINGLE RIGHT-POINTING ANGLE QUOTE)
+            //   • <text>   assistant turn   (U+2022 BULLET)
+            //   ╭─╮ │ ╰─╯  banner box chrome
+            //   ⚠ <text>   warning chrome
+            //   <model> <effort> · <cwd>    footer chrome
+            // Note `›` doubles as the selected-row marker in Codex menus
+            // ("› 1. Yes, continue" on the trust prompt), so a `›` followed by
+            // "<digit>. " is chrome, not a user turn — otherwise a menu keypress
+            // would be logged as something the user said.
+            Some(AiTool::Codex) => {
+                if let Some(rest) = trimmed.strip_prefix('\u{203A}') {
+                    let rest = rest.trim();
+                    // Bare marker = the empty composer. Numbered row = a menu.
+                    if rest.is_empty() || Self::is_codex_menu_row(rest) {
+                        return LineRole::None;
+                    }
+                    return LineRole::User;
+                }
+                if let Some(rest) = trimmed.strip_prefix('\u{2022}') {
+                    if rest.trim().is_empty() {
+                        return LineRole::None;
+                    }
+                    return LineRole::Assistant;
+                }
+                LineRole::None // continuation, or chrome we deliberately ignore
+            }
             // Vendor TUIs that don't ship with a published prompt-glyph
             // table yet. Conservative heuristics:
             //   - User prompt: line begins with `❯ ` or `> ` (with content
             //     after the marker — bare markers are chrome).
             //   - Everything else: continuation (None) → defaults to
             //     assistant when the chunk has no user marker.
-            // When we get a real grid.jsonl capture for a vendor with a
-            // distinctive assistant glyph (e.g. Codex shows `▌`, opencode
-            // ships its own theme), specialise the branch then. Until
-            // then, the heuristic is intentionally narrow so we don't
-            // mis-tag chrome as user input the way Claude's bare `❯` did.
+            // When we get a real grid.jsonl capture for one of these (the way
+            // we now have for Codex), specialise it the same way. Until then the
+            // heuristic stays narrow so we don't mis-tag chrome as user input
+            // the way Claude's bare `❯` did.
             Some(
-                AiTool::Codex
-                | AiTool::Cursor
+                AiTool::Cursor
                 | AiTool::Windsurf
                 | AiTool::Cline
                 | AiTool::Opencode
@@ -823,7 +855,6 @@ mod tests {
         // recognize that as a user line — the old generic fallback only
         // matched `❯`/`$`/`%`, so non-Claude prompts came through as None.
         for tool in [
-            AiTool::Codex,
             AiTool::Cursor,
             AiTool::Windsurf,
             AiTool::Cline,
@@ -852,7 +883,6 @@ mod tests {
         // Same chrome-vs-real-prompt distinction as Claude's bare `❯`:
         // a `> ` line with no content after must NOT be classified user.
         for tool in [
-            AiTool::Codex,
             AiTool::Cursor,
             AiTool::Windsurf,
             AiTool::Opencode,
@@ -879,10 +909,67 @@ mod tests {
     fn non_claude_vendor_chrome_lines_are_none() {
         // Random output text (no marker) must be None so it inherits the
         // chunk's role from a definitive marker line.
-        let e = vendor_extractor(AiTool::Codex);
+        let e = vendor_extractor(AiTool::Cursor);
         assert_eq!(e.classify_line("Reading file..."), LineRole::None);
         assert_eq!(e.classify_line("Tokens: 1.2k"), LineRole::None);
         assert_eq!(e.classify_line("  some indented output"), LineRole::None);
+    }
+
+    /// Codex's real glyphs, transcribed from a live 0.145 session frame.
+    /// Before this branch existed Codex fell into the generic vendor fallback,
+    /// which matched only `❯`/`> ` — so every Codex line came back None and
+    /// `classify_role` defaulted the whole chunk to "assistant", meaning no
+    /// Codex turn was ever attributed to the user.
+    #[test]
+    fn codex_user_and_assistant_glyphs() {
+        let e = vendor_extractor(AiTool::Codex);
+        // › U+203A = user turn
+        assert_eq!(
+            e.classify_line("\u{203A} reply with exactly the word ok and nothing else"),
+            LineRole::User
+        );
+        // • U+2022 = assistant turn
+        assert_eq!(e.classify_line("\u{2022} ok"), LineRole::Assistant);
+        // Bare markers are the empty composer / chrome.
+        assert_eq!(e.classify_line("\u{203A}"), LineRole::None);
+        assert_eq!(e.classify_line("\u{2022}"), LineRole::None);
+    }
+
+    #[test]
+    fn codex_chrome_is_not_a_turn() {
+        let e = vendor_extractor(AiTool::Codex);
+        // Banner box, warning row and the model/cwd footer.
+        assert_eq!(
+            e.classify_line("\u{256D}\u{2500}\u{2500}\u{2500}\u{256E}"),
+            LineRole::None
+        );
+        assert_eq!(e.classify_line("\u{2502} >_ OpenAI Codex (v0.145.0)"), LineRole::None);
+        assert_eq!(
+            e.classify_line("\u{26A0} failed to parse hooks config"),
+            LineRole::None
+        );
+        assert_eq!(
+            e.classify_line("gpt-5.6-sol default \u{00B7} ~/Development/flam"),
+            LineRole::None
+        );
+        // Codex prints its own `> ` chrome on startup — the generic vendor
+        // branch would have logged this as something the user typed.
+        assert_eq!(
+            e.classify_line("> You are in /Users/me/Development/proj"),
+            LineRole::None
+        );
+    }
+
+    /// `›` doubles as the selected-row marker in Codex menus, so a numbered row
+    /// must not be recorded as a user prompt — otherwise answering the hook
+    /// trust prompt shows up in memory as "1. Yes, continue".
+    #[test]
+    fn codex_menu_selection_row_is_not_a_user_turn() {
+        let e = vendor_extractor(AiTool::Codex);
+        assert_eq!(e.classify_line("\u{203A} 1. Yes, continue"), LineRole::None);
+        assert_eq!(e.classify_line("\u{203A} 2. Trust all and continue"), LineRole::None);
+        // A prompt that merely starts with a digit is still a prompt.
+        assert_eq!(e.classify_line("\u{203A} 2 spaces or 4?"), LineRole::User);
     }
 
     #[test]

@@ -2,6 +2,7 @@ pub mod ai_layer;
 pub mod cursor_nav;
 pub mod cell;
 pub mod cursor;
+pub mod dialect;
 pub mod diagram;
 pub mod expression;
 pub mod graphics;

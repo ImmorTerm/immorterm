@@ -64,7 +64,11 @@ function extensionDeps(projectPath: string): HookInstallDeps {
   const config = readProjectConfig(projectPath);
   return {
     memoryPort: getMemoryPort(),
-    vendors: resolveVendors(config?.services?.vendors, defaultVendorsConfig()),
+    vendors: resolveVendors(
+      config?.services?.vendors,
+      defaultVendorsConfig(),
+      config?.services?.vendorsChosen
+    ),
     resourceRoots: resourceRoots(),
   };
 }
@@ -100,7 +104,11 @@ export function writeAllVendorConfigs(projectPath: string): string[] {
   const config = readProjectConfig(projectPath);
   return writeAllVendorConfigsCore(
     projectPath,
-    resolveVendors(config?.services?.vendors, defaultVendorsConfig())
+    resolveVendors(
+      config?.services?.vendors,
+      defaultVendorsConfig(),
+      config?.services?.vendorsChosen
+    )
   );
 }
 

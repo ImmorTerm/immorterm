@@ -440,6 +440,14 @@ pub fn recall() -> Result<()> {
 
     let claude_uuid = resolve_claude_uuid_for_recall(&wid);
 
+    // Non-Claude agents get their own resume path. The tiers below are all
+    // Claude-shaped — its `--resume` flag, its `~/.claude/projects` layout and
+    // its `/immorterm:recall` slash command — so running them for another
+    // vendor would at best do nothing and at worst launch the wrong agent.
+    if registry_tool_for(&wid).as_deref() == Some("codex") {
+        return recall_codex(claude_uuid.as_deref());
+    }
+
     if let Some(uuid) = &claude_uuid
         && claude_jsonl_exists(uuid)
     {
@@ -651,9 +659,14 @@ fn recall_skill_installed() -> bool {
 }
 
 fn which_claude() -> Option<PathBuf> {
+    which_agent("claude")
+}
+
+/// First `bin` on PATH, or None.
+fn which_agent(bin: &str) -> Option<PathBuf> {
     let path_env = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_env) {
-        let candidate = dir.join("claude");
+        let candidate = dir.join(bin);
         if candidate.is_file() {
             return Some(candidate);
         }
@@ -661,13 +674,83 @@ fn which_claude() -> Option<PathBuf> {
     None
 }
 
+/// Which agent owns this window, per the registry's `tool` field.
+///
+/// Populated by the SessionStart hook's `/registry/session-link` announce.
+/// Absent means the window predates that announce, and back then Claude was
+/// the only thing registered — so Claude is the right assumption.
+fn registry_tool_for(window_id: &str) -> Option<String> {
+    let registry = crate::registry::Registry::load();
+    registry
+        .sessions
+        .iter()
+        .find(|e| e.window_id == window_id)
+        .and_then(|e| e.tool.clone())
+        .filter(|t| !t.is_empty())
+}
+
+/// Resume a Codex session, mirroring the Claude cascade.
+///
+/// `codex resume <id>` reattaches a specific thread; `codex resume --last`
+/// picks the most recent one in this directory. We only pass an id we actually
+/// found a rollout for — Codex date-shards them under
+/// `~/.codex/sessions/YYYY/MM/DD/`, so presence has to be checked by walking,
+/// not by deriving a path.
+fn recall_codex(uuid: Option<&str>) -> Result<()> {
+    if which_agent("codex").is_none() {
+        return Ok(());
+    }
+    clear_viewport_before_handoff();
+    match uuid {
+        Some(id) if codex_rollout_exists(id) => launch_agent("codex", &["resume", id]),
+        // No known thread for this window: hand over a bare Codex rather than
+        // `--last`, which could reattach a session from an unrelated project.
+        _ => launch_agent("codex", &[]),
+    }
+}
+
+/// Whether a Codex rollout exists for `session_id`.
+fn codex_rollout_exists(session_id: &str) -> bool {
+    if session_id.is_empty() {
+        return false;
+    }
+    let Some(home) = std::env::var_os("HOME") else {
+        return false;
+    };
+    let root = PathBuf::from(home).join(".codex").join("sessions");
+    let suffix = format!("{session_id}.jsonl");
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(&suffix))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 // Replace the current process with `claude <args...>` via unix execvp so the
 // user's shell lands directly in Claude. Named `launch_claude` (not `exec_*`)
 // to avoid a naive-regex pre-commit hook that flags the `.exec()` method name
 // regardless of language — this is Rust's CommandExt, not JS shell exec.
 fn launch_claude(args: &[&str]) -> Result<()> {
+    launch_agent("claude", args)
+}
+
+fn launch_agent(bin: &str, args: &[&str]) -> Result<()> {
     use std::os::unix::process::CommandExt;
-    let claude = which_claude().context("claude not found on PATH")?;
+    let claude = which_agent(bin).with_context(|| format!("{bin} not found on PATH"))?;
     let mut command_obj = std::process::Command::new(&claude);
     command_obj.args(args);
     // On success this call never returns; on failure returns an io::Error.
@@ -1287,4 +1370,41 @@ fn find_session_socket(name: &str) -> Result<PathBuf> {
     }
 
     anyhow::bail!("No session found matching '{}'", name)
+}
+
+#[cfg(test)]
+mod recall_tests {
+    use super::*;
+
+    /// Codex date-shards its rollouts, so existence has to be discovered by
+    /// walking `~/.codex/sessions/YYYY/MM/DD/` — the path can't be derived
+    /// from the session id the way Claude's can.
+    #[test]
+    fn codex_rollout_exists_walks_date_shards() {
+        let tmp = std::env::temp_dir().join(format!("imrecall-{}", std::process::id()));
+        let shard = tmp.join(".codex/sessions/2026/07/27");
+        std::fs::create_dir_all(&shard).unwrap();
+        let sid = "019fa2c1-1b29-70e3-ae4e-1d3b8a64e988";
+        std::fs::write(
+            shard.join(format!("rollout-2026-07-27T11-46-32-{sid}.jsonl")),
+            b"{}\n",
+        )
+        .unwrap();
+
+        // SAFETY: single-threaded test, restored below.
+        let prev = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", &tmp) };
+
+        assert!(codex_rollout_exists(sid));
+        assert!(!codex_rollout_exists("no-such-session"));
+        // An empty id must never match — otherwise a window with no recorded
+        // session would resume an arbitrary unrelated thread.
+        assert!(!codex_rollout_exists(""));
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

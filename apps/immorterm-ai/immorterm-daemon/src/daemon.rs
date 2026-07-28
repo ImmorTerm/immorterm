@@ -293,6 +293,9 @@ impl SessionState {
             //      → claude /immorterm:recall <iid> <uuid>
             //   3. No UUID, skill installed → claude /immorterm:recall <iid>
             //   4. No UUID, no skill → plain claude (or bare shell)
+            // Windows owned by another agent (registry `tool`) take that
+            // vendor's branch instead — e.g. Codex resolves to
+            // `codex resume <id>` when a rollout for it exists.
             // The previous gate (`pending_claude_resume.is_some()`) skipped
             // recall for sessions whose claude_session_id was never tracked
             // by the daemon (chronic registry race) — meaning users got a
@@ -3793,11 +3796,44 @@ fn execute_command(
 ) -> Result<String> {
     match command {
         "stuff" => {
-            // Send text to the shell
+            // Send text to the shell as if typed.
             if let Some(text) = args.first() {
-                // Unescape \n → actual newline (screen compat)
+                // Two things a raw-mode TUI needs that a shell doesn't care about:
+                //
+                // 1. Enter is CR (0x0D), not LF. Shells see a newline either way
+                //    because the tty's ICRNL translates it, but an agent reading
+                //    bytes directly does not: Codex treats LF as "newline inside
+                //    the composer" and never submits.
+                // 2. A trailing CR must arrive in its OWN read(). When text+CR
+                //    land together the TUI reads it as a multiline paste and
+                //    keeps the CR as a literal newline — the same heuristic
+                //    inject_on_click_prompt already works around.
+                //
+                // So: write the body now, defer a single trailing CR.
                 let unescaped = text.replace("\\n", "\n");
-                state.pty.write_all(unescaped.as_bytes())?;
+                let as_keystrokes = unescaped.replace('\n', "\r");
+                let (body, trailing_cr) = match as_keystrokes.strip_suffix('\r') {
+                    Some(rest) => (rest.to_string(), true),
+                    None => (as_keystrokes, false),
+                };
+                if !body.is_empty() {
+                    state.pty.write_all(body.as_bytes())?;
+                }
+                if trailing_cr {
+                    if let Some(writer) = state.pty.writer_clone() {
+                        tokio::task::spawn_blocking(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(80));
+                            let Ok(mut w) = writer.lock() else { return };
+                            if let Err(e) = w.write_all(b"\r").and_then(|_| w.flush()) {
+                                warn!("stuff: deferred CR write failed: {}", e);
+                            }
+                        });
+                    } else {
+                        // No cloneable writer (shouldn't happen) — better to
+                        // submit inline than to swallow the Enter entirely.
+                        state.pty.write_all(b"\r")?;
+                    }
+                }
             }
             Ok(String::new())
         }

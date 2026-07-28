@@ -35,6 +35,7 @@
  */
 
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
 import type { VendorsConfig } from '@immorterm/config';
@@ -59,18 +60,26 @@ export interface HookInstallDeps {
 
 /**
  * Resolve the effective vendors map from a persisted project config value.
- * A persisted map with EVERY vendor enabled is the old auto-written opt-out
- * default — no user chose it vendor-by-vendor, so it's treated as unset and
- * replaced with the caller's current default. Any hand-edit (≥1 disabled
- * vendor) is preserved verbatim.
+ *
+ * Old installers auto-wrote an all-enabled map, which nobody chose
+ * vendor-by-vendor. Those get replaced with the caller's current (opt-in)
+ * defaults so a legacy project doesn't suddenly sprout eight vendor config
+ * files in its root. Any map with ≥1 disabled vendor is a hand-edit and is
+ * preserved verbatim.
+ *
+ * `chosen` is the escape hatch: once the user has actually been through the
+ * Vendors picker we honour the map exactly as saved. Without it, ticking all
+ * nine vendors was indistinguishable from the legacy auto-write and silently
+ * collapsed back to Claude-only.
  */
 export function resolveVendors(
   persisted: VendorsConfig | undefined | null,
-  defaults: VendorsConfig
+  defaults: VendorsConfig,
+  chosen?: boolean
 ): VendorsConfig {
-  let vendors = persisted ?? defaults;
-  if (Object.values(vendors).every((v) => v?.enabled === true)) {
-    vendors = defaults;
+  const vendors = persisted ?? defaults;
+  if (!chosen && Object.values(vendors).every((v) => v?.enabled === true)) {
+    return defaults;
   }
   return vendors;
 }
@@ -423,19 +432,24 @@ function generateMemoryGuideHook(projectId: string): string {
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-# Read stdin JSON to extract session_id and cwd
+# Read stdin JSON to extract session_id, cwd and transcript_path.
+# Every vendor we support emits Claude's envelope here — verified for Codex
+# 0.145 against a live session: {session_id, transcript_path, cwd,
+# hook_event_name, model, permission_mode, source}. transcript_path is absolute,
+# so nothing downstream has to guess where a vendor keeps its transcripts.
 STDIN_DATA=$(cat 2>/dev/null || echo '{}')
 
-IFS='|' read -r SESSION_ID CWD_PATH < <(echo "$STDIN_DATA" | python3 -c "
+IFS='|' read -r SESSION_ID CWD_PATH TRANSCRIPT_PATH < <(echo "$STDIN_DATA" | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
-    print(data.get('session_id', ''), data.get('cwd', ''), sep='|')
+    print(data.get('session_id', ''), data.get('cwd', ''), data.get('transcript_path', ''), sep='|')
 except Exception:
-    print('|')
+    print('||')
 " 2>/dev/null)
 SESSION_ID="\${SESSION_ID:-}"
 CWD_PATH="\${CWD_PATH:-\$(pwd)}"
+TRANSCRIPT_PATH="\${TRANSCRIPT_PATH:-}"
 
 # Stable terminal identifier — survives context compaction (set by VS Code extension)
 IMMORTERM_ID="\${IMMORTERM_WINDOW_ID:-}"
@@ -526,10 +540,16 @@ except Exception:
 
   START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-  # Extract project_context from CLAUDE.md (first substantial content line)
+  # Extract project_context from the project's instructions file (first
+  # substantial content line). Each agent reads a different filename for the
+  # same thing, so try them in turn — a Codex-only project has AGENTS.md and no
+  # .claude/ directory at all, and would otherwise register with no context.
   PROJECT_CONTEXT=""
-  CLAUDE_MD="$PROJECT_ROOT/.claude/CLAUDE.md"
-  if [ -f "$CLAUDE_MD" ]; then
+  CLAUDE_MD=""
+  for _cand in "$PROJECT_ROOT/.claude/CLAUDE.md" "$PROJECT_ROOT/CLAUDE.md" "$PROJECT_ROOT/AGENTS.md" "$PROJECT_ROOT/.codex/AGENTS.md"; do
+    if [ -f "\$_cand" ]; then CLAUDE_MD="\$_cand"; break; fi
+  done
+  if [ -n "$CLAUDE_MD" ] && [ -f "$CLAUDE_MD" ]; then
     PROJECT_CONTEXT=\$(python3 -c "
 import sys
 try:
@@ -558,6 +578,8 @@ except Exception:
   _IM_START="$START_TIME" \\
   _IM_IID="$IMMORTERM_ID" \\
   _IM_PCTX="$PROJECT_CONTEXT" \\
+  _IM_TP="$TRANSCRIPT_PATH" \\
+  _IM_CWD="$CWD_PATH" \\
   python3 -c "
 import os, json, subprocess
 p = {
@@ -592,6 +614,29 @@ subprocess.Popen(
      '-H', 'Content-Type: application/json', '-d', payload],
     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
 )
+
+# Tell the hub which AI tool owns this window and where its transcript lives.
+# Nothing else writes registry.tool: the digest daemon derives the tool FROM the
+# registry and defaults it to claude-code, and the hub's heartbeat deliberately
+# sends tool:None — so without this announce, every non-Claude session is either
+# invisible to the digester or mis-attributed as Claude. Vendor-generic on
+# purpose; this one call unblocks all eight non-Claude vendors.
+link_iid = os.environ.get('_IM_IID', '')
+link_tp = os.environ.get('_IM_TP', '')
+if link_iid:
+    link = {
+        'window_id': link_iid,
+        'tool': p['ai_tool'],
+        'session_id': os.environ['_IM_SID'],
+        'transcript_path': link_tp,
+        'cwd': os.environ.get('_IM_CWD', ''),
+    }
+    subprocess.Popen(
+        ['curl', '-s', '--max-time', '3', '-X', 'POST',
+         os.environ.get('IMMORTERM_HUB_URL', 'http://localhost:1440') + '/api/v1/registry/session-link',
+         '-H', 'Content-Type: application/json', '-d', json.dumps(link)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
 " 2>/dev/null &
 fi
 
@@ -6585,6 +6630,13 @@ fi
  * line pair so it can coexist with user content.
  */
 const IMMORTERM_VENDOR_MANAGED_KEY = '_immortermManaged';
+/**
+ * Codex parses `.codex/hooks.json` with `deny_unknown_fields` — the only legal
+ * top-level keys are `description` and `hooks`, so a sibling marker key makes
+ * Codex reject the whole file ("unknown field `_immortermManaged`"). For those
+ * vendors the marker rides inside a schema-legal field instead.
+ */
+const IMMORTERM_MANAGED_DESCRIPTION = 'Managed by ImmorTerm — edits will be overwritten';
 const IMMORTERM_AIDER_BEGIN = '# >>> immorterm';
 const IMMORTERM_AIDER_END = '# <<< immorterm';
 
@@ -7062,10 +7114,12 @@ function writeManagedJsonConfig(filePath: string, content: Record<string, unknow
   const dir = path.dirname(filePath);
   fs.mkdirSync(dir, { recursive: true });
 
+  let existingRaw: string | null = null;
   if (fs.existsSync(filePath)) {
     try {
-      const existing = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Record<string, unknown>;
-      if (!existing[IMMORTERM_VENDOR_MANAGED_KEY]) {
+      existingRaw = fs.readFileSync(filePath, 'utf8');
+      const existing = JSON.parse(existingRaw) as Record<string, unknown>;
+      if (!isImmortermManagedJson(existing)) {
         console.warn(
           `[memory] ${filePath} exists with non-immorterm content; skipping vendor config write`
         );
@@ -7077,8 +7131,32 @@ function writeManagedJsonConfig(filePath: string, content: Record<string, unknow
     }
   }
 
-  const stamped = { [IMMORTERM_VENDOR_MANAGED_KEY]: true, ...content };
-  fs.writeFileSync(filePath, JSON.stringify(stamped, null, 2) + '\n', 'utf8');
+  // Configs that carry the marker in `description` are already self-identifying;
+  // stamping the sibling key on top of them would break their schema.
+  const stamped =
+    content.description === IMMORTERM_MANAGED_DESCRIPTION
+      ? content
+      : { [IMMORTERM_VENDOR_MANAGED_KEY]: true, ...content };
+  const next = JSON.stringify(stamped, null, 2) + '\n';
+
+  // Byte-identical rewrite is not free: Codex fingerprints each hook in
+  // `.codex/hooks.json` and re-prompts the user to trust them ("Hooks need
+  // review — 3 hooks are new or changed") whenever the file changes, running
+  // none of them until they accept. Touching the file on every install turned a
+  // one-time prompt into an every-session one. Same reasoning protects any
+  // future vendor that fingerprints its hook config.
+  if (existingRaw === next) {
+    return;
+  }
+  fs.writeFileSync(filePath, next, 'utf8');
+}
+
+/** True when a vendor JSON config was written by us — via either marker style. */
+function isImmortermManagedJson(existing: Record<string, unknown>): boolean {
+  return (
+    Boolean(existing[IMMORTERM_VENDOR_MANAGED_KEY]) ||
+    existing.description === IMMORTERM_MANAGED_DESCRIPTION
+  );
 }
 
 /**
@@ -7091,7 +7169,7 @@ function removeManagedJsonConfig(filePath: string): boolean {
   }
   try {
     const existing = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Record<string, unknown>;
-    if (!existing[IMMORTERM_VENDOR_MANAGED_KEY]) {
+    if (!isImmortermManagedJson(existing)) {
       return false;
     }
   } catch {
@@ -7126,27 +7204,167 @@ function getVendorScriptTargets(projectPath: string): {
 
 // ── Per-vendor config builders ─────────────────────────────────────
 
-/** Codex CLI uses Claude's identical hook schema. Point at our existing hook
- * scripts but wrap with `env IMMORTERM_AI_TOOL=codex` so the SessionStart
- * hook tags memories as `ai_tool=codex` instead of the default `claude-code`.
- * Stop fires session-end (plan-sweep + digester) so Codex sessions get
- * captured immediately on exit. */
+/** Codex CLI uses Claude's hook schema verbatim — nested
+ * `{Event: [{matcher?, hooks: [{type, command, timeout?, async?}]}]}`, same
+ * PascalCase event names, same stdin envelope. Verified against codex-cli
+ * 0.145.0: a malformed nested value is rejected with `invalid type: …`, so
+ * the parser validates the full shape and accepts this one. The only
+ * divergence from Claude is the top level, which is `deny_unknown_fields`
+ * over exactly {description, hooks} — hence the marker in `description`.
+ *
+ * Codex fires a near-identical event set (plus PermissionRequest,
+ * PostCompact, SubagentStart/Stop, which Claude has no equivalent of). We
+ * mirror Claude's registrations so a Codex session produces the same memory,
+ * the same sidebar state, and the same digest as a Claude one. Each script is
+ * wrapped with `IMMORTERM_AI_TOOL=codex` so memories are tagged with the
+ * right vendor instead of the `claude-code` default.
+ */
 function buildCodexHooksConfig(projectPath: string): Record<string, unknown> {
   const hooksDir = path.join(projectPath, '.immorterm', 'hooks');
   // sh -c '...' lets us export the env var without writing a wrapper script.
   // The exec at the end keeps signal handling clean (no extra shell process).
   const wrap = (script: string) =>
     `sh -c 'export IMMORTERM_AI_TOOL=codex; exec ${hooksDir}/${script}'`;
+  // Vendor-neutral Node notifier — keys off IMMORTERM_SESSION, no-ops silently
+  // when absent. Same absolute path every vendor's config references.
+  const notify = (state: string, timeout = 2) => ({
+    type: 'command',
+    command: `node $HOME/.claude/hooks/immorterm-notify.mjs ${state}`,
+    timeout,
+  });
   return {
+    // Codex rejects unknown top-level keys, so our ownership marker lives here.
+    description: IMMORTERM_MANAGED_DESCRIPTION,
     hooks: {
       SessionStart: [
-        { hooks: [{ type: 'command', command: wrap('immorterm-memory-guide.sh') }] },
+        { hooks: [{ type: 'command', command: wrap('immorterm-memory-guide.sh'), timeout: 5 }] },
+      ],
+      // Share-queue drain + ambient memory search, plus the breathing dot in
+      // the sidebar. Paired with `notify idle` on Stop.
+      UserPromptSubmit: [
+        {
+          hooks: [
+            { type: 'command', command: wrap(USER_PROMPT_HOOK_FILE), timeout: 5 },
+            notify('working'),
+          ],
+        },
+      ],
+      // Codex's PermissionRequest is the counterpart of Claude's
+      // Notification/permission_prompt — the moment the agent blocks on the user.
+      PermissionRequest: [{ hooks: [notify('attention')] }],
+      // File diffs → memory. The script reads tool_name/tool_input from stdin,
+      // so the matcher only needs to cover Codex's edit-shaped tools.
+      //
+      // NOTE: no `async: true` anywhere below. Codex 0.145 parses the field but
+      // does not implement it — it SKIPS the hook outright and warns "async
+      // hooks are not supported yet", which is far worse than blocking. These
+      // scripts background their own slow work, so running them synchronously
+      // costs the spawn, not the workload.
+      PostToolUse: [
+        {
+          matcher: 'Write|Edit|MultiEdit|apply_patch',
+          hooks: [
+            { type: 'command', command: wrap(CODE_CHANGE_CAPTURE_FILE), timeout: 10 },
+          ],
+        },
+      ],
+      PreCompact: [
+        { hooks: [{ type: 'command', command: wrap(PRE_COMPACT_HOOK_FILE), timeout: 120 }] },
       ],
       Stop: [
-        { hooks: [{ type: 'command', command: wrap(SESSION_END_HOOK_FILE) }] },
+        {
+          hooks: [
+            { type: 'command', command: wrap(SESSION_END_HOOK_FILE), timeout: 10 },
+            notify('idle'),
+          ],
+        },
+      ],
+      // Codex hard-clamps SessionEnd to 3s (it warns when asked for more), so
+      // this is the real ceiling — the script must background the digest rather
+      // than finish it here.
+      SessionEnd: [
+        { hooks: [{ type: 'command', command: wrap(SESSION_END_HOOK_FILE), timeout: 3 }] },
       ],
     },
   };
+}
+
+/** MCP servers ImmorTerm registers with Codex. Names match the keys we use in
+ * a project's `.mcp.json` so a user switching between agents sees the same
+ * tool names. */
+const CODEX_MCP_SERVERS = ['immorterm', 'immorterm-memory'] as const;
+
+/**
+ * Register (or unregister) ImmorTerm's MCP servers with Codex.
+ *
+ * Codex reads MCP servers **only** from `~/.codex/config.toml` and never sees
+ * the project-scoped `.mcp.json` we write for Claude Code — so without this a
+ * Codex session inside ImmorTerm has no memory, no tasks, no `draw_html`, no
+ * plans and no browser tools.
+ *
+ * We shell out to `codex mcp add|remove` rather than patching the TOML
+ * ourselves. Codex owns that file's format, so its own writer cannot corrupt
+ * it and cannot drift on a version bump — verified on 0.145: an add/remove
+ * round trip leaves the file byte-identical and preserves unrelated
+ * `[projects.*]`, `[hooks.state.*]` and `[tui.*]` tables.
+ *
+ * Both servers resolve the current project from the **terminal environment**
+ * (`IMMORTERM_PROJECT_ID`, which ImmorTerm exports into every session) rather
+ * than from config. That matters because these entries are global: baking a
+ * project id into them would silently scope every other project's Codex
+ * session to whichever project happened to install last. Only the
+ * vendor-constant `IMMORTERM_AI_TOOL` is safe to pin here.
+ *
+ * Fail-soft throughout: `codex` may not be installed, and a missing MCP server
+ * must never break hook installation.
+ */
+function syncCodexMcpServers(enabled: boolean): void {
+  // Unlike everything else here, this writes OUTSIDE the project — into the
+  // user's real `~/.codex/config.toml`. Tests install hooks into temp dirs and
+  // must not reach out and mutate it, so they opt out. `IMMORTERM_NO_GLOBAL_MCP_SYNC`
+  // is also the escape hatch for anyone who manages their Codex config by hand.
+  if (process.env.VITEST || process.env.IMMORTERM_NO_GLOBAL_MCP_SYNC) {
+    return;
+  }
+
+  const run = (args: string[]): boolean => {
+    try {
+      execFileSync('codex', args, { stdio: 'ignore', timeout: 15_000 });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  if (!enabled) {
+    for (const name of CODEX_MCP_SERVERS) {
+      run(['mcp', 'remove', name]);
+    }
+    return;
+  }
+
+  const bin = (name: string) => path.join(os.homedir(), '.immorterm', 'bin', name);
+  // remove-then-add converges whether or not the entry already exists, and
+  // keeps a changed binary path from going stale.
+  const register = (name: string, argv: string[], env: string[] = []) => {
+    run(['mcp', 'remove', name]);
+    const flags = env.flatMap((e) => ['--env', e]);
+    return run(['mcp', 'add', name, ...flags, '--', ...argv]);
+  };
+
+  const okTerminal = register('immorterm', [bin('immorterm-ai'), 'mcp', 'serve']);
+  const okMemory = register(
+    'immorterm-memory',
+    [bin('immorterm-memory'), 'mcp'],
+    ['IMMORTERM_AI_TOOL=codex']
+  );
+
+  if (!okTerminal || !okMemory) {
+    console.warn(
+      '[memory] could not register ImmorTerm MCP servers with Codex ' +
+        '(is `codex` on PATH?); Codex sessions will start without ImmorTerm tools'
+    );
+  }
 }
 
 /** Cursor — `afterFileEdit` events with `{conversation_id, file_path, edits[]}`.
@@ -7225,10 +7443,13 @@ function writeClineHooksConfig(projectPath: string): { wroteAny: boolean; paths:
 /** Remove immorterm-managed Cline trampolines; prune `.clinerules/` if now empty. */
 function removeClineHooksConfig(projectPath: string): void {
   const clineHooksDir = path.join(projectPath, '.clinerules', 'hooks');
-  if (!fs.existsSync(clineHooksDir)) {
-    return;
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(clineHooksDir);
+  } catch {
+    return; // absent, or not a directory — nothing of ours to remove
   }
-  for (const entry of fs.readdirSync(clineHooksDir)) {
+  for (const entry of entries) {
     const scriptPath = path.join(clineHooksDir, entry);
     try {
       if (fs.readFileSync(scriptPath, 'utf8').includes('immorterm-managed:')) {
@@ -7387,7 +7608,7 @@ function writeVendorConfigs(projectPath: string, vendors: VendorsConfig): string
   // Disabled vendors get their managed configs REMOVED so projects initialized
   // under the old all-vendors-on default are cleaned on the next installer run.
 
-  // ── Codex (zero-code, identical schema to Claude) ─────────
+  // ── Codex (hooks share Claude's schema; MCP needs its own registration) ──
   const codexPath = path.join(projectPath, '.codex', 'hooks.json');
   if (vendors.codex.enabled) {
     writeManagedJsonConfig(codexPath, buildCodexHooksConfig(projectPath));
@@ -7395,6 +7616,9 @@ function writeVendorConfigs(projectPath: string, vendors: VendorsConfig): string
   } else {
     removeManagedJsonConfig(codexPath);
   }
+  // Unlike every other vendor, Codex's MCP config lives outside the project
+  // (~/.codex/config.toml), so it can't just be a file we write here.
+  syncCodexMcpServers(vendors.codex.enabled);
 
   // ── Cursor ────────────────────────────────────────────────
   const cursorPath = path.join(projectPath, '.cursor', 'hooks.json');

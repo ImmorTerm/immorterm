@@ -66,6 +66,19 @@ const mockWriteProjectConfig = vi.fn();
 vi.mock('../../../utils/immorterm-config', () => ({
   readProjectConfig: (...args: unknown[]) => mockReadProjectConfig(...args),
   writeProjectConfig: (...args: unknown[]) => mockWriteProjectConfig(...args),
+  // Opt-in defaults, mirroring the real module — persistDigestChoice seeds a
+  // fresh ProjectConfig with these when none exists yet.
+  defaultVendorsConfig: () => ({
+    claudeCode: { enabled: true },
+    codex: { enabled: false },
+    cursor: { enabled: false },
+    windsurf: { enabled: false },
+    cline: { enabled: false },
+    opencode: { enabled: false },
+    gemini: { enabled: false },
+    aider: { enabled: false },
+    copilot: { enabled: false },
+  }),
 }));
 
 // ── menu-data mock ─────────────────────────────────────────────

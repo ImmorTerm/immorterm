@@ -32,7 +32,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { DIGEST_MODELS } from '@immorterm/menu-data';
-import { readProjectConfig, writeProjectConfig, type ProjectConfig } from '../../utils/immorterm-config';
+import { readProjectConfig, writeProjectConfig, defaultVendorsConfig, type ProjectConfig } from '../../utils/immorterm-config';
 
 // ── Public types ────────────────────────────────────────────────
 
@@ -547,17 +547,7 @@ export function persistDigestChoice(workspacePath: string, choice: DigestLlmChoi
     services: {
       memory: { enabled: false, graph: false },
       mcpGateway: { enabled: false },
-      vendors: {
-        claudeCode: { enabled: true },
-        codex: { enabled: true },
-        cursor: { enabled: true },
-        windsurf: { enabled: true },
-        cline: { enabled: true },
-        opencode: { enabled: true },
-        gemini: { enabled: true },
-        aider: { enabled: true },
-        copilot: { enabled: true },
-      },
+      vendors: defaultVendorsConfig(),
     },
   };
   cfg.services = {

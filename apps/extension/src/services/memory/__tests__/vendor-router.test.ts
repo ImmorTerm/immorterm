@@ -24,6 +24,30 @@ describe('Phase A T2 — vendor-router (writeAllVendorConfigs)', () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
+  /**
+   * A deliberate "user ticked the vendors they want" map.
+   *
+   * Defaults are opt-IN (Claude only), so tests that exercise the vendor
+   * writers have to enable them explicitly. Note `gemini: false`: a map with
+   * EVERY vendor true is treated by `resolveVendors` as the legacy auto-written
+   * opt-out config and reset to defaults, so a fully-true seed would write
+   * nothing. Gemini is the one vendor with no config writer, so switching it
+   * off models a real user choice without changing what gets materialized.
+   */
+  function allVendorsEnabled(): ReturnType<typeof defaultVendorsConfig> {
+    return {
+      claudeCode: { enabled: true },
+      codex: { enabled: true },
+      cursor: { enabled: true },
+      windsurf: { enabled: true },
+      cline: { enabled: true },
+      opencode: { enabled: true },
+      gemini: { enabled: false },
+      aider: { enabled: true },
+      copilot: { enabled: true },
+    };
+  }
+
   function seedConfig(vendorsOverride: Partial<ReturnType<typeof defaultVendorsConfig>> = {}): void {
     const cfg: ProjectConfig = {
       version: 3,
@@ -31,7 +55,7 @@ describe('Phase A T2 — vendor-router (writeAllVendorConfigs)', () => {
       services: {
         memory: { enabled: false, graph: false },
         mcpGateway: { enabled: false },
-        vendors: { ...defaultVendorsConfig(), ...vendorsOverride },
+        vendors: { ...allVendorsEnabled(), ...vendorsOverride },
       },
     };
     writeProjectConfig(tmp, cfg);
@@ -190,10 +214,102 @@ describe('Phase A T2 — vendor-router (writeAllVendorConfigs)', () => {
     expect(beginCount).toBe(1);
   });
 
-  it('falls back to all-enabled when project config is missing', () => {
-    // No config seeded — reader returns null, router uses defaults.
-    writeAllVendorConfigs(tmp);
+  it('honours an all-enabled map once the user has been through the picker', () => {
+    // Every vendor true looks exactly like the legacy auto-written opt-out
+    // config, so without the vendorsChosen marker it gets reset to defaults and
+    // ticking all nine silently does nothing.
+    const everyVendorOn = {
+      claudeCode: { enabled: true }, codex: { enabled: true }, cursor: { enabled: true },
+      windsurf: { enabled: true }, cline: { enabled: true }, opencode: { enabled: true },
+      gemini: { enabled: true }, aider: { enabled: true }, copilot: { enabled: true },
+    };
+    const write = (vendorsChosen?: boolean) => {
+      const cfg: ProjectConfig = {
+        version: 3,
+        projectId: 'test-proj',
+        services: {
+          memory: { enabled: false, graph: false },
+          mcpGateway: { enabled: false },
+          vendors: everyVendorOn,
+          ...(vendorsChosen === undefined ? {} : { vendorsChosen }),
+        },
+      };
+      writeProjectConfig(tmp, cfg);
+      writeAllVendorConfigs(tmp);
+    };
+
+    write(true);
     expect(fs.existsSync(path.join(tmp, '.codex', 'hooks.json'))).toBe(true);
     expect(fs.existsSync(path.join(tmp, '.cursor', 'hooks.json'))).toBe(true);
+
+    // Legacy config with no marker: still reset to opt-in defaults.
+    rmSync(path.join(tmp, '.codex'), { recursive: true, force: true });
+    rmSync(path.join(tmp, '.cursor'), { recursive: true, force: true });
+    write(undefined);
+    expect(fs.existsSync(path.join(tmp, '.codex', 'hooks.json'))).toBe(false);
+  });
+
+  it('does not rewrite an unchanged vendor config (keeps Codex hook trust valid)', () => {
+    // Codex fingerprints each hook and re-prompts "Hooks need review" on any
+    // change, running none of them until accepted. A no-op rewrite on every
+    // install would make that prompt appear every session.
+    seedConfig();
+    writeAllVendorConfigs(tmp);
+    const codexPath = path.join(tmp, '.codex', 'hooks.json');
+    const before = fs.readFileSync(codexPath, 'utf8');
+
+    // Backdate so any rewrite is visible in the mtime.
+    const stale = new Date(Date.now() - 60_000);
+    fs.utimesSync(codexPath, stale, stale);
+    const staleMtime = fs.statSync(codexPath).mtimeMs;
+
+    writeAllVendorConfigs(tmp);
+
+    expect(fs.readFileSync(codexPath, 'utf8')).toBe(before);
+    expect(fs.statSync(codexPath).mtimeMs).toBe(staleMtime);
+  });
+
+  it('writes no vendor configs when project config is missing (opt-in defaults)', () => {
+    // No config seeded — reader returns null, router uses defaults, and the
+    // defaults enable Claude Code only. Enabling a vendor drops files into the
+    // user's project root, so it stays a deliberate tick in the wizard.
+    writeAllVendorConfigs(tmp);
+    expect(fs.existsSync(path.join(tmp, '.codex', 'hooks.json'))).toBe(false);
+    expect(fs.existsSync(path.join(tmp, '.cursor', 'hooks.json'))).toBe(false);
+  });
+
+  it('Codex config is Codex-shaped: description marker, no sibling key, wrapped env', () => {
+    seedConfig();
+    writeAllVendorConfigs(tmp);
+
+    const raw = fs.readFileSync(path.join(tmp, '.codex', 'hooks.json'), 'utf8');
+    const cfg = JSON.parse(raw);
+
+    // Codex parses hooks.json with deny_unknown_fields over {description, hooks}
+    // — a sibling `_immortermManaged` key makes it reject the whole file.
+    expect(Object.keys(cfg).sort()).toEqual(['description', 'hooks']);
+    expect(raw).not.toContain('_immortermManaged');
+    expect(cfg.description).toContain('ImmorTerm');
+
+    // Claude-shape nested entries, and every script tagged as Codex so memories
+    // are attributed to the right vendor.
+    for (const event of ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop', 'SessionEnd']) {
+      expect(Array.isArray(cfg.hooks[event])).toBe(true);
+      const entries = cfg.hooks[event][0].hooks;
+      expect(entries[0].type).toBe('command');
+    }
+    expect(cfg.hooks.SessionStart[0].hooks[0].command).toMatch(/IMMORTERM_AI_TOOL=codex/);
+    expect(cfg.hooks.Stop[0].hooks[0].command).toMatch(/IMMORTERM_AI_TOOL=codex/);
+    // Sidebar state: breathing dot on prompt submit, stops on Stop.
+    expect(JSON.stringify(cfg.hooks.UserPromptSubmit)).toContain('immorterm-notify.mjs working');
+    expect(JSON.stringify(cfg.hooks.Stop)).toContain('immorterm-notify.mjs idle');
+    expect(JSON.stringify(cfg.hooks.PermissionRequest)).toContain('immorterm-notify.mjs attention');
+
+    // Codex 0.145 parses `async` but does not implement it — it SKIPS the hook
+    // and warns "async hooks are not supported yet". Shipping it silently
+    // disabled code-change capture and the session-end digest.
+    expect(raw).not.toContain('"async"');
+    // SessionEnd is hard-clamped to 3s by Codex; asking for more just warns.
+    expect(cfg.hooks.SessionEnd[0].hooks[0].timeout).toBe(3);
   });
 });

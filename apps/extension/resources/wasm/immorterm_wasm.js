@@ -750,6 +750,14 @@ export class WasmTerminal {
         wasm.wasmterminal_set_ai_stats(this.__wbg_ptr, ptr0, len0);
     }
     /**
+     * @param {string} tool
+     */
+    set_ai_tool(tool) {
+        const ptr0 = passStringToWasm0(tool, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.wasmterminal_set_ai_tool(this.__wbg_ptr, ptr0, len0);
+    }
+    /**
      * @param {boolean} enabled
      */
     set_animations_enabled(enabled) {
@@ -2070,7 +2078,7 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, arg2, arg3, arg4);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 208, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 216, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h2bf5b722dd9eda8c);
             return ret;
         },

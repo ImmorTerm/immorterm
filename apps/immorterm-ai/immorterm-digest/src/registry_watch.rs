@@ -100,8 +100,15 @@ pub(crate) fn reconcile(
             Some(s) if !s.is_empty() => s,
             _ => continue,
         };
-        // Prefer registry's claude_transcript_path; fall back to Claude
-        // Code's well-known convention path when missing. The hub's
+        // Which agent owns this window. Set by the SessionStart hook's
+        // /registry/session-link announce; legacy entries predate it and are
+        // Claude by definition, since nothing else used to be registered.
+        let tool = entry
+            .tool
+            .clone()
+            .unwrap_or_else(|| "claude-code".to_string());
+        // Prefer registry's claude_transcript_path; fall back to the vendor's
+        // well-known convention path when missing. The hub's
         // claude_tracker is supposed to populate this field every 30s,
         // but in practice many live entries are missing it (hub chain
         // unreliable). The bash daemon already does this dir-convention
@@ -109,7 +116,7 @@ pub(crate) fn reconcile(
         // same sessions.
         let transcript: String = match entry.claude_transcript_path.as_deref() {
             Some(s) if !s.is_empty() => s.to_string(),
-            _ => convention_transcript_path(&entry.project_dir, session_id),
+            _ => convention_transcript_path_for(&tool, &entry.project_dir, session_id),
         };
         // AI process must be alive. Prefer the AI tool's pid in
         // claude_stats (set by session-link); fall back to the daemon
@@ -133,7 +140,7 @@ pub(crate) fn reconcile(
         if !currently_registered.contains(&key) {
             new_registrations.push(ReconcileAction::Register {
                 key,
-                tool: entry.tool.clone().unwrap_or_else(|| "claude-code".to_string()),
+                tool: tool.clone(),
                 transcript_path: PathBuf::from(transcript),
                 project_id: derive_project_id(&entry.project_dir),
                 project_dir: PathBuf::from(&entry.project_dir),
@@ -208,9 +215,67 @@ fn read_mcp_slug(project_dir: &str) -> Option<String> {
 /// `/Users/example/Development/foo` → `-Users-example-Development-foo`.
 /// This matches `discover_jsonl_dir()` in the bash daemon — the same
 /// convention every Claude Code session has used since launch.
-fn convention_transcript_path(project_dir: &str, session_id: &str) -> String {
+/// Per-vendor fallback for where a session's transcript lives on disk.
+///
+/// Only used when the registry has no `transcript_path` — the SessionStart
+/// hook now announces the real absolute path via `/registry/session-link`, and
+/// that always wins. This exists for sessions that started before the announce
+/// landed, or whose hub POST failed.
+fn convention_transcript_path_for(tool: &str, project_dir: &str, session_id: &str) -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| String::from("."));
-    convention_transcript_path_with_home(&home, project_dir, session_id)
+    match tool {
+        "codex" => codex_rollout_path_with_home(&home, session_id)
+            // No rollout on disk yet (or the dir is unreadable) — return a
+            // path that simply won't exist rather than a Claude-shaped one,
+            // so the caller skips instead of digesting the wrong file.
+            .unwrap_or_else(|| format!("{home}/.codex/sessions/{session_id}.jsonl")),
+        _ => convention_transcript_path_with_home(&home, project_dir, session_id),
+    }
+}
+
+/// Newest Codex rollout file whose name ends in `<session_id>.jsonl`.
+///
+/// Codex date-shards its transcripts:
+///   `~/.codex/sessions/YYYY/MM/DD/rollout-<ISO8601>-<uuid>.jsonl`
+/// so unlike Claude there is no single derivable path — the date prefix isn't
+/// knowable from the session id. Walk the tree and match on the uuid suffix,
+/// newest wins (a resumed id can appear more than once).
+fn codex_rollout_path_with_home(home: &str, session_id: &str) -> Option<String> {
+    if session_id.is_empty() {
+        return None;
+    }
+    let root = std::path::Path::new(home).join(".codex").join("sessions");
+    let suffix = format!("{session_id}.jsonl");
+    let mut best: Option<(std::time::SystemTime, String)> = None;
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(&suffix))
+            {
+                continue;
+            }
+            let mtime = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            let is_newer = best.as_ref().is_none_or(|(best_m, _)| mtime > *best_m);
+            if is_newer {
+                best = Some((mtime, path.to_string_lossy().into_owned()));
+            }
+        }
+    }
+    best.map(|(_, p)| p)
 }
 
 /// Test-injectable variant — takes HOME explicitly so tests don't have
@@ -621,6 +686,60 @@ mod tests {
             convention_transcript_path_with_home("/Users/u", "/Users/u/Development/proj", "uuid-1"),
             "/Users/u/.claude/projects/-Users-u-Development-proj/uuid-1.jsonl"
         );
+    }
+
+    /// Codex date-shards its rollouts, so unlike Claude the path can't be
+    /// derived from the session id — it has to be found. Newest wins, because
+    /// a resumed session id can appear under more than one date.
+    #[test]
+    fn codex_rollout_lookup_finds_newest_match_in_date_shards() {
+        let tmp = std::env::temp_dir().join(format!("imcodexroll-{}", std::process::id()));
+        let old_dir = tmp.join(".codex/sessions/2026/07/26");
+        let new_dir = tmp.join(".codex/sessions/2026/07/27");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::create_dir_all(&new_dir).unwrap();
+
+        let sid = "019fa2c1-1b29-70e3-ae4e-1d3b8a64e988";
+        let older = old_dir.join(format!("rollout-2026-07-26T09-00-00-{sid}.jsonl"));
+        let newer = new_dir.join(format!("rollout-2026-07-27T11-46-32-{sid}.jsonl"));
+        // A different session in the same shard must not be picked up.
+        let other = new_dir.join("rollout-2026-07-27T12-00-00-deadbeef-0000-0000-0000-000000000000.jsonl");
+        std::fs::write(&older, b"{}\n").unwrap();
+        std::fs::write(&other, b"{}\n").unwrap();
+        std::fs::write(&newer, b"{}\n").unwrap();
+        // Make `newer` unambiguously the most recent.
+        let home = tmp.to_string_lossy().to_string();
+        filetime_touch(&older, 1_000_000);
+        filetime_touch(&newer, 2_000_000);
+
+        let found = codex_rollout_path_with_home(&home, sid).expect("rollout found");
+        assert_eq!(found, newer.to_string_lossy());
+
+        // Unknown session id → no match, so the caller skips rather than
+        // digesting some other session's transcript.
+        assert!(codex_rollout_path_with_home(&home, "no-such-uuid").is_none());
+        assert!(codex_rollout_path_with_home(&home, "").is_none());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Vendor dispatch: Claude keeps its derived path, Codex must not get one.
+    #[test]
+    fn convention_path_is_vendor_dispatched() {
+        let claude = convention_transcript_path_with_home("/Users/u", "/Users/u/proj", "uuid-1");
+        assert!(claude.contains("/.claude/projects/"));
+        // Codex has no derivable path — a missing rollout yields a path under
+        // ~/.codex/sessions that simply won't exist, never a Claude-shaped one.
+        let codex = codex_rollout_path_with_home("/nonexistent-home", "uuid-1");
+        assert!(codex.is_none());
+    }
+
+    fn filetime_touch(path: &std::path::Path, secs: u64) {
+        // Portable-enough mtime bump without pulling in a crate: rewrite the
+        // file after sleeping is too slow, so use utimensat via libc-free std.
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        let f = std::fs::File::options().write(true).open(path).unwrap();
+        f.set_modified(t).unwrap();
     }
 
     #[test]

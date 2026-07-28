@@ -589,6 +589,32 @@ fn ensure_same_project_or_self(target_session: &str) -> Result<(), String> {
     }
 }
 
+/// Working directory of a session, via a short synchronous IPC round trip.
+///
+/// Deliberately blocking and short-timeout: `resolve_session` runs on the
+/// tool-dispatch path with no async runtime in scope, and this only fires when
+/// there is genuine ambiguity between several live sessions.
+fn session_cwd(session: &str) -> Option<String> {
+    use std::io::{Read, Write};
+    let socket = commands::find_session_socket_sync(session).ok()?;
+    let mut stream = std::os::unix::net::UnixStream::connect(&socket).ok()?;
+    let timeout = std::time::Duration::from_millis(250);
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+    stream
+        .write_all(&serde_json::to_vec(&Request::GetCwd).ok()?)
+        .ok()?;
+    let mut buf = vec![0u8; 8192];
+    let n = stream.read(&mut buf).ok()?;
+    if n == 0 {
+        return None;
+    }
+    match serde_json::from_slice::<Response>(&buf[..n]).ok()? {
+        Response::Ok(cwd) if !cwd.trim().is_empty() => Some(cwd.trim().to_string()),
+        _ => None,
+    }
+}
+
 fn resolve_session(args: &Value) -> Result<String, String> {
     // 1. Explicit argument
     if let Some(session) = args.get("session").and_then(|s| s.as_str())
@@ -613,6 +639,31 @@ fn resolve_session(args: &Value) -> Result<String, String> {
         .into_iter()
         .filter(|s| s.alive && !s.name.ends_with(".ws"))
         .collect();
+    // 3a. More than one candidate: match on working directory.
+    //
+    //     IMMORTERM_SESSION only reaches us if the agent passes its environment
+    //     through to the MCP servers it spawns. Claude Code does; Codex
+    //     sanitizes it (hence `codex mcp add --env`), so step 2 finds nothing
+    //     and we would either error out or — worse, if the caller then guesses
+    //     a session name — draw into somebody else's terminal. That is exactly
+    //     what happened the first time a Codex session called draw_html.
+    //
+    //     Our own cwd is inherited from the agent, which inherited it from the
+    //     shell in the session, so a unique cwd match is the right session.
+    //     Only accept an unambiguous match: two terminals open on one directory
+    //     is common, and picking either at random is the bug we are fixing.
+    if alive.len() > 1
+        && let Ok(cwd) = std::env::current_dir()
+    {
+        let cwd = cwd.to_string_lossy().to_string();
+        let matches: Vec<_> = alive
+            .iter()
+            .filter(|s| session_cwd(&s.name).as_deref() == Some(cwd.as_str()))
+            .collect();
+        if let [only] = matches.as_slice() {
+            return Ok(only.name.clone());
+        }
+    }
     match alive.len() {
         1 => Ok(alive.into_iter().next().unwrap().name),
         0 => Err("No session specified and no alive ImmorTerm sessions found.".to_string()),

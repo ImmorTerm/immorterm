@@ -15,6 +15,9 @@ import {
   createReportError,
   createRenderSidebar,
   normalizeSpaceRecord,
+  aiTool,
+  isClaudeCode,
+  isAiActive,
 } from '../../resources/gpu-terminal-utils.js';
 
 // ── Pure Function Tests ──────────────────────────────────────────
@@ -678,5 +681,53 @@ describe('normalizeSpaceRecord — space persistence round-trip', () => {
     expect(() => normalizeSpaceRecord(null)).not.toThrow();
     expect(normalizeSpaceRecord(null).tiles).toEqual({});
     expect(normalizeSpaceRecord({ tiles: 'nope' }).tiles).toEqual({});
+  });
+});
+
+// ── Vendor identity ──────────────────────────────────────────────
+
+describe('aiTool / isClaudeCode / isAiActive', () => {
+  const sess = (tool?: unknown) => ({ claudeRaw: tool === undefined ? {} : { tool } });
+
+  it('reads the vendor id the daemon publishes', () => {
+    expect(aiTool(sess('claude'))).toBe('claude');
+    expect(aiTool(sess('codex'))).toBe('codex');
+    expect(aiTool(sess('cursor'))).toBe('cursor');
+  });
+
+  it('returns null when no AI is running', () => {
+    expect(aiTool(null)).toBeNull();
+    expect(aiTool({})).toBeNull();
+    expect(isAiActive({})).toBe(false);
+  });
+
+  it('returns null when claudeRaw lingers with no tool', () => {
+    // The tracker keeps a sticky flag after an AI exits, leaving claudeRaw
+    // truthy with `tool` cleared — the exact state that made every gate here
+    // fire when nothing was listening.
+    expect(aiTool(sess())).toBeNull();
+    expect(aiTool(sess(null))).toBeNull();
+    expect(aiTool(sess(''))).toBeNull();
+    expect(isAiActive(sess())).toBe(false);
+  });
+
+  it('isClaudeCode is strict — a Codex session is not Claude', () => {
+    expect(isClaudeCode(sess('claude'))).toBe(true);
+    expect(isClaudeCode(sess('codex'))).toBe(false);
+    expect(isClaudeCode(sess('cursor'))).toBe(false);
+    // Unknown tool must NOT be treated as Claude: that is what caused
+    // `[Image #N]` hovers in other vendors to resolve against
+    // ~/.claude/image-cache.
+    expect(isClaudeCode(sess())).toBe(false);
+    expect(isClaudeCode(null)).toBe(false);
+  });
+
+  it('isAiActive is vendor-neutral', () => {
+    expect(isAiActive(sess('codex'))).toBe(true);
+    expect(isAiActive(sess('claude'))).toBe(true);
+  });
+
+  it('uses `claude`, not `claude-code` — the daemon and hub spell it differently', () => {
+    expect(isClaudeCode(sess('claude-code'))).toBe(false);
   });
 });

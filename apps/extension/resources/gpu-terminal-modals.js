@@ -1682,17 +1682,20 @@ export function createModalSystem({
       modalBody.appendChild(modalSpinner('Detecting installed AI tools\u2026'));
       // Use HUB_BASE_URL so VS Code webview hits 127.0.0.1:1440 cross-
       // origin (same pattern as the digest-llm modal).
-      Promise.all([
-        fetch(HUB + '/api/v1/vendors/detect').then(r => r.json()).catch(() => ({ vendors: [] })),
-        fetch(HUB + '/api/info').then(r => r.json()).catch(() => ({})),
-      ]).then(([probe, info]) => {
-        _wizardVendorsProbed = {};
-        for (const v of (probe.vendors || [])) {
-          _wizardVendorsProbed[v.id] = v;
-        }
+      // Resolve the project FIRST: Codex records hook trust per project, so
+      // the probe needs to know which one we're configuring.
+      fetch(HUB + '/api/info').then(r => r.json()).catch(() => ({})).then(info => {
         const pd = (info && (info.projectDir || info.project_dir)) || '';
-        const qs = pd ? '?project_dir=' + encodeURIComponent(pd) : '';
-        return fetch(configReadUrl(qs.replace(/^\?/, ''))).then(r => r.text());
+        const pdq = pd ? '?project_dir=' + encodeURIComponent(pd) : '';
+        return fetch(HUB + '/api/v1/vendors/detect' + pdq)
+          .then(r => r.json()).catch(() => ({ vendors: [] }))
+          .then(probe => {
+            _wizardVendorsProbed = {};
+            for (const v of (probe.vendors || [])) {
+              _wizardVendorsProbed[v.id] = v;
+            }
+            return fetch(configReadUrl(pdq.replace(/^\?/, ''))).then(r => r.text());
+          });
       }).then(body => {
         let cfg = {};
         try { cfg = body ? JSON.parse(body) : {}; } catch { cfg = {}; }
@@ -1721,8 +1724,9 @@ export function createModalSystem({
     title.style.cssText = 'font-size:15px;font-weight:600;margin-bottom:4px;';
     head.appendChild(title);
     const sub = el('div', 'modal-row-detail',
-      'ImmorTerm pre-configures hooks for every selected vendor, so any AI tool you run will feed into memory. ' +
-      'Detected = CLI is on PATH. Configured = signed in.');
+      'ImmorTerm writes hooks into this project for every tool you pick, so their sessions feed into memory. ' +
+      'Detected = CLI is on PATH. Configured = signed in. ' +
+      'Needs trust = the tool asks you to approve its hooks the first time it starts here.');
     sub.style.cssText = 'font-size:12px;color:#a6adc8;line-height:1.4;';
     head.appendChild(sub);
     modalBody.appendChild(head);
@@ -1804,6 +1808,16 @@ export function createModalSystem({
         badge.style.cssText = 'font-size:9.5px;padding:1px 6px;border-radius:8px;background:rgba(0,0,0,0.3);color:' + bgColor + ';';
         subline.appendChild(badge);
       }
+      // Codex runs NO hooks until the user accepts its in-terminal trust
+      // prompt, so "enabled" alone would be a lie. Say so on the card.
+      if (enabled && probe.hooks_trusted === false) {
+        const warn = document.createElement('span');
+        warn.textContent = '\u26A0 needs trust';
+        warn.title = 'Codex asks "Hooks need review" the first time it starts here. '
+          + 'Choose "Trust all and continue" — until then none of ImmorTerm\u2019s hooks run.';
+        warn.style.cssText = 'font-size:9.5px;padding:1px 6px;border-radius:8px;background:rgba(0,0,0,0.3);color:#f9e2af;';
+        subline.appendChild(warn);
+      }
       card.appendChild(subline);
 
       card.addEventListener('click', () => {
@@ -1869,6 +1883,10 @@ export function createModalSystem({
               vendors[v.id] = { enabled: _wizardVendorsEnabled.has(v.id) };
             }
             services.vendors = vendors;
+            // Records that these flags are a real choice, so the installer honours
+            // them verbatim. Without it, ticking every vendor looks identical to
+            // the legacy auto-written all-enabled config and gets reset.
+            services.vendorsChosen = true;
             return fetch(configProjectWriteUrl(), {
               method: 'PUT',
               headers: { 'content-type': 'application/json' },

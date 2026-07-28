@@ -7,6 +7,45 @@
  * Imported by gpu-terminal.html via dynamic import (same pattern as WASM).
  */
 
+// ── Vendor identity ─────────────────────────────────────────────
+
+/**
+ * Lowercase id of the AI CLI running in a session — `claude`, `codex`,
+ * `cursor`, … — or null when no AI is running (or none is detected yet).
+ *
+ * The daemon has always published this as `claudeRaw.tool`
+ * (websocket.rs build_control_state), but the front-end historically gated
+ * every AI affordance on `!!session.claudeRaw`, which is truthy for ANY
+ * vendor. That made Claude-only behaviour fire inside Codex, Cursor and
+ * Windsurf sessions — most visibly `[Image #N]` hovers resolving against
+ * `~/.claude/image-cache`, which has nothing to do with those tools.
+ *
+ * Note the id is `claude`, not `claude-code`: the daemon's AiTool::name()
+ * and the hub's registry `tool` field use different spellings for Claude.
+ */
+export function aiTool(session) {
+  const raw = session && session.claudeRaw;
+  const tool = raw && raw.tool;
+  return typeof tool === 'string' && tool ? tool : null;
+}
+
+/**
+ * True only when Claude Code specifically is running.
+ *
+ * Deliberately strict: an unknown tool returns false, so Claude-shaped
+ * affordances stay off rather than misfiring. `claudeRaw` also lingers after
+ * an AI exits (the tracker keeps a sticky flag) with `tool` cleared, and in
+ * that state no agent is listening anyway.
+ */
+export function isClaudeCode(session) {
+  return aiTool(session) === 'claude';
+}
+
+/** True when any AI CLI is running — for vendor-neutral affordances. */
+export function isAiActive(session) {
+  return aiTool(session) !== null;
+}
+
 // ── Pure Utilities ──────────────────────────────────────────────
 
 /** Format kilobytes to human-readable (M/G). */

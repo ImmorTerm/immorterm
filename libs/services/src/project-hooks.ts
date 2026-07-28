@@ -43,7 +43,11 @@ export function installProjectHooks(
 ): InstallProjectHooksResult {
 	const { id: projectId } = ensureProjectIdentity(projectRoot);
 	const config = readProjectConfig(projectRoot);
-	const vendors = resolveVendors(config?.services?.vendors, defaultVendorsConfig());
+	const vendors = resolveVendors(
+		config?.services?.vendors,
+		defaultVendorsConfig(),
+		config?.services?.vendorsChosen,
+	);
 
 	const ok = installMemoryHooks(projectRoot, projectId, {
 		memoryPort: getMemoryPort(),
