@@ -4130,6 +4130,7 @@
     let fontData = null; // base64-encoded font file from the host
     let fontName = null; // font family name (e.g. "Menlo") from the host
     let dirty = true;
+    let _restoreRepainted = false; // §restore-black — one deferred repaint after the first snapshot restore
     // Cmd+E auto-detect bullet preview: while true, pseudo-cursors contain
     // the bullet titles we just highlighted (not user-placed multi-cursors).
     // Esc clears them; second Cmd+E (or Enter) advances the wizard.
@@ -8494,6 +8495,7 @@
           if (terminal && wasmReady && canvas.width > 0 && canvas.height > 0) {
             dbg('initWasm: post-compositor surface reconfigure');
             terminal.resize(canvas.width, canvas.height);
+            dirty = true; // repaint after the reconfigure (every other recovery path does)
           }
         });
       });
@@ -8542,6 +8544,27 @@
               }
             }
             dirty = true;
+            // §restore-black-screen — the FIRST snapshot after a webview (re)load
+            // can render its restored content before the compositor has
+            // re-established the presentation layer (VS Code "Reload Window"), so
+            // the frame writes to the backing texture but never reaches the screen
+            // — black until a scroll happens to set dirty again. The init
+            // post-compositor reconfigure (initWasm) resizes but does NOT re-render,
+            // so it can't fix a content frame that already painted black. Force one
+            // deferred reconfigure+repaint here, same recipe as the visibility /
+            // WKWebView-swap recovery paths. Double-rAF for the common case; a
+            // short timeout as a fallback for a slow compositor re-establish.
+            if (!_restoreRepainted) {
+              _restoreRepainted = true;
+              const _repaintRestore = () => {
+                if (terminal && wasmReady && canvas.width > 0 && canvas.height > 0) {
+                  try { terminal.resize(canvas.width, canvas.height); } catch (_) {}
+                  dirty = true;
+                }
+              };
+              requestAnimationFrame(() => requestAnimationFrame(_repaintRestore));
+              setTimeout(_repaintRestore, 250);
+            }
             // Sync AI overlay DOM from WASM ai_layer (populated by load_snapshot).
             // Prefer get_ai_primitives_json (fast) over re-parsing the full snapshot.
             try {
@@ -15927,7 +15950,16 @@
                   else hideShareDropZone();
                 },
                 onConsumeToTerminal: (plan) => {
-                  shareItemToTerminal({ kind: 'plan', plan_id: plan.id, plan_title: plan.title || plan.id }, plan.title || plan.id);
+                  const title = plan.title || plan.id;
+                  // Same standalone/VS-Code split as session & task consume:
+                  // standalone writes the queue over the daemon WS; VS Code posts
+                  // to the extension host (shareItemToTerminal only handles the
+                  // WS path — its VS Code branch is file-only).
+                  if (_remoteName || IS_STANDALONE) {
+                    shareItemToTerminal({ kind: 'plan', plan_id: plan.id, plan_title: title }, title);
+                  } else {
+                    vscode.postMessage({ type: 'share-plan-context', planId: plan.id, planTitle: title, targetName: consumeTargetName() });
+                  }
                 },
               });
               vscode.postMessage({ type: 'get-plans' });

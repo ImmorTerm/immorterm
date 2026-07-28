@@ -1192,6 +1192,23 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         logger.info(`ImmorTerm AI: attached file '${base}' → '${targetName}' (${itemId})`);
         break;
       }
+      case 'share-plan-context': {
+        // Plan dragged onto the terminal → attached. The share-context hook's
+        // emit_plan block points the agent at immorterm_list_plans id=<id>.
+        const targetName = msg.targetName as string;
+        const planId = msg.planId as string;
+        const planTitle = (msg.planTitle as string) || planId;
+        if (!targetName || !planId) break;
+        const itemId = this.writeShareItem(targetName, { kind: 'plan', plan_id: planId, plan_title: planTitle });
+        if (!itemId) { logger.warn(`ImmorTerm AI: plan share refused — target '${targetName}' has no id`); break; }
+        this.view?.webview.postMessage({
+          type: 'share-queued',
+          targetSession: targetName,
+          item: { id: itemId, kind: 'plan', label: planTitle },
+        });
+        logger.info(`ImmorTerm AI: attached plan '${planTitle}' → '${targetName}' (${itemId})`);
+        break;
+      }
       case 'cancel-share-item': {
         // X on a specific pill — delete just that item. Untrack first so the
         // reconcile watcher does NOT treat it as a consumed task (no link).
