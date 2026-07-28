@@ -64,6 +64,27 @@ fn normalize_registry_keys(root: &mut Value) {
     }
 }
 
+/// Mirror each vendor-neutral key back under its legacy name before writing
+/// (T20 transition — see the daemon's `dual_write_legacy_keys` for the full
+/// reasoning). A pre-T20 daemon that reads a file written only under the new
+/// names deserializes them to `None` and drops them on its next write.
+///
+/// REMOVE alongside the daemon and extension mirrors once no pre-T20 writer
+/// can still be running. Reader-side normalization stays forever.
+fn mirror_legacy_keys(root: &mut Value) {
+    let Some(sessions) = root.get_mut("sessions").and_then(|s| s.as_array_mut()) else {
+        return;
+    };
+    for entry in sessions.iter_mut() {
+        let Some(obj) = entry.as_object_mut() else { continue };
+        for (legacy, modern) in LEGACY_ENTRY_KEYS {
+            if let Some(v) = obj.get(*modern).cloned() {
+                obj.insert((*legacy).to_string(), v);
+            }
+        }
+    }
+}
+
 /// Read and parse the full registry.
 fn load_registry() -> Result<Value, String> {
     let path = registry_path();
@@ -154,7 +175,9 @@ fn save_registry_atomic(new_root: &Value) -> Result<(), String> {
 
     if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
     let tmp = path.with_extension("json.tmp");
-    let json = serde_json::to_string_pretty(new_root)
+    let mut out = new_root.clone();
+    mirror_legacy_keys(&mut out);
+    let json = serde_json::to_string_pretty(&out)
         .map_err(|e| format!("Failed to serialize registry: {}", e))?;
     std::fs::write(&tmp, json)
         .map_err(|e| format!("Failed to write registry tmp: {}", e))?;

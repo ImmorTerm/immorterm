@@ -8562,23 +8562,28 @@
               // Electron's compositor never presents the canvas layer until a
               // keystroke / scroll / manual resize invalidates it. Rendering more
               // (the old warm-up) can't help — the presents are already happening.
-              // Force a REAL backing-store size change (w → w-1 → w): it
-              // reallocates the swapchain and invalidates the compositor layer,
-              // exactly like the manual panel-resize that fixes it (a same-size
-              // resize is a no-op). Run it a few times across the compositor's
-              // warm-up so one nudge lands after the layer exists.
-              const _forcePresent = () => {
-                if (!(terminal && wasmReady) || !canvas || canvas.width < 2) return;
-                const w = canvas.width, h = canvas.height;
-                try {
-                  canvas.width = w - 1; terminal.resize(w - 1, h);
-                  requestAnimationFrame(() => {
-                    if (!canvas || !terminal) return;
-                    canvas.width = w; terminal.resize(w, h); dirty = true;
-                  });
-                } catch (_) {}
+              // A backing-store realloc (tried before) reallocates the GPU
+              // swapchain but does NOT invalidate the canvas's COMPOSITOR layer,
+              // so Electron still didn't present. Invalidate the layer directly —
+              // the same fade the visibility path uses for this exact
+              // stale/absent-compositor-frame bug: an opacity change (+ a
+              // translateZ toggle) forces Electron to re-composite and present the
+              // already-rendered frame. Once presented, the compositor stays
+              // awake. Twice across the warm-up so one lands after the layer
+              // exists; the fade is invisible while black and brief once shown.
+              const _kickCompositor = () => {
+                if (!(terminal && wasmReady) || !canvas) return;
+                dirty = true;
+                canvas.style.transition = 'opacity 70ms linear';
+                canvas.style.opacity = '0';
+                canvas.style.transform = 'translateZ(0)';
+                requestAnimationFrame(() => requestAnimationFrame(() => {
+                  if (!canvas) return;
+                  canvas.style.opacity = '1';
+                  canvas.style.transform = 'none';
+                }));
               };
-              [120, 500, 1200, 2200].forEach((ms) => setTimeout(_forcePresent, ms));
+              [200, 700].forEach((ms) => setTimeout(_kickCompositor, ms));
             }
             // Sync AI overlay DOM from WASM ai_layer (populated by load_snapshot).
             // Prefer get_ai_primitives_json (fast) over re-parsing the full snapshot.

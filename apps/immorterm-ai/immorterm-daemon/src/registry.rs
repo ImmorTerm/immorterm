@@ -710,6 +710,42 @@ pub struct Registry {
     pub sessions: Vec<RegistryEntry>,
 }
 
+/// Serialize a registry to `Value` and mirror each vendor-neutral key back
+/// under its legacy name (T20 transition).
+///
+/// Deployment is NOT atomic: the daemon binary, the VS Code extension and any
+/// already-running daemon process update independently. A pre-T20 daemon has
+/// no alias for `ai_session_id`, so if it read a file written only under the
+/// new names it would deserialize them to `None` and drop them on its next
+/// write — silent loss of the session id on every entry that had one.
+///
+/// Writing BOTH names makes every version mix safe: old code finds
+/// `claude_session_id`, new code prefers `ai_session_id`, and neither can
+/// destroy the other's view. Costs three duplicated keys per entry.
+///
+/// REMOVE once no pre-T20 daemon can still be running (a release cycle plus a
+/// machine reboot); the reader-side aliases stay forever for old files.
+fn dual_write_legacy_keys<T: Serialize>(value: &T) -> std::io::Result<serde_json::Value> {
+    const MIRRORED: &[(&str, &str)] = &[
+        ("ai_session_id", "claude_session_id"),
+        ("ai_transcript_path", "claude_transcript_path"),
+        ("ai_stats", "claude_stats"),
+    ];
+
+    let mut root = serde_json::to_value(value).map_err(std::io::Error::other)?;
+    if let Some(sessions) = root.get_mut("sessions").and_then(|s| s.as_array_mut()) {
+        for entry in sessions.iter_mut() {
+            let Some(obj) = entry.as_object_mut() else { continue };
+            for (modern, legacy) in MIRRORED {
+                if let Some(v) = obj.get(*modern).cloned() {
+                    obj.insert((*legacy).to_string(), v);
+                }
+            }
+        }
+    }
+    Ok(root)
+}
+
 impl Registry {
     /// Load the registry from disk (or return empty if doesn't exist).
     /// On parse failure, attempts recovery from the latest backup.
@@ -775,7 +811,7 @@ impl Registry {
         backup_registry();
 
         let tmp = path.with_extension("tmp");
-        let json = serde_json::to_string_pretty(self)
+        let json = serde_json::to_string_pretty(&dual_write_legacy_keys(self)?)
             .map_err(std::io::Error::other)?;
         fs::write(&tmp, json)?;
         fs::rename(&tmp, &path)?;
@@ -1410,5 +1446,45 @@ mod project_identity_tests {
         assert!(!out.contains("claude_session_id"));
         assert!(!out.contains("claude_transcript_path"));
         assert!(!out.contains("claude_stats"));
+    }
+
+    /// T20 transition: a file we write must still be readable by a PRE-T20
+    /// daemon, which knows only `claude_session_id` and has no alias. Modelled
+    /// with a struct shaped like the old one — if the mirror is ever dropped,
+    /// this fails and the 67 live entries with a session id are at risk.
+    #[test]
+    fn dual_write_keeps_pre_t20_readers_working() {
+        #[derive(serde::Deserialize)]
+        struct OldEntry {
+            claude_session_id: Option<String>,
+            claude_transcript_path: Option<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct OldRegistry {
+            sessions: Vec<OldEntry>,
+        }
+
+        let modern = r#"{
+            "sessions": [{
+                "pid": 1, "name": "n", "window_id": "w", "display_name": "d",
+                "project_dir": "/tmp", "shell": "/bin/zsh", "created_at": 0,
+                "ai_session_id": "sess-abc",
+                "ai_transcript_path": "/p/x.jsonl"
+            }]
+        }"#;
+        let reg: Registry = serde_json::from_str(modern).unwrap();
+
+        let on_disk = dual_write_legacy_keys(&reg).unwrap();
+        let raw = serde_json::to_string(&on_disk).unwrap();
+
+        // New readers see the new names...
+        assert!(raw.contains("\"ai_session_id\""));
+        // ...and an old reader still finds everything it needs.
+        let old: OldRegistry = serde_json::from_str(&raw).unwrap();
+        assert_eq!(old.sessions[0].claude_session_id.as_deref(), Some("sess-abc"));
+        assert_eq!(
+            old.sessions[0].claude_transcript_path.as_deref(),
+            Some("/p/x.jsonl")
+        );
     }
 }

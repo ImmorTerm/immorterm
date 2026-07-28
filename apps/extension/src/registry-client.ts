@@ -455,6 +455,34 @@ function readRegistry(): RegistryJson | null {
 let writeTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingWriteData: RegistryJson | null = null;
 
+/**
+ * Copy of `data` with each vendor-neutral key mirrored back under its legacy
+ * name (T20 transition). Does NOT mutate the in-memory object — the cache
+ * stays clean, only the bytes on disk carry both.
+ *
+ * Deployment is not atomic: this extension, the daemon binary, and daemons
+ * already running from a previous build all update independently. A pre-T20
+ * daemon has no alias for `ai_session_id`, so a file written only under the
+ * new names would deserialize to `None` there and get written back WITHOUT
+ * the session id. Emitting both names makes every version mix safe.
+ *
+ * REMOVE together with the daemon's dual_write_legacy_keys(), once no pre-T20
+ * daemon can still be running. Reader-side normalization stays forever.
+ */
+function withLegacyKeyMirror(data: RegistryJson): RegistryJson {
+    return {
+        ...data,
+        sessions: data.sessions.map((entry) => {
+            const e = entry as unknown as Record<string, unknown>;
+            const copy: Record<string, unknown> = { ...e };
+            for (const [legacy, modern] of LEGACY_ENTRY_KEYS) {
+                if (e[modern] !== undefined) copy[legacy] = e[modern];
+            }
+            return copy as unknown as typeof entry;
+        }),
+    };
+}
+
 function flushRegistryToDisk(): void {
     if (!pendingWriteData) return;
     const data = pendingWriteData;
@@ -472,7 +500,7 @@ function flushRegistryToDisk(): void {
         backupRegistry();
 
         const tmp = REGISTRY_PATH + '.tmp';
-        fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n');
+        fs.writeFileSync(tmp, JSON.stringify(withLegacyKeyMirror(data), null, 2) + '\n');
         fs.renameSync(tmp, REGISTRY_PATH);
 
         // Update cache with actual mtime from disk
