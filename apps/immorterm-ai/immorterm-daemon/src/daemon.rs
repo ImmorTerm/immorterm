@@ -1652,25 +1652,15 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                 state.status_bar.ai_process_stats = state.claude.format_process_stats();
                 state.status_bar.ai_api_stats = state.claude.format_api_stats();
 
-                // Notify structured logger of AI tool state changes
+                // Notify structured logger of AI tool state changes.
+                // This used to round-trip AiTool → name() → AiTool through a
+                // 12-arm match, purely because the daemon and structured_logs
+                // each declared their own copy of the enum. They are one type
+                // now, so a vendor added in one place can no longer go missing
+                // here and silently degrade to Unknown.
                 if changed
                     && let Some(ref mut slog) = state.structured_log {
-                        let tool = state.claude.detected_tool.map(|t| {
-                            match t.name() {
-                                "claude" => structured_logs::AiTool::Claude,
-                                "aider" => structured_logs::AiTool::Aider,
-                                "cursor" => structured_logs::AiTool::Cursor,
-                                "copilot" => structured_logs::AiTool::Copilot,
-                                "codex" => structured_logs::AiTool::Codex,
-                                "windsurf" => structured_logs::AiTool::Windsurf,
-                                "cline" => structured_logs::AiTool::Cline,
-                                "opencode" => structured_logs::AiTool::Opencode,
-                                "gemini" => structured_logs::AiTool::Gemini,
-                                "continue" => structured_logs::AiTool::Continue,
-                                "cody" => structured_logs::AiTool::Cody,
-                                _ => structured_logs::AiTool::Unknown,
-                            }
-                        });
+                        let tool = state.claude.detected_tool;
                         slog.on_ai_state_change(
                             tool,
                             state.claude.claude_pid,

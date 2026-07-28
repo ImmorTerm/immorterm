@@ -26,66 +26,15 @@ use tracing::{info, warn};
 
 /// Known AI coding tools we can detect in the process tree.
 ///
-/// Duplicate of `structured_logs::AiTool` — kept in sync so the daemon
-/// doesn't pull a structured_logs dep here. When you add a vendor, mirror
-/// it in `libs/structured-logs/src/ai_extractor.rs::AiTool` and
-/// `apps/immorterm-ai/immorterm-daemon/src/daemon.rs::name → AiTool`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AiTool {
-    Claude,
-    Aider,
-    Cursor,
-    Copilot,
-    Codex,
-    Windsurf,
-    Cline,
-    Opencode,
-    Gemini,
-    Continue,
-    Cody,
-    Unknown,
-}
+/// The vendor driving a session.
+///
+/// Re-exported from `structured_logs` rather than redeclared. This file used
+/// to carry a byte-identical copy with a comment claiming the daemon "doesn't
+/// pull a structured_logs dep here" — untrue since at least log_processor.rs,
+/// which imports StructuredLogger from it. Two hand-synced copies of a vendor
+/// list is exactly how a dropped variant silently mis-attributes sessions.
+pub use structured_logs::ai_extractor::AiTool;
 
-impl AiTool {
-    pub fn name(&self) -> &'static str {
-        match self {
-            AiTool::Claude => "claude",
-            AiTool::Aider => "aider",
-            AiTool::Cursor => "cursor",
-            AiTool::Copilot => "copilot",
-            AiTool::Codex => "codex",
-            AiTool::Windsurf => "windsurf",
-            AiTool::Cline => "cline",
-            AiTool::Opencode => "opencode",
-            AiTool::Gemini => "gemini",
-            AiTool::Continue => "continue",
-            AiTool::Cody => "cody",
-            AiTool::Unknown => "unknown",
-        }
-    }
-
-    /// Status-bar display name. Title-cased + brand-correct ("Opencode",
-    /// "Copilot") — kept separate from `name()` (which is the lowercase
-    /// cross-codebase identifier used by the registry, hub session-link,
-    /// and `IMMORTERM_AI_TOOL` env var). Falls through to "AI" for
-    /// Unknown/legacy callers so the status bar never shows "Unknown".
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            AiTool::Claude => "Claude",
-            AiTool::Aider => "Aider",
-            AiTool::Cursor => "Cursor",
-            AiTool::Copilot => "Copilot",
-            AiTool::Codex => "Codex",
-            AiTool::Windsurf => "Windsurf",
-            AiTool::Cline => "Cline",
-            AiTool::Opencode => "Opencode",
-            AiTool::Gemini => "Gemini",
-            AiTool::Continue => "Continue",
-            AiTool::Cody => "Cody",
-            AiTool::Unknown => "AI",
-        }
-    }
-}
 
 /// How much of a Codex rollout to read when deriving stats. Rollouts grow to
 /// megabytes over a long session and we only need the most recent

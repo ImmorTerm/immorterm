@@ -91,6 +91,25 @@ impl AiTool {
             AiTool::Unknown => "unknown",
         }
     }
+
+    /// Title-case name for UI surfaces (status bar, session list). `Unknown`
+    /// renders as the generic "AI" rather than leaking the variant name.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            AiTool::Claude => "Claude",
+            AiTool::Aider => "Aider",
+            AiTool::Cursor => "Cursor",
+            AiTool::Copilot => "Copilot",
+            AiTool::Codex => "Codex",
+            AiTool::Windsurf => "Windsurf",
+            AiTool::Cline => "Cline",
+            AiTool::Opencode => "Opencode",
+            AiTool::Gemini => "Gemini",
+            AiTool::Continue => "Continue",
+            AiTool::Cody => "Cody",
+            AiTool::Unknown => "AI",
+        }
+    }
 }
 
 /// An extracted `<<html>>...<<\/html>>` block from AI output.
@@ -1473,6 +1492,70 @@ mod tests {
                 .map(|t| t.content.as_deref().unwrap_or(""))
                 .collect::<Vec<_>>()
         );
+    }
+    /// Every variant must round-trip through `name()` and carry a distinct
+    /// `display_name()`.
+    ///
+    /// This enum was duplicated in immorterm-daemon and hand-synced, with a
+    /// third 12-arm string bridge in daemon.rs converting between the copies.
+    /// A vendor added to one and missed in another degraded silently to
+    /// `Unknown` — sessions attributed to the wrong tool, no error anywhere.
+    /// The copies are gone; this is what stops them growing back unnoticed.
+    #[test]
+    fn every_ai_tool_variant_has_a_distinct_name_and_display_name() {
+        use std::collections::HashSet;
+
+        const ALL: &[AiTool] = &[
+            AiTool::Claude,
+            AiTool::Aider,
+            AiTool::Cursor,
+            AiTool::Copilot,
+            AiTool::Codex,
+            AiTool::Windsurf,
+            AiTool::Cline,
+            AiTool::Opencode,
+            AiTool::Gemini,
+            AiTool::Continue,
+            AiTool::Cody,
+            AiTool::Unknown,
+        ];
+
+        // A new variant added to the enum but not to ALL fails to compile here,
+        // because the match below is exhaustive.
+        for t in ALL {
+            let _: () = match t {
+                AiTool::Claude
+                | AiTool::Aider
+                | AiTool::Cursor
+                | AiTool::Copilot
+                | AiTool::Codex
+                | AiTool::Windsurf
+                | AiTool::Cline
+                | AiTool::Opencode
+                | AiTool::Gemini
+                | AiTool::Continue
+                | AiTool::Cody
+                | AiTool::Unknown => (),
+            };
+        }
+
+        let names: HashSet<&str> = ALL.iter().map(|t| t.name()).collect();
+        assert_eq!(names.len(), ALL.len(), "two variants share a name()");
+
+        let displays: HashSet<&str> = ALL.iter().map(|t| t.display_name()).collect();
+        assert_eq!(displays.len(), ALL.len(), "two variants share a display_name()");
+
+        // `name()` is the wire value written to registry.tool and memory rows —
+        // lowercase, no spaces, or cross-layer comparisons break.
+        for t in ALL {
+            let n = t.name();
+            assert!(!n.is_empty(), "{t:?} has an empty name()");
+            assert_eq!(n, n.to_lowercase(), "{t:?} name() must be lowercase");
+            assert!(!n.contains(' '), "{t:?} name() must not contain spaces");
+        }
+
+        // Unknown renders generically rather than leaking the variant name.
+        assert_eq!(AiTool::Unknown.display_name(), "AI");
     }
 }
 
