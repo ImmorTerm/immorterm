@@ -3107,8 +3107,16 @@
         if (lt && lt.classList.contains('visible')) return;
         const tt = document.getElementById('title-tooltip');
         if (tt && tt.classList.contains('visible')) return;
-        const tag = ae.tagName;
-        const editable = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || ae.isContentEditable;
+        // Pierce open shadow roots before the editable check. A plan's comment
+        // <textarea> lives in the plan-overlay card's shadow DOM (and section
+        // comments in a nested shadow), so document.activeElement resolves to the
+        // shadow HOST — a <div>. Without descending to the real focused node the
+        // check below reads DIV, snaps focus back to the terminal, and kicks the
+        // user out of the field the instant they click it.
+        let deep = ae;
+        while (deep && deep.shadowRoot && deep.shadowRoot.activeElement) deep = deep.shadowRoot.activeElement;
+        const tag = deep.tagName;
+        const editable = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || deep.isContentEditable;
         if (!editable) kbInput.focus({ preventScroll: true });
       }, 0);
     });
