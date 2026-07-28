@@ -544,7 +544,7 @@ fn resolve_claude_uuid_for_recall(window_id: &str) -> Option<String> {
 
     let registry = crate::registry::Registry::load();
     if let Some(entry) = registry.sessions.iter().find(|e| e.window_id == window_id)
-        && let Some(uuid) = entry.claude_session_id.clone()
+        && let Some(uuid) = entry.ai_session_id.clone()
         && !uuid.is_empty()
     {
         return Some(uuid);
@@ -559,7 +559,7 @@ fn resolve_claude_uuid_for_recall(window_id: &str) -> Option<String> {
         let sj_path = std::path::Path::new(&sld).join("session.json");
         if let Ok(contents) = fs::read_to_string(&sj_path)
             && let Ok(v) = serde_json::from_str::<serde_json::Value>(&contents)
-            && let Some(id) = v.get("claude_session_id").and_then(|x| x.as_str())
+            && let Some(id) = v.get("ai_session_id").and_then(|x| x.as_str())
             && !id.is_empty()
         {
             return Some(id.to_string());

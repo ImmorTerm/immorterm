@@ -55,7 +55,7 @@ interface RegistryEntryJson {
     window_id: string;
     display_name: string;
     project_dir: string;
-    claude_session_id?: string;
+    ai_session_id?: string;
     title_locked?: boolean;
     title?: string;
     logfile?: string;
@@ -67,8 +67,8 @@ interface RegistryEntryJson {
     claude_resume_id?: string;  // Claude session ID to auto-resume on reattach (set by extension)
     ws_port?: number;
     theme?: string;
-    claude_transcript_path?: string;
-    claude_stats?: ClaudeStatsJson;
+    ai_transcript_path?: string;
+    ai_stats?: ClaudeStatsJson;
     /** Per-session structured log directory written by the Rust daemon —
      * `{projectDir}/.immorterm/terminals/logs/{windowId}` (or the legacy
      * date-prefixed form). The basename matches the on-disk dir name and
@@ -368,6 +368,38 @@ function readLatestBackup(): RegistryJson | null {
 
 // ── Internal helpers ──────────────────────────────────────────────
 
+/**
+ * Legacy → vendor-neutral entry keys (T20).
+ *
+ * `ai_session_id` / `ai_transcript_path` / `ai_stats` were named
+ * after whoever wrote them first, not whose session they describe — a Codex
+ * thread id lands in the same slots. The Rust daemon handles this with
+ * `#[serde(alias)]`; here it's one pass at the single disk-read point, so
+ * every other site in this file can use the new names unconditionally.
+ *
+ * Mutates in place: the object returned here is what writeRegistry() later
+ * persists, which is also what migrates the file to the new names on disk.
+ */
+const LEGACY_ENTRY_KEYS: ReadonlyArray<readonly [string, string]> = [
+    ['claude_session_id', 'ai_session_id'],
+    ['claude_transcript_path', 'ai_transcript_path'],
+    ['claude_stats', 'ai_stats'],
+];
+
+function normalizeRegistryKeys(data: RegistryJson): void {
+    for (const entry of data.sessions) {
+        const e = entry as unknown as Record<string, unknown>;
+        for (const [legacy, modern] of LEGACY_ENTRY_KEYS) {
+            if (legacy in e) {
+                // New name wins if a mixed-version window wrote both, so an
+                // entry can never end up carrying two different session ids.
+                if (e[modern] === undefined) e[modern] = e[legacy];
+                delete e[legacy];
+            }
+        }
+    }
+}
+
 function readRegistry(): RegistryJson | null {
     // CRITICAL: If we have unflushed pending writes, return them.
     // Without this guard, a daemon write during the 100ms coalescing window
@@ -400,6 +432,7 @@ function readRegistry(): RegistryJson | null {
             throw new Error('registry.json missing sessions array');
         }
 
+        normalizeRegistryKeys(data);
         cache = { data, mtime: currentMtime };
         return data;
     } catch (err) {
@@ -621,8 +654,8 @@ function toTerminalEntry(entry: RegistryEntryJson): TerminalEntry {
         windowId: entry.window_id,
         name: entry.display_name || entry.name,
         screenSession: entry.name,
-        claudeSessionId: entry.claude_session_id,
-        claudeTranscriptPath: entry.claude_transcript_path,
+        claudeSessionId: entry.ai_session_id,
+        claudeTranscriptPath: entry.ai_transcript_path,
         theme: entry.theme,
         titleLocked: entry.title_locked,
     };
@@ -685,10 +718,10 @@ function migrateRestoreTerminalsJson(): void {
                         logFn(`[registry-client] Updated display_name for ${windowId}: "${existing.display_name}" → "${split.name}"`);
                         existing.display_name = split.name;
                     }
-                    if (split.claudeSessionId) existing.claude_session_id = split.claudeSessionId;
+                    if (split.claudeSessionId) existing.ai_session_id = split.claudeSessionId;
                     if (split.titleLocked !== undefined) existing.title_locked = split.titleLocked;
                     if (split.theme) existing.theme = split.theme;
-                    if (split.claudeTranscriptPath) existing.claude_transcript_path = split.claudeTranscriptPath;
+                    if (split.claudeTranscriptPath) existing.ai_transcript_path = split.claudeTranscriptPath;
                     migrated++;
                     continue;
                 }
@@ -699,13 +732,13 @@ function migrateRestoreTerminalsJson(): void {
                     window_id: windowId,
                     display_name: split.name,
                     project_dir: projectPath,
-                    claude_session_id: split.claudeSessionId,
+                    ai_session_id: split.claudeSessionId,
                     title_locked: split.titleLocked ?? false,
                     title: '',
                     shell: '',
                     created_at: 0,
                     theme: split.theme,
-                    claude_transcript_path: split.claudeTranscriptPath,
+                    ai_transcript_path: split.claudeTranscriptPath,
                 });
                 migrated++;
             }
@@ -1127,8 +1160,8 @@ export function updateClaudeSessionId(windowId: string, sessionId: string): bool
 
     try {
         const entry = findEntry(data, windowId);
-        if (entry && entry.claude_session_id !== sessionId) {
-            entry.claude_session_id = sessionId;
+        if (entry && entry.ai_session_id !== sessionId) {
+            entry.ai_session_id = sessionId;
             writeRegistry(data);
             logFn(`[claude-sync] Set claudeSessionId for ${windowId}: ${sessionId.slice(0, 8)}...`);
             return true;
@@ -1146,9 +1179,9 @@ export function removeClaudeSessionId(windowId: string): boolean {
 
     try {
         const entry = findEntry(data, windowId);
-        if (entry && entry.claude_session_id) {
-            delete entry.claude_session_id;
-            delete entry.claude_transcript_path;
+        if (entry && entry.ai_session_id) {
+            delete entry.ai_session_id;
+            delete entry.ai_transcript_path;
             writeRegistry(data);
             logFn(`[claude-sync] Removed claudeSessionId for ${windowId} (Claude exited)`);
             return true;
@@ -1165,7 +1198,7 @@ export function getCurrentClaudeSessionId(windowId: string): string | null {
     if (!data) return null;
 
     const entry = findEntry(data, windowId);
-    return entry?.claude_session_id || null;
+    return entry?.ai_session_id || null;
 }
 
 export function updateClaudeTranscriptPath(windowId: string, transcriptPath: string): boolean {
@@ -1174,8 +1207,8 @@ export function updateClaudeTranscriptPath(windowId: string, transcriptPath: str
 
     try {
         const entry = findEntry(data, windowId);
-        if (entry && entry.claude_transcript_path !== transcriptPath) {
-            entry.claude_transcript_path = transcriptPath;
+        if (entry && entry.ai_transcript_path !== transcriptPath) {
+            entry.ai_transcript_path = transcriptPath;
             writeRegistry(data);
             logFn(`[claude-sync] Set claudeTranscriptPath for ${windowId}`);
             return true;
@@ -1192,7 +1225,7 @@ export function getClaudeTranscriptPath(windowId: string): string | null {
     if (!data) return null;
 
     const entry = findEntry(data, windowId);
-    return entry?.claude_transcript_path || null;
+    return entry?.ai_transcript_path || null;
 }
 
 export function updateClaudeStats(windowId: string, stats: ClaudeStats): boolean {
@@ -1203,12 +1236,12 @@ export function updateClaudeStats(windowId: string, stats: ClaudeStats): boolean
         const entry = findEntry(data, windowId);
         if (!entry) return false;
 
-        const oldStats = entry.claude_stats;
+        const oldStats = entry.ai_stats;
         const shouldLog = !oldStats ||
             Math.abs((oldStats.rss_kb || 0) - stats.rss) > 10240 ||
             Math.abs((oldStats.cpu_percent || 0) - stats.cpu) > 5;
 
-        entry.claude_stats = {
+        entry.ai_stats = {
             pid: stats.pid,
             rss_kb: stats.rss,
             cpu_percent: stats.cpu,
@@ -1234,8 +1267,8 @@ export function removeClaudeStats(windowId: string): boolean {
 
     try {
         const entry = findEntry(data, windowId);
-        if (entry && entry.claude_stats) {
-            delete entry.claude_stats;
+        if (entry && entry.ai_stats) {
+            delete entry.ai_stats;
             writeRegistry(data);
             logFn(`[claude-stats] Removed stats for ${windowId} (Claude exited)`);
             return true;
@@ -1252,9 +1285,9 @@ export function getClaudeStats(windowId: string): ClaudeStats | null {
     if (!data) return null;
 
     const entry = findEntry(data, windowId);
-    if (!entry?.claude_stats) return null;
+    if (!entry?.ai_stats) return null;
 
-    const s = entry.claude_stats;
+    const s = entry.ai_stats;
     return {
         pid: s.pid || 0,
         rss: s.rss_kb || 0,
@@ -1563,16 +1596,16 @@ export function deduplicateSessionIds(): number {
     const data = readRegistry();
     if (!data) return 0;
 
-    // Group entries by claude_session_id
+    // Group entries by ai_session_id
     const groups = new Map<string, Array<{ entry: RegistryEntryJson; startTime: number }>>();
 
     for (const entry of data.sessions) {
-        const sid = entry.claude_session_id;
+        const sid = entry.ai_session_id;
         if (!sid) continue;
         if (!groups.has(sid)) groups.set(sid, []);
         groups.get(sid)!.push({
             entry,
-            startTime: entry.claude_stats?.start_time ?? 0,
+            startTime: entry.ai_stats?.start_time ?? 0,
         });
     }
 
@@ -1586,7 +1619,7 @@ export function deduplicateSessionIds(): number {
         for (let i = 1; i < entries.length; i++) {
             const wid = entries[i].entry.window_id || '?';
             logFn(`[dedup] Clearing duplicate claudeSessionId ${sessionId.slice(0, 8)}... from ${wid}`);
-            delete entries[i].entry.claude_session_id;
+            delete entries[i].entry.ai_session_id;
             cleared++;
         }
     }
@@ -1622,16 +1655,16 @@ export function batchSyncClaudeState(updates: ClaudeSyncUpdate[]): void {
 
         if (update.active && update.sessionId) {
             // Active Claude session — set all fields
-            if (entry.claude_session_id !== update.sessionId) {
-                entry.claude_session_id = update.sessionId;
+            if (entry.ai_session_id !== update.sessionId) {
+                entry.ai_session_id = update.sessionId;
                 dirty = true;
             }
-            if (update.transcriptPath && entry.claude_transcript_path !== update.transcriptPath) {
-                entry.claude_transcript_path = update.transcriptPath;
+            if (update.transcriptPath && entry.ai_transcript_path !== update.transcriptPath) {
+                entry.ai_transcript_path = update.transcriptPath;
                 dirty = true;
             }
             if (update.stats) {
-                entry.claude_stats = {
+                entry.ai_stats = {
                     pid: update.stats.pid,
                     rss_kb: update.stats.rss,
                     cpu_percent: update.stats.cpu,
@@ -1642,13 +1675,13 @@ export function batchSyncClaudeState(updates: ClaudeSyncUpdate[]): void {
             }
         } else {
             // Claude not active — clean up stale data
-            if (entry.claude_session_id) {
-                delete entry.claude_session_id;
-                delete entry.claude_transcript_path;
+            if (entry.ai_session_id) {
+                delete entry.ai_session_id;
+                delete entry.ai_transcript_path;
                 dirty = true;
             }
-            if (entry.claude_stats) {
-                delete entry.claude_stats;
+            if (entry.ai_stats) {
+                delete entry.ai_stats;
                 dirty = true;
             }
         }
@@ -1657,16 +1690,16 @@ export function batchSyncClaudeState(updates: ClaudeSyncUpdate[]): void {
     // Inline deduplication (same logic, avoids second read/write cycle)
     const groups = new Map<string, Array<{ entry: RegistryEntryJson; startTime: number }>>();
     for (const entry of data.sessions) {
-        const sid = entry.claude_session_id;
+        const sid = entry.ai_session_id;
         if (!sid) continue;
         if (!groups.has(sid)) groups.set(sid, []);
-        groups.get(sid)!.push({ entry, startTime: entry.claude_stats?.start_time ?? 0 });
+        groups.get(sid)!.push({ entry, startTime: entry.ai_stats?.start_time ?? 0 });
     }
     for (const [, entries] of groups) {
         if (entries.length <= 1) continue;
         entries.sort((a, b) => b.startTime - a.startTime);
         for (let i = 1; i < entries.length; i++) {
-            delete entries[i].entry.claude_session_id;
+            delete entries[i].entry.ai_session_id;
             dirty = true;
         }
     }

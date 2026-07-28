@@ -323,7 +323,7 @@ impl ClaudeTracker {
             .sessions
             .iter()
             .find(|e| e.window_id == window_id)
-            .and_then(|e| e.claude_transcript_path.clone())
+            .and_then(|e| e.ai_transcript_path.clone())
             .filter(|p| !p.is_empty())
     }
 

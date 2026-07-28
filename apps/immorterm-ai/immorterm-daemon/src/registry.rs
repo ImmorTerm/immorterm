@@ -557,7 +557,7 @@ pub struct ToolHistoryEntry {
 
 /// Claude process stats stored in the registry (written by VS Code extension).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClaudeStatsEntry {
+pub struct AiStatsEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     #[serde(default)]
@@ -592,9 +592,14 @@ pub struct RegistryEntry {
     pub display_name: String,
     /// Project directory
     pub project_dir: String,
-    /// Claude session ID (if associated)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub claude_session_id: Option<String>,
+    /// AI session ID (if associated) — the vendor's own session/thread uuid.
+    /// Which vendor it belongs to is `tool`; this holds a Codex thread id just
+    /// as readily as a Claude session id.
+    ///
+    /// The `claude_session_id` alias keeps every existing registry.json
+    /// deserializing; entries are rewritten under the new name on first save.
+    #[serde(alias = "claude_session_id", skip_serializing_if = "Option::is_none")]
+    pub ai_session_id: Option<String>,
     /// Whether title is locked by user
     #[serde(default)]
     pub title_locked: bool,
@@ -619,12 +624,14 @@ pub struct RegistryEntry {
     /// Theme name (e.g., "aurora-borealis")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
-    /// Claude transcript JSONL path
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude_transcript_path: Option<String>,
-    /// Claude process stats (written by extension)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude_stats: Option<ClaudeStatsEntry>,
+    /// Vendor transcript path — Claude's `~/.claude/projects/**.jsonl` or
+    /// Codex's `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`.
+    #[serde(default, alias = "claude_transcript_path", skip_serializing_if = "Option::is_none")]
+    pub ai_transcript_path: Option<String>,
+    /// Live AI stats (model, context %, cost) — written by the extension for
+    /// Claude, by the daemon's Codex rollout reader for Codex.
+    #[serde(default, alias = "claude_stats", skip_serializing_if = "Option::is_none")]
+    pub ai_stats: Option<AiStatsEntry>,
 
     /// AI tool driving this session.
     /// One of: claude-code, codex, cursor, windsurf, cline, opencode, gemini, aider, copilot.
@@ -637,7 +644,7 @@ pub struct RegistryEntry {
     /// Append-only timeline of `(tool, session_id, transcript_path, ts)`
     /// tuples written by hub session-link calls. Lets us reconstruct which
     /// vendor was active in this immorterm window over time even though
-    /// `tool` / `claude_session_id` are overwritten on each link. Daemon
+    /// `tool` / `ai_session_id` are overwritten on each link. Daemon
     /// preserves this across rewrites via `#[serde(default)]` — same
     /// pattern as `tool` above. Empty by default; serialized only when
     /// non-empty so legacy entries don't gain an empty `[]`.
@@ -816,13 +823,13 @@ impl Registry {
     ///
     /// **Why the merge exists**: this registry is a multi-writer file. The daemon's
     /// `register_session()` knows pid, name, window_id, display_name,
-    /// claude_session_id (from env), title_locked, shell, project_dir,
+    /// ai_session_id (from env), title_locked, shell, project_dir,
     /// session_type, created_at, structured_log_dir. The extension writes *other*
-    /// fields asynchronously: `theme`, `claude_transcript_path`, `claude_stats`,
+    /// fields asynchronously: `theme`, `ai_transcript_path`, `ai_stats`,
     /// `session_status`, `shelved_at`, and sometimes a more recent
-    /// `claude_session_id` (via claude-sync.ts). Without this merge, every daemon
+    /// `ai_session_id` (via claude-sync.ts). Without this merge, every daemon
     /// respawn silently wipes those extension-managed fields — which is exactly
-    /// what caused a restore failure we hit (claude_session_id race-wiped
+    /// what caused a restore failure we hit (ai_session_id race-wiped
     /// from registry, breaking auto-resume on reboot).
     ///
     /// The dedup then runs as before (name OR window_id match → replace) so there's
@@ -832,17 +839,17 @@ impl Registry {
             e.name == entry.name
                 || (!entry.window_id.is_empty() && e.window_id == entry.window_id)
         }) {
-            if entry.claude_session_id.is_none() {
-                entry.claude_session_id = existing.claude_session_id.clone();
+            if entry.ai_session_id.is_none() {
+                entry.ai_session_id = existing.ai_session_id.clone();
             }
             if entry.theme.is_none() {
                 entry.theme = existing.theme.clone();
             }
-            if entry.claude_transcript_path.is_none() {
-                entry.claude_transcript_path = existing.claude_transcript_path.clone();
+            if entry.ai_transcript_path.is_none() {
+                entry.ai_transcript_path = existing.ai_transcript_path.clone();
             }
-            if entry.claude_stats.is_none() {
-                entry.claude_stats = existing.claude_stats.clone();
+            if entry.ai_stats.is_none() {
+                entry.ai_stats = existing.ai_stats.clone();
             }
             if entry.session_status.is_none() {
                 entry.session_status = existing.session_status.clone();
@@ -908,14 +915,14 @@ impl Registry {
     /// Update the Claude session ID for a window.
     pub fn update_claude_session(&mut self, window_id: &str, claude_id: &str) {
         if let Some(entry) = self.sessions.iter_mut().find(|e| e.window_id == window_id) {
-            entry.claude_session_id = Some(claude_id.to_string());
+            entry.ai_session_id = Some(claude_id.to_string());
         }
     }
 
     /// Update Claude stats (process + API) for a window.
-    pub fn update_claude_stats(&mut self, window_id: &str, claude: &crate::claude::ClaudeTracker) {
+    pub fn update_ai_stats(&mut self, window_id: &str, claude: &crate::claude::ClaudeTracker) {
         if let Some(entry) = self.sessions.iter_mut().find(|e| e.window_id == window_id) {
-            entry.claude_stats = Some(ClaudeStatsEntry {
+            entry.ai_stats = Some(AiStatsEntry {
                 pid: claude.claude_pid,
                 rss_kb: claude.rss_kb,
                 cpu_percent: claude.cpu_percent as f64,
@@ -949,7 +956,7 @@ impl Registry {
                         )
                     ],
                 });
-                if let Some(ref claude_id) = e.claude_session_id {
+                if let Some(ref claude_id) = e.ai_session_id {
                     terminal["claudeSessionId"] = serde_json::json!(claude_id);
                 }
                 serde_json::json!({
@@ -989,7 +996,7 @@ pub fn register_session(
     let owner_project_id = owner_identity.as_ref().map(|p| p.id.clone());
     let owner_project_name = owner_identity.as_ref().map(|p| p.name.clone());
 
-    let claude_session_id = std::env::var("IMMORTERM_CLAUDE_SESSION_ID").ok()
+    let ai_session_id = std::env::var("IMMORTERM_CLAUDE_SESSION_ID").ok()
         .filter(|s| !s.is_empty());
     let title_locked = std::env::var("IMMORTERM_TITLE_LOCKED")
         .map(|v| v == "1")
@@ -1036,7 +1043,7 @@ pub fn register_session(
         window_id,
         display_name,
         project_dir,
-        claude_session_id,
+        ai_session_id,
         title_locked,
         title: String::new(),
         logfile: logfile.map(|s| s.to_string()),
@@ -1048,8 +1055,8 @@ pub fn register_session(
         session_type,
         ws_port,
         theme: None,
-        claude_transcript_path: None,
-        claude_stats: None,
+        ai_transcript_path: None,
+        ai_stats: None,
         tool: None,
         tool_history: Vec::new(),
         session_status: None,
@@ -1153,7 +1160,7 @@ pub fn find_existing_session_dir(base_dir: &std::path::Path, suffix: &str) -> Op
 
 /// Find the newest claude-env/<uuid>.env file whose content has
 /// `IMMORTERM_ID=<window_id>`. Used by the daemon to backfill
-/// `claude_session_id` when OSC 1337 was never emitted (e.g. older Claude
+/// `ai_session_id` when OSC 1337 was never emitted (e.g. older Claude
 /// versions or when Claude started after daemon boot without passing the
 /// env var downstream). Returns the Claude UUID (filename without `.env`)
 /// or None if no matching file exists.
@@ -1367,5 +1374,41 @@ mod project_identity_tests {
         assert!(cli_supports_hooks(&real.to_string_lossy(), &owner));
 
         let _ = fs::remove_dir_all(&owner);
+    }
+
+    /// T20: a pre-rename registry.json must keep every field, and come back
+    /// out under the vendor-neutral names. If the serde aliases are ever
+    /// dropped, 67 live entries silently lose their session id — this is the
+    /// check that fails first.
+    #[test]
+    fn legacy_claude_keys_deserialize_and_reemit_as_ai() {
+        let legacy = r#"{
+            "sessions": [{
+                "pid": 1, "name": "immorterm-ai-1", "window_id": "w1",
+                "display_name": "one", "project_dir": "/tmp/p", "shell": "/bin/zsh",
+                "created_at": 0,
+                "claude_session_id": "sess-abc",
+                "claude_transcript_path": "/home/u/.codex/sessions/x.jsonl",
+                "claude_stats": {"model": "gpt-5", "context_pct": 42.0}
+            }]
+        }"#;
+
+        let reg: Registry = serde_json::from_str(legacy).expect("legacy registry must parse");
+        let e = &reg.sessions[0];
+        assert_eq!(e.ai_session_id.as_deref(), Some("sess-abc"));
+        assert_eq!(
+            e.ai_transcript_path.as_deref(),
+            Some("/home/u/.codex/sessions/x.jsonl")
+        );
+        assert!(e.ai_stats.is_some(), "claude_stats must survive the rename");
+
+        // Re-serialized under the new names only — no entry carries both.
+        let out = serde_json::to_string(&reg).unwrap();
+        assert!(out.contains("\"ai_session_id\""));
+        assert!(out.contains("\"ai_transcript_path\""));
+        assert!(out.contains("\"ai_stats\""));
+        assert!(!out.contains("claude_session_id"));
+        assert!(!out.contains("claude_transcript_path"));
+        assert!(!out.contains("claude_stats"));
     }
 }

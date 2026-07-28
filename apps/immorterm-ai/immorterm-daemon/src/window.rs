@@ -91,7 +91,7 @@ struct App {
     shell: String,
     created_at: Instant,
     last_io_time: Instant,
-    claude_stats: Arc<Mutex<ClaudeStatsSnapshot>>,
+    ai_stats: Arc<Mutex<ClaudeStatsSnapshot>>,
 
     // Interactive status bar state
     status_bar_hover: StatusBarTarget,
@@ -236,7 +236,7 @@ impl App {
     /// when the model alone is ambiguous (Cursor wrapping Sonnet looks
     /// identical to Claude wrapping Sonnet otherwise).
     fn format_ai_stats(&self) -> String {
-        let stats = self.claude_stats.lock().unwrap();
+        let stats = self.ai_stats.lock().unwrap();
         if !stats.active {
             return String::new();
         }
@@ -1668,7 +1668,7 @@ fn send_control_request(socket_path: &Path, request: Request) {
 }
 
 /// Query the daemon for Claude session info and update the shared snapshot.
-fn poll_claude_stats(socket_path: PathBuf, stats: Arc<Mutex<ClaudeStatsSnapshot>>) {
+fn poll_ai_stats(socket_path: PathBuf, stats: Arc<Mutex<ClaudeStatsSnapshot>>) {
     loop {
         std::thread::sleep(Duration::from_secs(5));
 
@@ -1773,12 +1773,12 @@ pub fn main_gui(session_name: Option<&str>, shell: &str) -> Result<()> {
         connect_to_daemon(&socket_path)?;
 
     // Spawn Claude stats poller (every 5 seconds)
-    let claude_stats = Arc::new(Mutex::new(ClaudeStatsSnapshot::default()));
+    let ai_stats = Arc::new(Mutex::new(ClaudeStatsSnapshot::default()));
     {
-        let stats_clone = Arc::clone(&claude_stats);
+        let stats_clone = Arc::clone(&ai_stats);
         let socket_clone = socket_path.clone();
         std::thread::spawn(move || {
-            poll_claude_stats(socket_clone, stats_clone);
+            poll_ai_stats(socket_clone, stats_clone);
         });
     }
 
@@ -1800,7 +1800,7 @@ pub fn main_gui(session_name: Option<&str>, shell: &str) -> Result<()> {
         shell: shell.to_string(),
         created_at: now,
         last_io_time: now,
-        claude_stats,
+        ai_stats,
         status_bar_hover: StatusBarTarget::None,
         status_bar_theme: StatusBarTheme::default(),
         ai_stats_mode: AiStatsMode::default(),

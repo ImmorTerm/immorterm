@@ -2510,7 +2510,7 @@ function generateDigestScript(projectId: string): string {
     '        with open(registry) as f:',
     '            data = json.load(f)',
     "        for entry in data.get('sessions', []):",
-    "            sid = entry.get('claude_session_id', '')",
+    "            sid = entry.get('ai_session_id') or entry.get('claude_session_id') or ''",
     "            wid = entry.get('window_id', '')",
     '            if sid and wid:',
     '                m[sid] = wid',

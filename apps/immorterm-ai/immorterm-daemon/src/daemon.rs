@@ -297,7 +297,7 @@ impl SessionState {
             // vendor's branch instead — e.g. Codex resolves to
             // `codex resume <id>` when a rollout for it exists.
             // The previous gate (`pending_claude_resume.is_some()`) skipped
-            // recall for sessions whose claude_session_id was never tracked
+            // recall for sessions whose ai_session_id was never tracked
             // by the daemon (chronic registry race) — meaning users got a
             // bare zsh prompt on reattach instead of Claude rebuilding
             // context from memory packs.
@@ -665,7 +665,7 @@ fn run_daemon(
     // Skip-registry daemons must NOT carry a window_id. Wrapper daemons
     // inherit the HOST session's IMMORTERM_WINDOW_ID through the digest
     // pipeline's environment; keeping it lets the 10s self-heal loop (and
-    // the claude_session/claude_stats updates, all keyed by window_id)
+    // the claude_session/ai_stats updates, all keyed by window_id)
     // hijack the host session's registry row — stamping the wrapper's
     // pid/ws_port into it, so a VS Code reload reattaches the host tab to
     // the wrapper daemon (2026-06-07 "Dodo" incident). Every registry
@@ -1193,7 +1193,7 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                                 info!("Claude session via OSC: {}", &ai_event.session_id[..8.min(ai_event.session_id.len())]);
                                 registry.update_claude_session(&state.window_id, &ai_event.session_id);
                             }
-                            registry.update_claude_stats(&state.window_id, &state.claude);
+                            registry.update_ai_stats(&state.window_id, &state.claude);
                             let _ = registry.save();
                         }
 
@@ -1639,7 +1639,7 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                     let mut registry = crate::registry::Registry::load();
                     registry.update_claude_session(&state.window_id, &uuid);
                     if let Err(e) = registry.save() {
-                        warn!("Failed to persist backfilled claude_session_id: {}", e);
+                        warn!("Failed to persist backfilled ai_session_id: {}", e);
                     }
                     // Also refresh session.json inside the structured log dir so
                     // the restore resolver's Tier 2 path stays in sync.
@@ -1738,7 +1738,7 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                                 // Update live fields that may have changed since backup
                                 recovered.pid = std::process::id();
                                 recovered.ws_port = if state.ws_port > 0 { Some(state.ws_port) } else { None };
-                                recovered.claude_session_id = state.claude.session_id.clone();
+                                recovered.ai_session_id = state.claude.session_id.clone();
                                 if !state.title.is_empty() {
                                     recovered.title = state.title.clone();
                                 }
@@ -1759,7 +1759,7 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                                     window_id: state.window_id.clone(),
                                     display_name: state.name.clone(),
                                     project_dir,
-                                    claude_session_id: state.claude.session_id.clone(),
+                                    ai_session_id: state.claude.session_id.clone(),
                                     title_locked: false,
                                     title: state.title.clone(),
                                     logfile: state.log_file.clone(),
@@ -1776,8 +1776,8 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                                     session_type: Some("ai".to_string()),
                                     ws_port: if state.ws_port > 0 { Some(state.ws_port) } else { None },
                                     theme: None,
-                                    claude_transcript_path: None,
-                                    claude_stats: None,
+                                    ai_transcript_path: None,
+                                    ai_stats: None,
                                     tool: None,
                                     tool_history: Vec::new(),
                                     session_status: None,
@@ -1802,7 +1802,7 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                         if let Some(ref sid) = state.claude.session_id {
                             registry.update_claude_session(&state.window_id, sid);
                         }
-                        registry.update_claude_stats(&state.window_id, &state.claude);
+                        registry.update_ai_stats(&state.window_id, &state.claude);
                     }
 
                     // ── Worktree tracking: react to OSC-7 cwd changes ──
@@ -2429,7 +2429,7 @@ async fn handle_client_connection(
                     info!("Claude session pushed via IPC: {}", &session_id[..8.min(session_id.len())]);
                     registry.update_claude_session(&state.window_id, &session_id);
                 }
-                registry.update_claude_stats(&state.window_id, &state.claude);
+                registry.update_ai_stats(&state.window_id, &state.claude);
                 if let Err(e) = registry.save() {
                     error!("Failed to update registry with Claude stats: {}", e);
                 }

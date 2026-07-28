@@ -2064,7 +2064,7 @@ export function createModalSystem({
   // Shows: identity (immorterm_id, claude UUID), runtime (active vendor,
   // daemon PID/alive, descendants), files (structured_log_dir, sizes),
   // and ai.jsonl health (event counts, last event). Useful for answering
-  // "why is claude_session_id null?" without grepping multiple files.
+  // "why is ai_session_id null?" without grepping multiple files.
   function renderSessionInfoModal() {
     modalBody.appendChild(modalSpinner('Collecting session info...'));
   }
@@ -2117,7 +2117,7 @@ export function createModalSystem({
     const row = (key, value) => {
       const r = el('div', 'si-row');
       r.style.display = 'grid';
-      // Wider key column so long keys like `registry.claude_session_id`
+      // Wider key column so long keys like `registry.ai_session_id`
       // don't wrap and bleed into the value column. minmax + minWidth:0
       // on cells lets long values (UUIDs, paths) wrap inside their cell.
       r.style.gridTemplateColumns = 'minmax(220px, max-content) minmax(0, 1fr)';
@@ -2172,12 +2172,12 @@ export function createModalSystem({
       vendorBadge.style.opacity = '0.55';
     }
     kv(vendor, 'active_vendor', vendorBadge);
-    kv(vendor, 'registry.claude_session_id', info.registryClaudeSessionId);
+    kv(vendor, 'registry.ai_session_id', info.registryClaudeSessionId);
     kv(vendor, 'session-status.claude_resume_id', info.sessionStatusClaudeResumeId);
     if (info.claudeStats) {
       const cs = info.claudeStats;
       const pretty = `pid=${cs.pid ?? '?'} rss=${cs.rss_kb ? Math.round(cs.rss_kb / 1024) + 'MB' : '?'} uptime=${cs.runtime_secs ?? '?'}s`;
-      kv(vendor, 'claude_stats', pretty);
+      kv(vendor, 'ai_stats', pretty);
     }
     root.appendChild(vendor);
 

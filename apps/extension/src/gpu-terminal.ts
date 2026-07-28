@@ -985,7 +985,7 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
           name: e.display_name || e.name,
           sessionType: e.session_type || 'screen',
           shelvedAt: e.shelved_at || 0,
-          claudeSessionId: e.claude_session_id || null,
+          claudeSessionId: e.ai_session_id || null,
           soft: false,
         }));
         // Soft-shelved entries are not in registry-shelved.json (their
@@ -1032,7 +1032,7 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
                 name: e.display_name || e.name,
                 sessionType: e.session_type || 'screen',
                 shelvedAt: e.shelved_at || 0,
-                claudeSessionId: e.claude_session_id || null,
+                claudeSessionId: e.ai_session_id || null,
               })),
             });
           });
@@ -2979,7 +2979,7 @@ Return ONLY a JSON object with these fields:
           }
 
           // Enrich existing registry entries and lock custom names so Claude doesn't overwrite them.
-          // Also recover claude_session_id — registry.json races between daemon + extension writers
+          // Also recover ai_session_id — registry.json races between daemon + extension writers
           // and frequently loses this field, breaking auto-resume on reboot. session.json is
           // daemon-exclusive (single writer) so it's the authoritative source.
           for (const session of aiSessions) {
@@ -2993,10 +2993,10 @@ Return ONLY a JSON object with these fields:
                 updateRegistryTitleLocked(session.window_id, true);
               }
             }
-            if (!session.claude_session_id && sj.claude_session_id) {
-              logger.info(`ImmorTerm AI: recovering claude_session_id from session.json for '${session.name}' (race-wiped from registry)`);
-              session.claude_session_id = sj.claude_session_id;
-              try { updateClaudeSessionId(session.window_id, sj.claude_session_id); } catch { /* best effort */ }
+            if (!session.ai_session_id && sj.ai_session_id) {
+              logger.info(`ImmorTerm AI: recovering ai_session_id from session.json for '${session.name}' (race-wiped from registry)`);
+              session.ai_session_id = sj.ai_session_id;
+              try { updateClaudeSessionId(session.window_id, sj.ai_session_id); } catch { /* best effort */ }
             }
           }
 
@@ -3008,13 +3008,13 @@ Return ONLY a JSON object with these fields:
         logger.warn(`ImmorTerm AI: session.json enrichment failed: ${e}`);
       }
 
-      // Tier 3 — claude-env mtime scan for sessions STILL missing claude_session_id after
+      // Tier 3 — claude-env mtime scan for sessions STILL missing ai_session_id after
       // registry + session.json lookups. SessionStart hook writes ~/.immorterm/claude-env/<uuid>.env
       // on every Claude start, where the filename IS the Claude UUID and the contents carry
       // IMMORTERM_ID=<window_id>. Newest mtime for a given window_id = the most recent Claude
       // session in that terminal. This is the ground-truth fallback used before auto-resume.
       try {
-        const stillMissing = aiSessions.filter((s: any) => !s.claude_session_id && s.window_id);
+        const stillMissing = aiSessions.filter((s: any) => !s.ai_session_id && s.window_id);
         if (stillMissing.length > 0) {
           const envDir = path.join(process.env.HOME || '~', '.immorterm', 'claude-env');
           if (fs.existsSync(envDir)) {
@@ -3038,8 +3038,8 @@ Return ONLY a JSON object with these fields:
             for (const session of stillMissing) {
               const hit = byWid.get(session.window_id);
               if (hit) {
-                logger.info(`ImmorTerm AI: recovering claude_session_id ${hit.uuid} from claude-env for '${session.name}' (newest mtime)`);
-                session.claude_session_id = hit.uuid;
+                logger.info(`ImmorTerm AI: recovering ai_session_id ${hit.uuid} from claude-env for '${session.name}' (newest mtime)`);
+                session.ai_session_id = hit.uuid;
                 try { updateClaudeSessionId(session.window_id, hit.uuid); } catch { /* best effort */ }
               }
             }
@@ -3115,7 +3115,7 @@ Return ONLY a JSON object with these fields:
         const windowId = session.window_id || '';
         const titleLocked = session.title_locked || false;
         const needsAttention = session.needs_attention || false;
-        const claudeSessionId = session.claude_session_id || '';
+        const claudeSessionId = session.ai_session_id || '';
 
         return (async (): Promise<{ name: string; wsPort: number; displayName: string; windowId: string; titleLocked: boolean; needsAttention: boolean; daemonPid: number | undefined; projectDir: string } | null> => {
           let wsPort: number | null = null;
@@ -3247,7 +3247,7 @@ Return ONLY a JSON object with these fields:
    * reattached later via the "Reattach Terminal" command.
    *
    * Daemons can't "detach" like screen sessions, so we kill the daemon and
-   * respawn a fresh one on reattach. Claude conversation resumes via claude_session_id.
+   * respawn a fresh one on reattach. Claude conversation resumes via ai_session_id.
    */
   private async shelveSession(sessionName: string, forceHard: boolean = false): Promise<void> {
     const session = this.sessions.get(sessionName);
@@ -3354,7 +3354,7 @@ Return ONLY a JSON object with these fields:
     // 2. Clean up MCP gateway children (keyed by Claude's PID, not daemon PID)
     //    AND determine whether Claude was actually running at shelve time.
     //    If the user typed `/exit` (Claude gone before shelve), the registry
-    //    can still hold a STALE claude_session_id from a previous run — and
+    //    can still hold a STALE ai_session_id from a previous run — and
     //    blindly using it on reattach would auto-resume a session the user
     //    deliberately ended. Capture liveness here so the post-SIGTERM
     //    bookkeeping below knows whether to keep or strip the UUID.
@@ -3408,15 +3408,15 @@ Return ONLY a JSON object with these fields:
     // so registry.json only holds sessions the user has NOT deliberately closed.
     // session-status.json still tracks the shelved flag for quick filtering.
     //
-    // Capture claude_session_id AFTER the daemon SIGTERM-flush so we read the
+    // Capture ai_session_id AFTER the daemon SIGTERM-flush so we read the
     // FINAL registry state. If we capture pre-SIGTERM (the original code), the
-    // daemon's late update of claude_session_id (e.g. when a fresh tier-3
+    // daemon's late update of ai_session_id (e.g. when a fresh tier-3
     // recall claude was running) lands in registry-shelved but session-status
     // gets the stale value — divergence then makes reattach pick the wrong
     // UUID. See SHELVE ME 2 / bc1ee994 vs 55295042 incident.
     //
     // ALSO: if claude was NOT alive at shelve time (user did `/exit` before
-    // closing the tab), strip the stale claude_session_id from the registry
+    // closing the tab), strip the stale ai_session_id from the registry
     // BEFORE the move — otherwise reattach will auto-resume a session the
     // user deliberately exited. The registry retains the field forever once
     // claude has run once; the daemon doesn't clear it on claude SIGCHLD.
@@ -3425,7 +3425,7 @@ Return ONLY a JSON object with these fields:
         try {
           const removed = removeClaudeSessionId(session.windowId);
           if (removed) {
-            logger.info(`ImmorTerm AI: stripped stale claude_session_id at shelve (claude was not alive) for ${session.windowId}`);
+            logger.info(`ImmorTerm AI: stripped stale ai_session_id at shelve (claude was not alive) for ${session.windowId}`);
           }
         } catch (err) {
           logger.warn(`ImmorTerm AI: removeClaudeSessionId failed: ${err}`);
@@ -3594,11 +3594,11 @@ Return ONLY a JSON object with these fields:
     logger.info(`ImmorTerm AI: reattaching shelved session '${sessionName}' (windowId: ${windowId})`);
 
     // 1. Read Claude resume ID BEFORE clearing shelved status (clearing deletes it).
-    //    Prefer the registry-shelved entry's claude_session_id over
+    //    Prefer the registry-shelved entry's ai_session_id over
     //    session-status.json's claude_resume_id — the shelved entry is moved
     //    AFTER the daemon's graceful SIGTERM flush, so it reflects the final
     //    daemon state. session-status was captured pre-SIGTERM and can be
-    //    stale if the daemon's claude_session_id update happened during
+    //    stale if the daemon's ai_session_id update happened during
     //    shutdown. With the old order (session-status first), shelved
     //    sessions were resuming the WRONG (older) Claude UUID.
     //
@@ -3609,7 +3609,7 @@ Return ONLY a JSON object with these fields:
     const claudeWasExplicitlyExited = getClaudeExplicitlyExited(windowId);
     const claudeSessionId = claudeWasExplicitlyExited
       ? ''
-      : (entry.claude_session_id || getClaudeResumeId(windowId) || '');
+      : (entry.ai_session_id || getClaudeResumeId(windowId) || '');
     const displayName = entry.display_name || sessionName;
     const titleLocked = entry.title_locked || false;
 
@@ -3824,7 +3824,7 @@ Return ONLY a JSON object with these fields:
     }
 
     // Detect "currently active vendor" from descendant cmd names. This
-    // bypasses the (chronically racy) registry.claude_session_id field —
+    // bypasses the (chronically racy) registry.ai_session_id field —
     // if claude is in the process tree, we know it's running NOW even when
     // registry says null.
     const vendorMatch = (cmd: string): string | null => {
@@ -3929,9 +3929,9 @@ Return ONLY a JSON object with these fields:
       projectDir: regEntry?.project_dir || null,
       titleLocked: liveSession?.titleLocked ?? regEntry?.title_locked ?? false,
       activeVendor,
-      registryClaudeSessionId: regEntry?.claude_session_id || null,
+      registryClaudeSessionId: regEntry?.ai_session_id || null,
       sessionStatusClaudeResumeId: (sessionStatus as { claude_resume_id?: string } | null)?.claude_resume_id || null,
-      claudeStats: regEntry?.claude_stats || null,
+      claudeStats: regEntry?.ai_stats || null,
       registrySource,
       logDirStatus,
       isSoftShelved: !!soft,

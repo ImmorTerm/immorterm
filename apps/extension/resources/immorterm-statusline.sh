@@ -29,7 +29,7 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
 # than relying on PATH. Claude Code's statusline hook is invoked outside
 # our shell-init context, so ~/.immorterm/bin/ is often not on the PATH
 # that statusline.sh sees. The silent `command -v` failure that resulted
-# was the root cause of `claude_transcript_path` never landing in
+# was the root cause of `ai_transcript_path` never landing in
 # registry.json, which broke the entire digest-discovery chain.
 if [ -n "${IMMORTERM_SESSION:-}" ] || [ -n "${STY:-}" ]; then
   IMMORTERM_AI_BIN="${IMMORTERM_AI_BIN:-$HOME/.immorterm/bin/immorterm-ai}"

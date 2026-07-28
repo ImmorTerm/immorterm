@@ -20,7 +20,7 @@ export interface RegistryEntry {
 	window_id: string;
 	display_name: string;
 	project_dir: string;
-	claude_session_id?: string | null;
+	ai_session_id?: string | null;
 	title_locked: boolean;
 	title: string;
 	logfile?: string | null;
@@ -29,8 +29,8 @@ export interface RegistryEntry {
 	session_type?: string | null;
 	ws_port?: number | null;
 	theme?: string | null;
-	claude_transcript_path?: string | null;
-	claude_stats?: {
+	ai_transcript_path?: string | null;
+	ai_stats?: {
 		pid?: number | null;
 		rss_kb: number;
 		cpu_percent: number;
@@ -67,7 +67,7 @@ export interface EnrichedSession {
 	sessionType: string;
 	status: "alive" | "dead";
 	claudeSessionId?: string | null;
-	claudeStats?: RegistryEntry["claude_stats"];
+	claudeStats?: RegistryEntry["ai_stats"];
 	theme?: string | null;
 	isArchived?: boolean;
 	archivedAt?: number;
@@ -287,8 +287,8 @@ export function enrichSession(entry: RegistryEntry): EnrichedSession {
 		createdAt: entry.created_at,
 		sessionType: entry.session_type ?? "regular",
 		status: isProcessAlive(entry.pid) ? "alive" : "dead",
-		claudeSessionId: entry.claude_session_id,
-		claudeStats: entry.claude_stats,
+		claudeSessionId: entry.ai_session_id,
+		claudeStats: entry.ai_stats,
 		theme: entry.theme,
 		logs: {
 			grid: gridInfo,
@@ -387,8 +387,8 @@ export function enrichArchivedSessions(projectDir: string): EnrichedSession[] {
 				createdAt: (meta.created_at as number) || 0,
 				sessionType: (meta.session_type as string) || "regular",
 				status: "dead",
-				claudeSessionId: (meta.claude_session_id as string) || null,
-				claudeStats: meta.claude_stats as RegistryEntry["claude_stats"],
+				claudeSessionId: (meta.ai_session_id as string) || null,
+				claudeStats: meta.ai_stats as RegistryEntry["ai_stats"],
 				theme: (meta.theme as string) || null,
 				isArchived: true,
 				archivedAt: (meta.archived_at as number) || undefined,

@@ -135,7 +135,7 @@ async function indexArchivedSession(
     }
 
     // Add Claude stats if available
-    const claudeStats = sessionJson.claude_stats as Record<string, unknown> | undefined;
+    const claudeStats = sessionJson.ai_stats as Record<string, unknown> | undefined;
     if (claudeStats) {
       if (claudeStats.model) parts.push(`Model: ${claudeStats.model}`);
       if (claudeStats.cost_usd) parts.push(`Cost: $${(claudeStats.cost_usd as number).toFixed(2)}`);

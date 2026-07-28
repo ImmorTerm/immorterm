@@ -31,13 +31,48 @@ fn socket_dir() -> PathBuf {
     home_dir().join(".immorterm/sockets")
 }
 
+/// Legacy → vendor-neutral key renames for registry entries (T20).
+///
+/// The daemon gets this for free via `#[serde(alias)]`, but the hub works on
+/// raw `Value`s, so it has to do the same job by hand. Applied once at every
+/// load point — after this, the rest of the hub only ever sees `ai_*`.
+const LEGACY_ENTRY_KEYS: &[(&str, &str)] = &[
+    ("claude_session_id", "ai_session_id"),
+    ("claude_transcript_path", "ai_transcript_path"),
+    ("claude_stats", "ai_stats"),
+];
+
+/// Rewrite legacy Claude-shaped keys in place on every session entry.
+///
+/// A pre-T20 registry.json stores a Codex thread id under `ai_session_id`;
+/// the name was always about who wrote the field first, not whose session it
+/// is. If BOTH names are present (a mixed-version window) the new one wins and
+/// the legacy copy is dropped, so an entry can never carry two session ids.
+fn normalize_registry_keys(root: &mut Value) {
+    let Some(sessions) = root.get_mut("sessions").and_then(|s| s.as_array_mut()) else {
+        return;
+    };
+    for entry in sessions.iter_mut() {
+        let Some(obj) = entry.as_object_mut() else { continue };
+        for (legacy, modern) in LEGACY_ENTRY_KEYS {
+            if let Some(v) = obj.remove(*legacy)
+                && !obj.contains_key(*modern)
+            {
+                obj.insert((*modern).to_string(), v);
+            }
+        }
+    }
+}
+
 /// Read and parse the full registry.
 fn load_registry() -> Result<Value, String> {
     let path = registry_path();
     let data = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read registry.json: {}", e))?;
-    serde_json::from_str(&data)
-        .map_err(|e| format!("Failed to parse registry.json: {}", e))
+    let mut root: Value = serde_json::from_str(&data)
+        .map_err(|e| format!("Failed to parse registry.json: {}", e))?;
+    normalize_registry_keys(&mut root);
+    Ok(root)
 }
 
 // ── session-status.json helpers ─────────────────────────────────
@@ -200,19 +235,19 @@ pub fn batch_sync_claude_state(updates: &[ClaudeSyncUpdate]) -> Result<(), Strin
             }
             if update.active && update.session_id.is_some() {
                 let sid = update.session_id.as_deref().unwrap();
-                if obj.get("claude_session_id").and_then(|v| v.as_str()) != Some(sid) {
-                    obj.insert("claude_session_id".into(), Value::String(sid.to_string()));
+                if obj.get("ai_session_id").and_then(|v| v.as_str()) != Some(sid) {
+                    obj.insert("ai_session_id".into(), Value::String(sid.to_string()));
                     dirty = true;
                 }
                 if let Some(tp) = update.transcript_path.as_deref() {
-                    if obj.get("claude_transcript_path").and_then(|v| v.as_str()) != Some(tp) {
-                        obj.insert("claude_transcript_path".into(), Value::String(tp.to_string()));
+                    if obj.get("ai_transcript_path").and_then(|v| v.as_str()) != Some(tp) {
+                        obj.insert("ai_transcript_path".into(), Value::String(tp.to_string()));
                         dirty = true;
                     }
                 }
                 if let Some(stats) = &update.stats {
                     obj.insert(
-                        "claude_stats".into(),
+                        "ai_stats".into(),
                         serde_json::json!({
                             "pid": stats.pid,
                             "rss_kb": stats.rss_kb,
@@ -225,26 +260,26 @@ pub fn batch_sync_claude_state(updates: &[ClaudeSyncUpdate]) -> Result<(), Strin
                 }
             } else {
                 // Claude not currently running. ONLY clear live runtime stats —
-                // keep `claude_session_id` and `claude_transcript_path` as
+                // keep `ai_session_id` and `ai_transcript_path` as
                 // historical anchors so `immorterm-ai recall` can `claude
                 // --resume <uuid>` on the next spawn. Wiping them here caused
                 // the 2026-05-18 "sessions started empty" incident: every 30s
                 // tick reset every shelved-but-not-running session to UUID-less
                 // and the recall cascade fell through to plain `claude`.
-                if obj.remove("claude_stats").is_some() { dirty = true; }
+                if obj.remove("ai_stats").is_some() { dirty = true; }
             }
         }
 
-        // Inline dedup: for each claude_session_id group, keep the newest
-        // claude_stats.start_time; strip session_id from older entries.
+        // Inline dedup: for each ai_session_id group, keep the newest
+        // ai_stats.start_time; strip session_id from older entries.
         let mut groups: std::collections::HashMap<String, Vec<(usize, u64)>> =
             std::collections::HashMap::new();
         for (idx, entry) in sessions.iter().enumerate() {
-            let Some(sid) = entry.get("claude_session_id").and_then(|v| v.as_str()) else {
+            let Some(sid) = entry.get("ai_session_id").and_then(|v| v.as_str()) else {
                 continue;
             };
             let start = entry
-                .get("claude_stats")
+                .get("ai_stats")
                 .and_then(|s| s.get("start_time"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
@@ -255,7 +290,7 @@ pub fn batch_sync_claude_state(updates: &[ClaudeSyncUpdate]) -> Result<(), Strin
             group.sort_by_key(|e| std::cmp::Reverse(e.1));
             for (idx, _) in group.into_iter().skip(1) {
                 if let Some(obj) = sessions[idx].as_object_mut() {
-                    if obj.remove("claude_session_id").is_some() { dirty = true; }
+                    if obj.remove("ai_session_id").is_some() { dirty = true; }
                 }
             }
         }
@@ -352,6 +387,7 @@ fn update_registry_entry(id: &str, updater: impl Fn(&mut Value)) -> Result<(), S
         .map_err(|e| format!("Failed to read registry: {}", e))?;
     let mut registry: Value = serde_json::from_str(&data)
         .map_err(|e| format!("Failed to parse registry: {}", e))?;
+    normalize_registry_keys(&mut registry);
 
     let sessions = registry.get_mut("sessions")
         .and_then(|s| s.as_array_mut())
@@ -441,7 +477,7 @@ fn spawn_daemon(
     window_id: &str,
     display_name: &str,
     shell: &str,
-    claude_session_id: Option<&str>,
+    ai_session_id: Option<&str>,
     title_locked: bool,
 ) -> Result<(), String> {
     let logs_dir = PathBuf::from(project_dir).join(".immorterm/terminals/logs");
@@ -458,7 +494,7 @@ fn spawn_daemon(
     cmd.env("IMMORTERM_WINDOW_ID", window_id);
     cmd.env("IMMORTERM_DISPLAY_NAME", display_name);
     cmd.env("SCREEN_PROJECT_DIR", project_dir);
-    if let Some(cid) = claude_session_id {
+    if let Some(cid) = ai_session_id {
         cmd.env("IMMORTERM_CLAUDE_SESSION_ID", cid);
     }
     if title_locked {
@@ -734,7 +770,7 @@ pub async fn shelve_session(
         return Json(json!({ "error": format!("No session with window_id={}", req.window_id) }));
     };
 
-    let claude_session_id = entry.get("claude_session_id")
+    let ai_session_id = entry.get("ai_session_id")
         .and_then(|c| c.as_str())
         .map(|s| s.to_string());
     let pid = entry.get("pid").and_then(|p| p.as_u64()).unwrap_or(0) as u32;
@@ -751,12 +787,12 @@ pub async fn shelve_session(
         .unwrap_or_default()
         .as_secs();
 
-    let claude_id_clone = claude_session_id.clone();
+    let claude_id_clone = ai_session_id.clone();
     if let Err(e) = update_registry_entry(&req.window_id, |entry| {
         entry["session_status"] = json!("shelved");
         entry["shelved_at"] = json!(now);
         if let Some(ref cid) = claude_id_clone {
-            entry["claude_session_id"] = json!(cid);
+            entry["ai_session_id"] = json!(cid);
         }
     }) {
         warn!("Failed to update registry: {}", e);
@@ -765,7 +801,7 @@ pub async fn shelve_session(
     info!("Shelved session {} (PID {})", req.window_id, pid);
     Json(json!({
         "success": true,
-        "claude_session_id": claude_session_id,
+        "ai_session_id": ai_session_id,
     }))
 }
 
@@ -796,7 +832,7 @@ pub async fn reattach_session(
 
     let project_dir = entry.get("project_dir").and_then(|p| p.as_str()).unwrap_or("").to_string();
     let display_name = entry.get("display_name").and_then(|d| d.as_str()).unwrap_or("immorterm").to_string();
-    let claude_session_id = entry.get("claude_session_id").and_then(|c| c.as_str()).map(|s| s.to_string());
+    let ai_session_id = entry.get("ai_session_id").and_then(|c| c.as_str()).map(|s| s.to_string());
     let title_locked = entry.get("title_locked").and_then(|t| t.as_bool()).unwrap_or(false);
     let session_name = entry.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
 
@@ -815,7 +851,7 @@ pub async fn reattach_session(
 
     if let Err(e) = spawn_daemon(
         &binary, &session_name, &project_dir, &req.window_id,
-        &display_name, &shell, claude_session_id.as_deref(), title_locked,
+        &display_name, &shell, ai_session_id.as_deref(), title_locked,
     ) {
         return Json(json!({ "error": e }));
     }
@@ -836,7 +872,7 @@ pub async fn reattach_session(
                 "display_name": display_name,
                 "ws_port": port,
                 "pid": daemon_pid,
-                "claude_session_id": claude_session_id,
+                "ai_session_id": ai_session_id,
             }))
         }
         None => {
@@ -1238,17 +1274,17 @@ fn apply_session_link(
         .ok_or_else(|| "registry entry is not an object".to_string())?;
 
     obj.insert("tool".into(), Value::String(tool.to_string()));
-    // The on-disk schema still uses `claude_session_id` /
-    // `claude_transcript_path` as the field names — Phase B renames those
+    // The on-disk schema still uses `ai_session_id` /
+    // `ai_transcript_path` as the field names — Phase B renames those
     // to `ai_session_id` / `ai_transcript_path`. Keep the existing keys so
     // the rest of the codebase (sidebar, CTX bar, claude_tracker) keeps
     // working without churn.
     obj.insert(
-        "claude_session_id".into(),
+        "ai_session_id".into(),
         Value::String(session_id.to_string()),
     );
     obj.insert(
-        "claude_transcript_path".into(),
+        "ai_transcript_path".into(),
         Value::String(transcript_path.to_string()),
     );
 
@@ -1283,9 +1319,9 @@ fn apply_session_link(
         // Stash the AI tool's pid alongside the snapshot fields the
         // claude_tracker writes. Doesn't conflict with the registry-level
         // `pid` (that one is the immorterm-ai daemon's pid).
-        obj.entry("claude_stats")
+        obj.entry("ai_stats")
             .or_insert_with(|| json!({}));
-        if let Some(stats) = obj.get_mut("claude_stats").and_then(|v| v.as_object_mut()) {
+        if let Some(stats) = obj.get_mut("ai_stats").and_then(|v| v.as_object_mut()) {
             stats.insert("pid".into(), json!(p));
         }
     }
@@ -1384,7 +1420,7 @@ fn compute_etag(value: &Value) -> String {
 /// if `sessions[]` is missing/non-array. Caller maps to HTTP status.
 ///
 /// v4-additions not yet populated on disk (`host_id`,
-/// `claude_stats.comm`) project as `null` — daemon populates them via
+/// `ai_stats.comm`) project as `null` — daemon populates them via
 /// `apply_session_link` once it ships.
 pub fn lookup_window(registry: &Value, window_id: &str) -> Result<Value, WindowLookupError> {
     let sessions = registry
@@ -1398,7 +1434,7 @@ pub fn lookup_window(registry: &Value, window_id: &str) -> Result<Value, WindowL
         .ok_or(WindowLookupError::NotFound)?;
 
     let pid = entry
-        .get("claude_stats")
+        .get("ai_stats")
         .and_then(|s| s.get("pid"))
         .and_then(|p| p.as_u64())
         .unwrap_or(0) as u32;
@@ -1410,8 +1446,8 @@ pub fn lookup_window(registry: &Value, window_id: &str) -> Result<Value, WindowL
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
 
-    let claude_stats = entry
-        .get("claude_stats")
+    let ai_stats = entry
+        .get("ai_stats")
         .cloned()
         .unwrap_or_else(|| json!({}));
 
@@ -1420,10 +1456,10 @@ pub fn lookup_window(registry: &Value, window_id: &str) -> Result<Value, WindowL
         "host_id":           entry.get("host_id").cloned().unwrap_or(Value::Null),
         "project_dir":       entry.get("project_dir").cloned().unwrap_or(Value::Null),
         "tool":              tool,
-        "vendor_session_id": entry.get("claude_session_id").cloned().unwrap_or(Value::Null),
-        "transcript_path":   entry.get("claude_transcript_path").cloned().unwrap_or(Value::Null),
+        "vendor_session_id": entry.get("ai_session_id").cloned().unwrap_or(Value::Null),
+        "transcript_path":   entry.get("ai_transcript_path").cloned().unwrap_or(Value::Null),
         "tool_history":      entry.get("tool_history").cloned().unwrap_or_else(|| json!([])),
-        "claude_stats":      claude_stats,
+        "ai_stats":      ai_stats,
         "ai_alive":          ai_alive,
     });
     let etag = compute_etag(&view);
@@ -1473,7 +1509,7 @@ pub fn lookup_by_transcript(registry: &Value, path: &str) -> Result<Value, Windo
         .ok_or(WindowLookupError::ParseFailure)?;
 
     // Check tool_history rows first (most recent first within each entry),
-    // then fall back to top-level claude_transcript_path. tool_history is
+    // then fall back to top-level ai_transcript_path. tool_history is
     // the precedence source per v4 §4.2.
     for entry in sessions {
         let window_id = entry.get("window_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -1495,11 +1531,11 @@ pub fn lookup_by_transcript(registry: &Value, path: &str) -> Result<Value, Windo
         }
         // Fallback: legacy top-level field. Only consider if no tool_history
         // claim found above. Match exact path.
-        if entry.get("claude_transcript_path").and_then(|v| v.as_str()) == Some(path) {
+        if entry.get("ai_transcript_path").and_then(|v| v.as_str()) == Some(path) {
             let tool = entry.get("tool").cloned().unwrap_or_else(|| json!("claude-code"));
             return Ok(json!({
                 "window_id":         window_id,
-                "vendor_session_id": entry.get("claude_session_id").cloned().unwrap_or(Value::Null),
+                "vendor_session_id": entry.get("ai_session_id").cloned().unwrap_or(Value::Null),
                 "host_id":           entry.get("host_id").cloned().unwrap_or(Value::Null),
                 "tool":              tool,
                 "project_dir":       entry.get("project_dir").cloned().unwrap_or(Value::Null),
@@ -1746,12 +1782,12 @@ mod tests {
         .expect("should succeed for known window_id");
         let entry = &reg["sessions"][0];
         assert_eq!(entry["tool"], json!("cursor"));
-        assert_eq!(entry["claude_session_id"], json!("sess-xyz"));
+        assert_eq!(entry["ai_session_id"], json!("sess-xyz"));
         assert_eq!(
-            entry["claude_transcript_path"],
+            entry["ai_transcript_path"],
             json!("/tmp/transcripts/sess-xyz.jsonl")
         );
-        assert_eq!(entry["claude_stats"]["pid"], json!(4242));
+        assert_eq!(entry["ai_stats"]["pid"], json!(4242));
     }
 
     #[test]
@@ -1924,9 +1960,9 @@ mod tests {
                     "project_dir": "/tmp/demo",
                     "pid": 0,
                     "tool": "claude-code",
-                    "claude_session_id": "uuid-current",
-                    "claude_transcript_path": "/tmp/transcripts/uuid-current.jsonl",
-                    "claude_stats": { "pid": 0, "model": "Sonnet 4" },
+                    "ai_session_id": "uuid-current",
+                    "ai_transcript_path": "/tmp/transcripts/uuid-current.jsonl",
+                    "ai_stats": { "pid": 0, "model": "Sonnet 4" },
                     "tool_history": [
                         {
                             "tool": "claude-code",
@@ -1948,8 +1984,8 @@ mod tests {
                     "project_dir": "/tmp/legacy",
                     "pid": 0,
                     // NO tool, NO tool_history → legacy entry
-                    "claude_session_id": "uuid-legacy",
-                    "claude_transcript_path": "/tmp/transcripts/uuid-legacy.jsonl"
+                    "ai_session_id": "uuid-legacy",
+                    "ai_transcript_path": "/tmp/transcripts/uuid-legacy.jsonl"
                 }
             ]
         })
@@ -2028,7 +2064,7 @@ mod tests {
     #[test]
     fn by_transcript_falls_back_to_legacy_top_level() {
         let reg = sample_with_history();
-        // Legacy entry has NO tool_history; only claude_transcript_path
+        // Legacy entry has NO tool_history; only ai_transcript_path
         let view = lookup_by_transcript(&reg, "/tmp/transcripts/uuid-legacy.jsonl")
             .expect("legacy transcript");
         assert_eq!(view["window_id"], json!("22222-bbbb"));
@@ -2103,5 +2139,38 @@ mod tests {
         let err =
             apply_session_end(&mut reg, "11111-aaaa", "unknown-sid", "idle_timeout", "t").unwrap_err();
         assert!(err.contains("not in tool_history"));
+    }
+
+    /// T20: the hub works on raw Values, so it re-implements what the daemon
+    /// gets from `#[serde(alias)]`. This is the check that the two agree.
+    #[test]
+    fn normalize_registry_keys_migrates_legacy_and_prefers_modern() {
+        let mut root = serde_json::json!({
+            "sessions": [
+                { "window_id": "legacy",
+                  "claude_session_id": "old-sid",
+                  "claude_transcript_path": "/p/old.jsonl",
+                  "claude_stats": { "model": "gpt-5" } },
+                // Mixed-version window wrote both — the new name must win and
+                // the legacy copy must go, so one entry never has two ids.
+                { "window_id": "both",
+                  "claude_session_id": "old-sid",
+                  "ai_session_id": "new-sid" },
+                { "window_id": "clean", "ai_session_id": "already-new" }
+            ]
+        });
+
+        normalize_registry_keys(&mut root);
+        let s = root["sessions"].as_array().unwrap();
+
+        assert_eq!(s[0]["ai_session_id"], "old-sid");
+        assert_eq!(s[0]["ai_transcript_path"], "/p/old.jsonl");
+        assert_eq!(s[0]["ai_stats"]["model"], "gpt-5");
+        assert!(s[0].get("claude_session_id").is_none());
+
+        assert_eq!(s[1]["ai_session_id"], "new-sid");
+        assert!(s[1].get("claude_session_id").is_none());
+
+        assert_eq!(s[2]["ai_session_id"], "already-new");
     }
 }

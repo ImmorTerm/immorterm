@@ -405,7 +405,7 @@ if [[ -z "$FULL_SESSION_ID" ]]; then
   if [[ -n "$WINDOW" ]]; then
     # Check registry.json first (unified source), fallback to restore-terminals.json (legacy)
     WILL_AUTO_RESUME=$(jq -r --arg wid "$WINDOW" \
-      '.sessions[]? | select(.window_id == $wid) | .claude_session_id // empty' \
+      '.sessions[]? | select(.window_id == $wid) | (.ai_session_id // .claude_session_id) // empty' \
       "$REGISTRY" 2>/dev/null)
     if [[ -z "$WILL_AUTO_RESUME" ]]; then
       WILL_AUTO_RESUME=$(jq -r --arg wid "$WINDOW" \
@@ -520,7 +520,7 @@ else
   # Check registry.json first (unified source), fallback to restore-terminals.json (legacy)
   else
     CLAUDE_SESSION_ID=$(jq -r --arg wid "$WINDOW" \
-      '.sessions[]? | select(.window_id == $wid) | .claude_session_id // empty' \
+      '.sessions[]? | select(.window_id == $wid) | (.ai_session_id // .claude_session_id) // empty' \
       "$REGISTRY" 2>/dev/null)
     if [[ -z "$CLAUDE_SESSION_ID" ]]; then
       CLAUDE_SESSION_ID=$(jq -r --arg wid "$WINDOW" \
@@ -695,7 +695,7 @@ if [[ -n "${IMMORTERM_CLAUDE_RESUME_ID:-}" ]]; then
   FALLBACK_RESUME="$IMMORTERM_CLAUDE_RESUME_ID"
 elif [[ -n "$WINDOW" ]]; then
   FALLBACK_RESUME=$(jq -r --arg wid "$WINDOW" \
-    '.sessions[]? | select(.window_id == $wid) | .claude_session_id // empty' \
+    '.sessions[]? | select(.window_id == $wid) | (.ai_session_id // .claude_session_id) // empty' \
     "$REGISTRY" 2>/dev/null)
 fi
 

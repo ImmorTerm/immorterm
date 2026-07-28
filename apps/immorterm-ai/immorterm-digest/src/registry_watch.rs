@@ -41,13 +41,13 @@ pub(crate) struct RegistryEntryView {
     #[serde(default)]
     pub pid: Option<u32>,
     #[serde(default)]
-    pub claude_session_id: Option<String>,
+    pub ai_session_id: Option<String>,
     #[serde(default)]
-    pub claude_transcript_path: Option<String>,
+    pub ai_transcript_path: Option<String>,
     #[serde(default)]
     pub tool: Option<String>,
     #[serde(default)]
-    pub claude_stats: Option<ClaudeStatsView>,
+    pub ai_stats: Option<ClaudeStatsView>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,7 +96,7 @@ pub(crate) fn reconcile(
     let mut new_registrations: Vec<ReconcileAction> = Vec::new();
 
     for entry in &file.sessions {
-        let session_id = match entry.claude_session_id.as_deref() {
+        let session_id = match entry.ai_session_id.as_deref() {
             Some(s) if !s.is_empty() => s,
             _ => continue,
         };
@@ -107,22 +107,22 @@ pub(crate) fn reconcile(
             .tool
             .clone()
             .unwrap_or_else(|| "claude-code".to_string());
-        // Prefer registry's claude_transcript_path; fall back to the vendor's
+        // Prefer registry's ai_transcript_path; fall back to the vendor's
         // well-known convention path when missing. The hub's
         // claude_tracker is supposed to populate this field every 30s,
         // but in practice many live entries are missing it (hub chain
         // unreliable). The bash daemon already does this dir-convention
         // discovery; mirror it here so the Rust daemon picks up the
         // same sessions.
-        let transcript: String = match entry.claude_transcript_path.as_deref() {
+        let transcript: String = match entry.ai_transcript_path.as_deref() {
             Some(s) if !s.is_empty() => s.to_string(),
             _ => convention_transcript_path_for(&tool, &entry.project_dir, session_id),
         };
         // AI process must be alive. Prefer the AI tool's pid in
-        // claude_stats (set by session-link); fall back to the daemon
+        // ai_stats (set by session-link); fall back to the daemon
         // registry's pid for legacy entries.
         let ai_pid = entry
-            .claude_stats
+            .ai_stats
             .as_ref()
             .and_then(|s| s.pid)
             .or(entry.pid);
@@ -549,10 +549,10 @@ mod tests {
             window_id: window_id.into(),
             project_dir: project_dir.into(),
             pid: Some(1),
-            claude_session_id: Some(session_id.into()),
-            claude_transcript_path: Some(transcript.into()),
+            ai_session_id: Some(session_id.into()),
+            ai_transcript_path: Some(transcript.into()),
             tool: Some("claude-code".into()),
-            claude_stats: Some(ClaudeStatsView { pid: Some(42) }),
+            ai_stats: Some(ClaudeStatsView { pid: Some(42) }),
         }
     }
 
@@ -639,9 +639,9 @@ mod tests {
     }
 
     #[test]
-    fn entry_without_claude_session_id_is_skipped() {
+    fn entry_without_ai_session_id_is_skipped() {
         let mut e = entry_alive("w1", "", "/tmp/a.jsonl", "/tmp/p");
-        e.claude_session_id = None;
+        e.ai_session_id = None;
         let file = RegistryFileView { sessions: vec![e] };
         let actions = reconcile(&file, &HashSet::new(), "h1", |_| true);
         assert!(actions.is_empty(), "no session_id → not yet linked, skip");
@@ -665,11 +665,11 @@ mod tests {
     #[test]
     fn entry_without_transcript_path_falls_back_to_convention() {
         // Hub's claude_tracker is supposed to populate
-        // claude_transcript_path but often doesn't for live sessions.
+        // ai_transcript_path but often doesn't for live sessions.
         // Daemon must still pick the session up via the well-known
         // Claude Code path convention.
         let mut e = entry_alive("w1", "abc-uuid", "/tmp/a.jsonl", "/Users/test/Development/foo");
-        e.claude_transcript_path = None;
+        e.ai_transcript_path = None;
         let file = RegistryFileView { sessions: vec![e] };
         let actions = reconcile(&file, &HashSet::new(), "h1", |_| true);
         assert_eq!(actions.len(), 1);

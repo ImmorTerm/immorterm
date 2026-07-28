@@ -2544,7 +2544,7 @@
                   name: s.display_name,
                   sessionType: s.session_type,
                   shelvedAt: s.shelved_at,
-                  claudeSessionId: s.claude_session_id,
+                  claudeSessionId: s.ai_session_id,
                 }));
                 if (modals && modals.handleShelvedSessionsResult) modals.handleShelvedSessionsResult(shelved);
               })
@@ -8556,26 +8556,29 @@
             // short timeout as a fallback for a slow compositor re-establish.
             if (!_restoreRepainted) {
               _restoreRepainted = true;
-              // A single early repaint (enough for visibility-show) fires before
-              // a full reload's compositor has re-established its layer, so the
-              // frame never reaches the screen and the loop then goes quiet —
-              // black until a much-later scroll. We get no "compositor ready"
-              // signal, so WARM UP: restart the loop and keep repainting across a
-              // multi-second window; whichever frame lands after the compositor is
-              // live sticks (a scroll proves a plain render fixes it, so the
-              // surface is fine — this is purely about a render landing in time).
-              forceRestartRenderLoop();
-              let _warmN = 0;
-              const _warmRepaint = () => {
-                if (!(terminal && wasmReady) || _warmN >= 50) return;   // ~5s @ 100ms
-                if (canvas.width > 0 && canvas.height > 0) {
-                  if (_warmN < 10) { try { terminal.resize(canvas.width, canvas.height); } catch (_) {} } // reconfigure early
-                  dirty = true;
-                }
-                _warmN++;
-                setTimeout(_warmRepaint, 100);
+              // The per-project paint-canary PROVED the mechanism: after a reload
+              // the render loop runs and frameCount climbs (~30fps) the whole time
+              // the screen is black — so renders DO reach the WebGPU surface, but
+              // Electron's compositor never presents the canvas layer until a
+              // keystroke / scroll / manual resize invalidates it. Rendering more
+              // (the old warm-up) can't help — the presents are already happening.
+              // Force a REAL backing-store size change (w → w-1 → w): it
+              // reallocates the swapchain and invalidates the compositor layer,
+              // exactly like the manual panel-resize that fixes it (a same-size
+              // resize is a no-op). Run it a few times across the compositor's
+              // warm-up so one nudge lands after the layer exists.
+              const _forcePresent = () => {
+                if (!(terminal && wasmReady) || !canvas || canvas.width < 2) return;
+                const w = canvas.width, h = canvas.height;
+                try {
+                  canvas.width = w - 1; terminal.resize(w - 1, h);
+                  requestAnimationFrame(() => {
+                    if (!canvas || !terminal) return;
+                    canvas.width = w; terminal.resize(w, h); dirty = true;
+                  });
+                } catch (_) {}
               };
-              _warmRepaint();
+              [120, 500, 1200, 2200].forEach((ms) => setTimeout(_forcePresent, ms));
             }
             // Sync AI overlay DOM from WASM ai_layer (populated by load_snapshot).
             // Prefer get_ai_primitives_json (fast) over re-parsing the full snapshot.
