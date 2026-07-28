@@ -323,6 +323,69 @@ fn parse_legacy(events: &[Value]) -> Vec<Turn> {
             continue;
         }
 
+if etype == "event_msg" && ptype == "mcp_tool_call_end" {
+            // MCP calls arrive as a single completed event rather than the
+            // call/output pair every other tool uses, so they were being
+            // dropped entirely — losing exactly the part ImmorTerm cares
+            // about most, since our own tools ARE MCP calls.
+            //
+            // Named `mcp__<server>__<tool>` to match Claude Code's
+            // convention, so downstream consumers do not need to special-case
+            // the vendor to recognise the same server.
+            let call_id = payload
+                .get("call_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let inv = payload.get("invocation");
+            let server = inv
+                .and_then(|i| i.get("server"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("mcp");
+            let tool = inv
+                .and_then(|i| i.get("tool"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let input = inv
+                .and_then(|i| i.get("arguments"))
+                .cloned()
+                .unwrap_or(Value::Object(Map::new()));
+
+            // result is {"Ok"|"Err": {content: [{type:"text", text}]}}.
+            let (result_text, is_error) = match payload.get("result") {
+                Some(Value::Object(o)) => {
+                    let err = o.contains_key("Err");
+                    let body = o.get("Ok").or_else(|| o.get("Err"));
+                    let text = body
+                        .and_then(|b| b.get("content"))
+                        .and_then(|c| c.as_array())
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|i| i.get("text").and_then(|t| t.as_str()))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
+                        .unwrap_or_default();
+                    (text, err)
+                }
+                _ => (String::new(), false),
+            };
+
+            current_blocks.push(AssistantBlock::tool_use(
+                ToolCall {
+                    tool_use_id: call_id,
+                    name: format!("mcp__{server}__{tool}"),
+                    input,
+                    result: if result_text.is_empty() { None } else { Some(result_text) },
+                    result_timestamp: ts.clone(),
+                    is_error,
+                },
+                ts.clone(),
+            ));
+            continue;
+        }
+
         if etype == "response_item" {
             let role = payload.get("role").and_then(|r| r.as_str()).unwrap_or("");
             let phase = payload.get("phase").and_then(|p| p.as_str()).unwrap_or("");
@@ -427,6 +490,16 @@ fn parse_legacy(events: &[Value]) -> Vec<Turn> {
                     let parsed = parse_codex_patch(src);
                     let name = if parsed.is_new { "Write".to_string() } else { "Edit".to_string() };
                     (name, patch_to_input(&parsed))
+                } else if tool_name == "exec" || tool_name == "shell" {
+                    // 0.145 runs shell commands as a custom tool named `exec`
+                    // (older builds used the `exec_command` function call).
+                    // Normalize to Bash so a Codex session and a Claude one
+                    // describe the same action with the same vocabulary —
+                    // digest, memory and code-archaeology all key off the name.
+                    let raw = payload.get("input").and_then(|v| v.as_str()).unwrap_or("");
+                    let mut m = Map::new();
+                    m.insert("command".into(), Value::String(clean_bash_lc(raw)));
+                    ("Bash".to_string(), Value::Object(m))
                 } else {
                     let raw = payload.get("input").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     let mut m = Map::new();

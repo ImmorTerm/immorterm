@@ -185,3 +185,46 @@ fn system_tags_stripped_and_reminders_absorbed() {
             "user_query wrapper should be stripped: {:?}", t.user_text);
     }
 }
+
+/// Record shapes taken verbatim from a real codex-cli 0.145 rollout. Both were
+/// silently dropped or mis-labelled before: MCP calls arrive as a single
+/// completed `event_msg` rather than the call/output pair every other tool
+/// uses, and 0.145 runs shell commands as a custom tool named `exec` rather
+/// than the older `exec_command` function call.
+#[test]
+fn codex_0145_captures_mcp_calls_and_normalizes_exec() {
+    let rollout = concat!(
+        // Every real rollout opens with this; it is also what format detection keys on.
+        r#"{"type":"session_meta","payload":{"id":"019fa828","cwd":"/x","cli_version":"0.145.0"}}"#, "\n",
+        r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}"#, "\n",
+        r#"{"type":"event_msg","payload":{"type":"user_message","message":"do it"}}"#, "\n",
+        r#"{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"c1","name":"exec","input":"/bin/bash -lc \"ls -la\""}}"#, "\n",
+        r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"c1","output":"a\nb\n"}}"#, "\n",
+        r#"{"type":"event_msg","payload":{"type":"mcp_tool_call_end","call_id":"m1","invocation":{"server":"immorterm-memory","tool":"search_memory","arguments":{"query":"x"}},"result":{"Ok":{"content":[{"type":"text","text":"{\"count\":3}"}]}}}}"#, "\n",
+        r#"{"type":"event_msg","payload":{"type":"mcp_tool_call_end","call_id":"m2","invocation":{"server":"immorterm","tool":"immorterm_screenshot","arguments":{}},"result":{"Err":{"content":[{"type":"text","text":"boom"}]}}}}"#, "\n",
+        r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1"}}"#, "\n",
+    );
+
+    let (turns, tool) = conversation_adapters::parse_turns_from_text(rollout);
+    assert_eq!(tool, "codex");
+    let calls: Vec<_> = turns.iter().flat_map(|t| t.blocks.iter()).filter_map(|b| b.tool_call.as_ref()).collect();
+
+    // `exec` normalizes to Bash with the /bin/bash -lc wrapper stripped, so a
+    // Codex session and a Claude one describe the same action identically.
+    let bash = calls.iter().find(|c| c.name == "Bash").expect("exec -> Bash");
+    assert_eq!(bash.input.get("command").and_then(|c| c.as_str()), Some("ls -la"));
+    assert_eq!(bash.result.as_deref(), Some("a\nb"));
+
+    // MCP calls are captured, named like Claude's, with arguments and result.
+    let ok = calls.iter().find(|c| c.name == "mcp__immorterm-memory__search_memory")
+        .expect("mcp call captured");
+    assert_eq!(ok.input.get("query").and_then(|q| q.as_str()), Some("x"));
+    assert_eq!(ok.result.as_deref(), Some("{\"count\":3}"));
+    assert!(!ok.is_error);
+
+    // An Err result is surfaced as an error, not silently as success.
+    let err = calls.iter().find(|c| c.name == "mcp__immorterm__immorterm_screenshot")
+        .expect("errored mcp call captured");
+    assert!(err.is_error);
+    assert_eq!(err.result.as_deref(), Some("boom"));
+}
