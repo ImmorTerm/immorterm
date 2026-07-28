@@ -171,10 +171,46 @@ function buildWakeSummary(planId, selections, nComments) {
  * wakeAgent(sessionName, text) — types `text` into the plan's attached (or
  *   active) Claude session; returns true if a session was woken.
  */
-export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, getPlansMode, onHasContent, submitPlan, wakeAgent, enableGridDrag }) {
+export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, getPlansMode, onHasContent, submitPlan, wakeAgent, enableGridDrag, onConsumeDragState, onConsumeToTerminal }) {
   let _plans = [];
   const _submittedIds = new Set(); // plans submitted with no live agent to wake
   let _pendingSubmit = null;       // { planId, onResult } for the open overlay
+
+  // ── Plan consume-drag (body, not the grip) ──────────────────────────
+  // Grip = spatial drag into the Spaces grid (native PLAN_MIME, §6B). Body =
+  // semantic consume: drop onto a terminal/tile to queue the plan as context,
+  // exactly like session/task/file drops. Synthetic (mousemove) like the
+  // sessions list, because the drop target is the GPU canvas. In a Space the
+  // host's consume path resolves the dropped-on tile (N4) — free, same pill.
+  let _planDrag = null;   // { plan, startX, startY, row, dragging }
+  let _planDragged = false; // true after a real drag → suppress the row's click
+  let _planDragWired = false;
+  function attachPlanDragListeners() {
+    if (_planDragWired) return;
+    _planDragWired = true;
+    document.addEventListener('mousemove', (e) => {
+      if (!_planDrag) return;
+      if (!_planDrag.dragging) {
+        if (Math.abs(e.clientX - _planDrag.startX) <= 4 && Math.abs(e.clientY - _planDrag.startY) <= 4) return;
+        _planDrag.dragging = true;
+        _planDragged = true;
+        _planDrag.row.classList.add('dragging');
+      }
+      // Raise the consume drop zone; the N4 hover-ring keys off its visibility.
+      if (onConsumeDragState) onConsumeDragState(true, _planDrag.plan.title || _planDrag.plan.id);
+    });
+    document.addEventListener('mouseup', (e) => {
+      if (!_planDrag) return;
+      const drag = _planDrag; _planDrag = null;
+      if (!drag.dragging) return;
+      drag.row.classList.remove('dragging');
+      if (onConsumeDragState) onConsumeDragState(false, null);
+      const sidebar = plansListEl.closest('#sidebar');
+      const rect = sidebar ? sidebar.getBoundingClientRect() : null;
+      const outside = rect && e.clientX < rect.left;   // dropped over the terminal area
+      if (outside && onConsumeToTerminal) onConsumeToTerminal(drag.plan);
+    });
+  }
 
   function sorted() {
     // Brief rule: active first, then newest updated. superseded greys via CSS.
@@ -240,7 +276,23 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
     row.appendChild(el('span', 'plan-status-pill status-' + status, status));
     row.appendChild(el('span', 'plan-updated', relativeTime(plan.updatedAt || 0)));
 
-    row.addEventListener('click', () => openPlanOverlay(plan));
+    // Body drag → consume into a terminal (grip already owns the grid drag).
+    if (onConsumeToTerminal) {
+      attachPlanDragListeners();
+      row.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        if (e.target.closest('.plan-grip')) return;    // grip owns the native grid drag
+        _planDragged = false;
+        _planDrag = { plan, startX: e.clientX, startY: e.clientY, row, dragging: false };
+      });
+    }
+
+    // A real drag suppresses the click (browsers usually drop the click after a
+    // move, but the flag makes it deterministic; the next mousedown resets it).
+    row.addEventListener('click', () => {
+      if (_planDragged) { _planDragged = false; return; }
+      openPlanOverlay(plan);
+    });
     return row;
   }
 

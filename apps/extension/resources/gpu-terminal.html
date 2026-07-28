@@ -4214,6 +4214,7 @@
     function shareBadgeIcon(kind) {
       if (kind === 'task') return '📋 ';
       if (kind === 'file' || kind === 'file-explain' || kind === 'file-diff') return '📄 ';
+      if (kind === 'plan') return '🗺️ ';
       return '🔗 '; // session
     }
     let _dropZoneSafetyTimer = null;
@@ -15918,6 +15919,16 @@
                 // accordion (applySectionLayout) owns display.
                 onHasContent: (has) => sectionSetHasContent('plans', has),
                 enableGridDrag: true, // §6B — drag a plan row into the Spaces grid
+                // Body-drag a plan onto a terminal → consume it as context, like
+                // tasks/files/sessions. Reuses shareItemToTerminal, so it inherits
+                // the N4 tile-aware targeting (drops into the hovered tile).
+                onConsumeDragState: (isDragging, title) => {
+                  if (isDragging && title) showShareDropZone('🗺️ ' + title);
+                  else hideShareDropZone();
+                },
+                onConsumeToTerminal: (plan) => {
+                  shareItemToTerminal({ kind: 'plan', plan_id: plan.id, plan_title: plan.title || plan.id }, plan.title || plan.id);
+                },
               });
               vscode.postMessage({ type: 'get-plans' });
               // Standalone cross-session freshness stopgap: plan_changed only

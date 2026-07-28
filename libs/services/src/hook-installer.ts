@@ -5308,6 +5308,25 @@ emit_file() {
   printf '</immorterm-file>\\n'
 }
 
+emit_plan() {
+  local DATA="$1"
+  local PLAN_ID PLAN_TITLE
+  PLAN_ID=$(jq -r '.plan_id // ""' <<<"$DATA" 2>/dev/null)
+  PLAN_TITLE=$(jq -r '.plan_title // ""' <<<"$DATA" 2>/dev/null)
+  [ -n "$PLAN_ID" ] || return 0
+
+  # Mirrors the file/session injection style — a hidden context block pointing
+  # at the plan record. immorterm_list_plans is the same reference the plan
+  # wake-summary uses (gpu-terminal-plans.js buildWakeSummary).
+  printf '<immorterm-plan source="plan-attach" plan-id="%s">\\n' "$PLAN_ID"
+  printf 'The user attached this ImmorTerm plan: %s\\n' "\${PLAN_TITLE:-$PLAN_ID}"
+  printf '\\nRead the full record — sections, tagged decisions, recommendations, and comments:\\n'
+  printf -- '  immorterm_list_plans id=%s\\n' "$PLAN_ID"
+  printf '\\nThen help the user act on it: implement the plan, or resolve any pending decisions\\n'
+  printf '(get_pending_decisions) and report back.\\n'
+  printf '</immorterm-plan>\\n'
+}
+
 # ── Drain the queue → per-item <immorterm-…> injection blocks ──────────
 # Each dropped file/session/task injects its own hidden context block (same
 # shape as the session-share block), naming the ImmorTerm Memory MCP tools.
@@ -5345,6 +5364,7 @@ for f in "$QUEUE_DIR"/*.json; do
     session)                   block=$(emit_session "$DATA") ;;
     task)                      block=$(emit_task "$DATA") ;;
     file|file-explain|file-diff) block=$(emit_file "$DATA") ;;
+    plan)                      block=$(emit_plan "$DATA") ;;
   esac
   [ -n "$block" ] && BLOCKS+="$block"$'\\n'
   rm -f "$claim"   # consume only AFTER the block was captured
@@ -6228,7 +6248,7 @@ fi
 # All logic in Python for reliable JSON handling
 # Pass via env var instead of sys.argv to avoid process table exposure
 RESULT=\$(IMMORTERM_PROJECT_ID="\${IMMORTERM_PROJECT_ID:-${_projectId}}" _HOOK_INPUT="\$STDIN_DATA" python3 - <<'PYEOF' 2>>"\$ERR_FILE"
-import json, sys, os, tempfile, shutil
+import json, sys, os, tempfile, shutil, hashlib
 from datetime import datetime, timezone
 from urllib.request import Request, urlopen
 from urllib.error import URLError
@@ -6288,7 +6308,56 @@ def archive_task_memory(memory_id):
 
 # ── Handle each tool type ───────────────────────────────────────────
 
-if tool_name == "TaskCreate":
+if tool_name == "update_plan":
+    # Codex's equivalent of TodoWrite. Shape differs in kind, not just naming:
+    # Claude sends per-task CRUD (TaskCreate/TaskUpdate/TaskList), Codex sends
+    # the WHOLE plan every time —
+    #   {"explanation": "...", "plan": [{"step": "...", "status": "pending"}]}
+    # with status in pending | in_progress | completed. So this reconciles
+    # rather than mutates: the incoming list IS the truth, and anything we held
+    # that is no longer in it has been dropped by the agent.
+    #
+    # Steps have no stable id, so identity is the step text. Renaming a step
+    # therefore reads as delete + create, which is the honest interpretation —
+    # we cannot tell a rename from a replacement.
+    plan = tool_input.get("plan", [])
+    if not isinstance(plan, list):
+        sys.exit(0)
+
+    STATUS_MAP = {"pending": "todo", "in_progress": "in_progress", "completed": "done"}
+    seen = set()
+    for idx, item in enumerate(plan):
+        if not isinstance(item, dict):
+            continue
+        step = (item.get("step") or "").strip()
+        if not step:
+            continue
+        task_id = "codex-plan-" + hashlib.sha1(step.encode("utf-8")).hexdigest()[:12]
+        seen.add(task_id)
+        prev = tasks.get(task_id, {})
+        entry = {
+            "id": task_id,
+            "subject": step[:200],
+            "status": STATUS_MAP.get(item.get("status", "pending"), "todo"),
+            "order": idx,
+            "source": "codex-update-plan",
+            "updated_at": now,
+        }
+        if entry != {k: prev.get(k) for k in entry}:
+            changed = True
+        if prev.get("memory_id"):
+            entry["memory_id"] = prev["memory_id"]
+        tasks[task_id] = entry
+
+    # Anything we were tracking from a previous plan that is now absent was
+    # removed by the agent — archive it so memory does not accumulate ghosts.
+    for stale_id in [t for t in tasks
+                     if t.startswith("codex-plan-") and t not in seen]:
+        archive_task_memory(tasks[stale_id].get("memory_id"))
+        tasks.pop(stale_id, None)
+        changed = True
+
+elif tool_name == "TaskCreate":
     # Extract task_id from tool_response
     # Claude Code hook API sends structured: {"task": {"id": "N", "subject": "..."}}
     # Also handle legacy text format: "Task #N created successfully: <subject>"
@@ -7265,6 +7334,15 @@ function buildCodexHooksConfig(projectPath: string): Record<string, unknown> {
           matcher: 'Write|Edit|MultiEdit|apply_patch',
           hooks: [
             { type: 'command', command: wrap(CODE_CHANGE_CAPTURE_FILE), timeout: 10 },
+          ],
+        },
+        {
+          // Codex's TodoWrite equivalent. It sends the WHOLE plan each time
+          // ({explanation, plan:[{step,status}]}), so the persist hook
+          // reconciles rather than mutates.
+          matcher: 'update_plan',
+          hooks: [
+            { type: 'command', command: wrap(TASK_PERSIST_HOOK_FILE), timeout: 10 },
           ],
         },
       ],
