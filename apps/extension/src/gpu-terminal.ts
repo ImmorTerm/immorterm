@@ -3833,13 +3833,29 @@ Return ONLY a JSON object with these fields:
     // bypasses the (chronically racy) registry.ai_session_id field —
     // if claude is in the process tree, we know it's running NOW even when
     // registry says null.
+    // Covers all nine vendors. It used to list only claude/cursor/aider/codex,
+    // so a live Windsurf, Cline, opencode, Gemini or Copilot process reported
+    // "no active vendor" and the caller fell back to the racy registry field
+    // this check exists to bypass.
+    //
+    // `windsurf` must be tested BEFORE the generic names for the same reason
+    // `cursor-agent` matches `cursor`: substring order decides ties. Keep the
+    // ids byte-identical to AiTool::name() in libs/structured-logs — they are
+    // compared against registry.tool across layers.
+    const VENDOR_CMD_MATCHES: ReadonlyArray<readonly [needle: string, id: string]> = [
+      ['claude', 'claude'],
+      ['cursor', 'cursor'],
+      ['aider', 'aider'],
+      ['codex', 'codex'],
+      ['windsurf', 'windsurf'],
+      ['cline', 'cline'],
+      ['opencode', 'opencode'],
+      ['gemini', 'gemini'],
+      ['copilot', 'copilot'],
+    ];
     const vendorMatch = (cmd: string): string | null => {
       const c = cmd.toLowerCase();
-      if (c.includes('claude')) return 'claude';
-      if (c.includes('cursor')) return 'cursor';
-      if (c.includes('aider')) return 'aider';
-      if (c.includes('codex')) return 'codex';
-      return null;
+      return VENDOR_CMD_MATCHES.find(([needle]) => c.includes(needle))?.[1] ?? null;
     };
     const activeVendor = descendants
       .map(d => vendorMatch(d.cmd))
