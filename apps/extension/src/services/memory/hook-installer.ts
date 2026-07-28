@@ -34,6 +34,7 @@ import { readProjectConfig, defaultVendorsConfig } from '../../utils/immorterm-c
 export {
   areHooksInstalled,
   removeMemoryHooks,
+  syncCodexSkills,
   CURSOR_ADAPTER_SH,
   WINDSURF_ADAPTER_SH,
   CLINE_ADAPTER_SH,

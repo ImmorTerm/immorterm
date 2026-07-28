@@ -5948,12 +5948,12 @@ function generateHooksConfig(projectPath: string): object {
  */
 function generateRecallCommand(): string {
   return `---
-description: Resume a previous Claude session by loading its full context (summary, facts, decisions, code changes, tasks, plan). Use with a session number from list_sessions, a session ID, or "last" for the most recent session.
+description: Resume a previous AI coding session by loading its full context (summary, facts, decisions, code changes, tasks, plan). Use with a session number from list_sessions, a session ID, or "last" for the most recent session.
 ---
 
 # /immorterm:recall — Resume a Previous Session
 
-Load full context from a previous Claude Code session so you can continue where it left off.
+Load full context from a previous AI coding session so you can continue where it left off.
 Restores tasks, plan, and code changes — not just the summary.
 
 **Usage**:
@@ -6104,7 +6104,7 @@ description: Chat with a previous session — ask questions, get answers from it
 
 # /immorterm:ask — Interactive Session Chat
 
-Start an interactive conversation with a previous Claude Code session. A subagent loaded with that session's context answers questions from its first-person perspective.
+Start an interactive conversation with a previous AI coding session. A subagent loaded with that session's context answers questions from its first-person perspective.
 
 ---
 
@@ -6144,7 +6144,7 @@ Spawn a **Task** with these parameters:
 The prompt MUST include:
 
 \`\`\`
-You are the voice of a previous Claude Code session. You answer questions
+You are the voice of a previous AI coding session. You answer questions
 as if you ARE that session — speak in first person ("I did...", "I decided...").
 
 ## Step 1: Load your session context
@@ -7454,6 +7454,78 @@ function syncCodexMcpServers(enabled: boolean): void {
   }
 }
 
+/**
+ * ImmorTerm skills installed into Codex, mirroring the `/immorterm:*` slash
+ * commands Claude Code gets. Same SKILL.md body — only the frontmatter differs.
+ */
+const CODEX_SKILLS: ReadonlyArray<{ dir: string; name: string; generator: () => string }> = [
+  { dir: 'immorterm-recall', name: 'immorterm-recall', generator: generateRecallCommand },
+  { dir: 'immorterm-ask', name: 'immorterm-ask', generator: generateAskCommand },
+];
+
+/**
+ * Install (or remove) ImmorTerm's skills in the user's Codex home.
+ *
+ * Codex has no slash-command directory; its equivalent is a skill, auto-invoked
+ * when the description matches — so our two commands ship as skills. The bodies
+ * are byte-identical to Claude's; only the frontmatter gains a `name`, which
+ * Codex uses as the skill identifier.
+ *
+ * VERIFIED against codex 0.145: `$CODEX_HOME/skills/<name>/SKILL.md` is
+ * auto-discovered, and unlike `hooks.json` the frontmatter is NOT
+ * deny_unknown_fields — Claude-only keys (`allowed-tools`, `argument-hint`)
+ * are carried through without complaint. So one file really does serve both.
+ *
+ * Like `syncCodexMcpServers`, this writes OUTSIDE the project (Codex skills are
+ * global, not per-project) and is guarded by the same escape hatches.
+ */
+export function syncCodexSkills(enabled: boolean): void {
+  // Unlike syncCodexMcpServers this only writes files — it never shells out —
+  // so an explicit CODEX_HOME makes it safe to exercise for real in tests.
+  // Without one we'd be reaching into the developer's own ~/.codex.
+  const explicitHome = process.env.CODEX_HOME;
+  if (!explicitHome && (process.env.VITEST || process.env.IMMORTERM_NO_GLOBAL_MCP_SYNC)) {
+    return;
+  }
+
+  const codexHome = explicitHome || path.join(os.homedir(), '.codex');
+  const skillsRoot = path.join(codexHome, 'skills');
+
+  try {
+    if (!enabled) {
+      for (const { dir } of CODEX_SKILLS) {
+        fs.rmSync(path.join(skillsRoot, dir), { recursive: true, force: true });
+      }
+      return;
+    }
+
+    // Only materialize the tree if Codex itself has a home — creating
+    // ~/.codex for a user who has never run Codex would be presumptuous.
+    if (!fs.existsSync(codexHome)) return;
+
+    for (const { dir, name, generator } of CODEX_SKILLS) {
+      // Claude's command files already open with `---\ndescription: …\n---`.
+      // Codex additionally wants a `name`, so splice it into that same block
+      // rather than maintaining a second copy of the body.
+      const body = generator();
+      const withName = body.startsWith('---\n')
+        ? `---\nname: ${name}\n${body.slice(4)}`
+        : `---\nname: ${name}\n---\n\n${body}`;
+      const target = path.join(skillsRoot, dir);
+      fs.mkdirSync(target, { recursive: true });
+      const file = path.join(target, 'SKILL.md');
+      // Skip byte-identical rewrites — same discipline as the Codex hooks
+      // config: needless churn on a file the vendor watches is never free.
+      const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+      if (existing !== withName) {
+        fs.writeFileSync(file, withName);
+      }
+    }
+  } catch (e) {
+    console.warn('[memory] could not sync ImmorTerm skills into Codex (non-fatal):', e);
+  }
+}
+
 /** Cursor — `afterFileEdit` events with `{conversation_id, file_path, edits[]}`.
  * @see https://cursor.com/docs/hooks
  */
@@ -7703,9 +7775,10 @@ function writeVendorConfigs(projectPath: string, vendors: VendorsConfig): string
   } else {
     removeManagedJsonConfig(codexPath);
   }
-  // Unlike every other vendor, Codex's MCP config lives outside the project
-  // (~/.codex/config.toml), so it can't just be a file we write here.
+  // Unlike every other vendor, Codex's MCP config and skills live outside the
+  // project (~/.codex/), so they can't just be files we write here.
   syncCodexMcpServers(vendors.codex.enabled);
+  syncCodexSkills(vendors.codex.enabled);
 
   // ── Cursor ────────────────────────────────────────────────
   const cursorPath = path.join(projectPath, '.cursor', 'hooks.json');

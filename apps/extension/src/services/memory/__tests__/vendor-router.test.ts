@@ -9,7 +9,7 @@ import {
   writeProjectConfig,
   type ProjectConfig,
 } from '../../../utils/immorterm-config';
-import { writeAllVendorConfigs } from '../hook-installer';
+import { writeAllVendorConfigs, syncCodexSkills } from '../hook-installer';
 
 describe('Phase A T2 — vendor-router (writeAllVendorConfigs)', () => {
   let tmp: string;
@@ -351,5 +351,63 @@ describe('Phase A T2 — vendor-router (writeAllVendorConfigs)', () => {
     // Slash commands and skills we deployed are removed.
     expect(fs.existsSync(path.join(claudeDir, 'commands'))).toBe(false);
     expect(fs.existsSync(path.join(claudeDir, 'skills'))).toBe(false);
+  });
+
+  describe('Codex skills (global, ~/.codex/skills)', () => {
+    // Codex has no slash-command directory — a skill is its equivalent, matched
+    // on description. Exercised against an isolated CODEX_HOME so it never
+    // touches the developer's real one.
+    let codexHome: string;
+    let prevHome: string | undefined;
+
+    beforeEach(() => {
+      codexHome = mkdtempSync(path.join(tmpdir(), 'immorterm-codexhome-'));
+      prevHome = process.env.CODEX_HOME;
+      process.env.CODEX_HOME = codexHome;
+    });
+
+    afterEach(() => {
+      if (prevHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = prevHome;
+      rmSync(codexHome, { recursive: true, force: true });
+    });
+
+    it('installs both skills with a Codex-shaped frontmatter name', () => {
+      syncCodexSkills(true);
+
+      for (const name of ['immorterm-recall', 'immorterm-ask']) {
+        const file = path.join(codexHome, 'skills', name, 'SKILL.md');
+        expect(fs.existsSync(file)).toBe(true);
+        const body = fs.readFileSync(file, 'utf8');
+        // Codex keys the skill off `name`; the description drives auto-invoke.
+        expect(body.startsWith(`---\nname: ${name}\ndescription: `)).toBe(true);
+        // ONE frontmatter block — the name is spliced into the existing one,
+        // not prepended as a second. (The body itself contains `---` markdown
+        // rules, so only the head is meaningful here.)
+        const [, frontmatter] = body.split('---', 2);
+        expect(frontmatter.match(/^name:/gm)).toHaveLength(1);
+        expect(frontmatter.match(/^description:/gm)).toHaveLength(1);
+        // Vendor-neutral wording: these recall sessions from any AI tool.
+        expect(body).not.toContain('previous Claude Code session');
+      }
+    });
+
+    it('un-ticking Codex removes them again', () => {
+      syncCodexSkills(true);
+      expect(fs.existsSync(path.join(codexHome, 'skills', 'immorterm-ask'))).toBe(true);
+
+      syncCodexSkills(false);
+      expect(fs.existsSync(path.join(codexHome, 'skills', 'immorterm-ask'))).toBe(false);
+      expect(fs.existsSync(path.join(codexHome, 'skills', 'immorterm-recall'))).toBe(false);
+    });
+
+    it('rewriting identical content leaves the file untouched', () => {
+      syncCodexSkills(true);
+      const file = path.join(codexHome, 'skills', 'immorterm-recall', 'SKILL.md');
+      const before = fs.statSync(file).mtimeMs;
+
+      syncCodexSkills(true);
+      expect(fs.statSync(file).mtimeMs).toBe(before);
+    });
   });
 });
