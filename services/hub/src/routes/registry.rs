@@ -61,6 +61,44 @@ fn normalize_registry_keys(root: &mut Value) {
                 obj.insert((*modern).to_string(), v);
             }
         }
+
+        // Backfill `tool` for entries that predate the session-link hook.
+        // Only when absent — an explicitly announced vendor always wins.
+        let has_tool = obj
+            .get("tool")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
+        if !has_tool
+            && let Some(inferred) = obj
+                .get("ai_transcript_path")
+                .and_then(|v| v.as_str())
+                .and_then(infer_tool_from_transcript)
+        {
+            obj.insert("tool".to_string(), json!(inferred));
+        }
+    }
+}
+
+/// Infer which vendor owns a session from its transcript path.
+///
+/// Every vendor writes transcripts under its own state directory, so the path
+/// names the vendor with no guessing. Returns `None` for a missing or
+/// unrecognised path so the caller can fall back rather than mislabel.
+///
+/// This exists because `tool` only started being written when the SessionStart
+/// hook began announcing itself — the overwhelming majority of existing
+/// entries have none, and readers were blanket-defaulting them to
+/// "claude-code". That silently mislabels every Codex session created before
+/// the hook landed.
+pub(crate) fn infer_tool_from_transcript(path: &str) -> Option<&'static str> {
+    // Match the vendor's state directory rather than a $HOME prefix, so this
+    // holds for any user and for paths that came through a symlink.
+    if path.contains("/.codex/") {
+        Some("codex")
+    } else if path.contains("/.claude/") {
+        Some("claude-code")
+    } else {
+        None
     }
 }
 
@@ -2195,5 +2233,45 @@ mod tests {
         assert!(s[1].get("claude_session_id").is_none());
 
         assert_eq!(s[2]["ai_session_id"], "already-new");
+    }
+
+    /// T30: `tool` was only ever written by the session-link hook, so almost
+    /// every existing entry has none and readers defaulted them all to
+    /// "claude-code" — mislabelling every pre-hook Codex session.
+    #[test]
+    fn normalize_backfills_tool_from_transcript_path() {
+        let mut root = serde_json::json!({
+            "sessions": [
+                { "window_id": "codex-old",
+                  "claude_transcript_path": "/Users/u/.codex/sessions/2026/07/28/rollout-x.jsonl" },
+                { "window_id": "claude-old",
+                  "claude_transcript_path": "/Users/u/.claude/projects/p/abc.jsonl" },
+                // An explicit announce always wins over inference.
+                { "window_id": "announced", "tool": "cursor",
+                  "claude_transcript_path": "/Users/u/.claude/projects/p/abc.jsonl" },
+                // Nothing to go on — left alone for the caller's fallback.
+                { "window_id": "unknown", "claude_transcript_path": "/tmp/somewhere.jsonl" },
+                { "window_id": "no-transcript" }
+            ]
+        });
+
+        normalize_registry_keys(&mut root);
+        let s = root["sessions"].as_array().unwrap();
+
+        assert_eq!(s[0]["tool"], "codex");
+        assert_eq!(s[1]["tool"], "claude-code");
+        assert_eq!(s[2]["tool"], "cursor");
+        assert!(s[3].get("tool").is_none());
+        assert!(s[4].get("tool").is_none());
+    }
+
+    #[test]
+    fn infer_tool_from_transcript_only_matches_known_vendor_dirs() {
+        assert_eq!(infer_tool_from_transcript("/home/u/.codex/sessions/a.jsonl"), Some("codex"));
+        assert_eq!(infer_tool_from_transcript("/home/u/.claude/projects/a.jsonl"), Some("claude-code"));
+        assert_eq!(infer_tool_from_transcript("/var/tmp/a.jsonl"), None);
+        assert_eq!(infer_tool_from_transcript(""), None);
+        // A project literally named ".codexstuff" must not match.
+        assert_eq!(infer_tool_from_transcript("/home/u/.codexstuff/a.jsonl"), None);
     }
 }

@@ -101,11 +101,20 @@ pub(crate) fn reconcile(
             _ => continue,
         };
         // Which agent owns this window. Set by the SessionStart hook's
-        // /registry/session-link announce; legacy entries predate it and are
-        // Claude by definition, since nothing else used to be registered.
+        // /registry/session-link announce. Entries that predate it have none —
+        // and are NOT Claude by definition any more, so infer from the
+        // transcript path (each vendor writes under its own state dir) before
+        // falling back. Mislabelling here picks the wrong transcript adapter.
         let tool = entry
             .tool
             .clone()
+            .or_else(|| {
+                entry
+                    .ai_transcript_path
+                    .as_deref()
+                    .and_then(infer_tool_from_transcript)
+                    .map(str::to_string)
+            })
             .unwrap_or_else(|| "claude-code".to_string());
         // Prefer registry's ai_transcript_path; fall back to the vendor's
         // well-known convention path when missing. The hub's
@@ -208,6 +217,25 @@ fn read_mcp_slug(project_dir: &str) -> Option<String> {
     }
     None
 }
+
+/// Infer which vendor owns a session from its transcript path.
+///
+/// Each vendor writes transcripts under its own state directory, so the path
+/// names the vendor with no guessing. `None` for a missing or unrecognised
+/// path, so callers fall back rather than mislabel.
+///
+/// Mirrors `infer_tool_from_transcript` in the hub — the digest reads
+/// registry.json directly and can't call into the hub crate.
+fn infer_tool_from_transcript(path: &str) -> Option<&'static str> {
+    if path.contains("/.codex/") {
+        Some("codex")
+    } else if path.contains("/.claude/") {
+        Some("claude-code")
+    } else {
+        None
+    }
+}
+
 
 /// Claude Code stores per-project transcripts at
 /// `$HOME/.claude/projects/<encoded>/<session_id>.jsonl` where `<encoded>`
