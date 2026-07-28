@@ -1577,9 +1577,20 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         // webview can't always learn the active session's Claude UUID (the
         // jsonl-tail tracker is flaky), so scan ~/.claude/image-cache/*/<N>.png
         // and pick the newest — preferring the known UUID's dir when supplied.
-        const { requestId, n, uuid } = msg as { requestId: string; n: number; uuid?: string; type: string };
+        const { requestId, n, uuid, windowId } = msg as {
+          requestId: string; n: number; uuid?: string; windowId?: string; type: string;
+        };
         const cacheRoot = path.join(os.homedir(), '.claude', 'image-cache');
         const fname = String(n) + '.png';
+        // ImmorTerm's own Cmd+Opt+V writes ~/.immorterm/paste/<window_id>/<n>.png
+        // with the same 1-based numbering the `[Image #N]` pill uses. Check it
+        // first: we know we put the bytes there, whichever agent is running.
+        // Claude's image-cache below only ever holds Claude's own Cmd+V pastes,
+        // so for Codex (which renders the identical pill) this is the only hit.
+        const pasteRoots = [
+          windowId ? path.join(os.homedir(), '.immorterm', 'paste', windowId, fname) : null,
+          path.join(os.homedir(), '.immorterm', 'paste', 'default', fname),
+        ].filter(Boolean) as string[];
         const reply = (resolvedPath?: string) => {
           let imageDataUrl: string | undefined;
           if (resolvedPath) {
@@ -1587,6 +1598,8 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
           }
           this.view?.webview.postMessage({ type: 'claude-image-result', requestId, exists: !!imageDataUrl, imageDataUrl });
         };
+        const ownPaste = pasteRoots.find((c) => fs.existsSync(c));
+        if (ownPaste) { reply(ownPaste); break; }
         const preferred = uuid ? path.join(cacheRoot, uuid, fname) : null;
         if (preferred && fs.existsSync(preferred)) { reply(preferred); break; }
         fs.readdir(cacheRoot, { withFileTypes: true }, (err, dirents) => {

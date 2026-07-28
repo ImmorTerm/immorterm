@@ -83,16 +83,24 @@ export function handleClipboardImageReply(resolvers, msg) {
  */
 export function createClipboardImageRpc({
   getWs, getTerm, replaceSelection, resolvers, makeRequestId,
-  isRpcStale = () => false, armPasteUndo = null,
+  isRpcStale = () => false, armPasteUndo = null, getAiTool = () => null,
 }) {
-  // Empty bracketed-paste markers — Claude Code's TUI sees the paste event
-  // and reads the OS clipboard itself, producing its native [Image #N]
-  // marker for image bytes (PNG, JPEG, TIFF, file copies).
+  // Agents read the OS clipboard themselves; we only have to deliver the
+  // keystroke each one listens for. Nothing image-shaped goes over the wire.
+  //
+  //   Claude Code — an empty bracketed paste. Its TUI treats the paste event
+  //     as the signal and produces its native [Image #N] marker.
+  //   Codex — Ctrl+V (0x16). Its TUI says so on screen ("Paste an image with
+  //     Ctrl+V to attach it to your next message") and handles it in
+  //     tui/src/clipboard_paste.rs; an empty bracketed paste does nothing.
+  //
+  // Same split already existed for Claude-on-Linux, which also binds Ctrl+V.
   const sendEmptyPaste = () => {
     const ws = getWs();
     if (!ws) return;
     if (armPasteUndo) armPasteUndo('image');
-    ws.send(JSON.stringify({ type: 'input_raw', data: btoa('\x1b[200~\x1b[201~') }));
+    const seq = getAiTool() === 'codex' ? '\x16' : '\x1b[200~\x1b[201~';
+    ws.send(JSON.stringify({ type: 'input_raw', data: btoa(seq) }));
   };
 
   // Cmd+V image leg (local daemon). With an active selection, first erase

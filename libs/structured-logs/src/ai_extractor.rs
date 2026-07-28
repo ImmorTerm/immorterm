@@ -14,6 +14,34 @@ use tracing::{info, warn};
 
 use immorterm_core::log::{strip_runs, GridSnapshot};
 
+/// Marks a grid row that is entirely DIM — a composer placeholder rather than
+/// real content. Uses U+0000 so it can never collide with terminal text.
+const GHOST_PREFIX: char = '\0';
+
+/// DIM bit in the grid log's packed attribute byte (`AttributeRun.a`).
+/// Mirrors `attrs_to_bitfield` in immorterm-core::log.
+const LOG_ATTR_DIM: u8 = 16;
+
+/// True when a row has visible text and every run carrying that text is DIM.
+///
+/// Both agents render their placeholder this way: Claude as a DIM
+/// auto-suggestion, Codex as a DIM rotating hint. Real typed input is never
+/// dim, so this is the one signal that separates them once colours and
+/// attributes are flattened for diffing.
+fn row_is_all_dim(runs: &[immorterm_core::log::AttributeRun]) -> bool {
+    let mut saw_text = false;
+    for run in runs {
+        if run.t.trim().is_empty() {
+            continue; // spacer/padding run — carries no visible glyphs
+        }
+        saw_text = true;
+        if run.a & LOG_ATTR_DIM == 0 {
+            return false;
+        }
+    }
+    saw_text
+}
+
 /// Role of a single line within AI conversation output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LineRole {
@@ -248,12 +276,31 @@ impl AiExtractor {
         let current_text: Vec<String> = snapshot
             .grid
             .iter()
-            .map(|row_runs| strip_runs(&row_runs.runs))
+            .map(|row_runs| {
+                // A row whose visible text is entirely DIM is the composer's
+                // placeholder hint, not something the user typed. Codex rotates
+                // hints like "› Implement {feature}" through an empty composer,
+                // and they are indistinguishable from a real prompt once the
+                // attributes are flattened away — so they were being logged as
+                // user turns and remembered as requests that never happened.
+                // Prefix a marker rather than dropping the row, so diffing and
+                // indexing stay aligned with the grid.
+                let text = strip_runs(&row_runs.runs);
+                if row_is_all_dim(&row_runs.runs) {
+                    format!("{GHOST_PREFIX}{text}")
+                } else {
+                    text
+                }
+            })
             .collect();
 
         if !self.prev_text.is_empty() {
             let new_lines: Vec<String> = current_text
                 .iter()
+                // Ghost rows stay in `current_text` so the next diff still sees
+                // them (a rotating placeholder must not read as new content),
+                // but they never become part of a turn.
+                .filter(|line| !line.starts_with(GHOST_PREFIX))
                 .filter(|line| {
                     let trimmed = line.trim();
                     !trimmed.is_empty() && !self.prev_text.iter().any(|p| p.trim() == trimmed)
@@ -383,6 +430,10 @@ impl AiExtractor {
     }
 
     fn classify_line(&self, line: &str) -> LineRole {
+        // Placeholder/ghost text — never a turn, whoever is running.
+        if line.starts_with(GHOST_PREFIX) {
+            return LineRole::None;
+        }
         let trimmed = line.trim();
         if trimmed.is_empty() {
             return LineRole::None;
@@ -933,6 +984,45 @@ mod tests {
         // Bare markers are the empty composer / chrome.
         assert_eq!(e.classify_line("\u{203A}"), LineRole::None);
         assert_eq!(e.classify_line("\u{2022}"), LineRole::None);
+    }
+
+    /// Regression: a live FLAM session logged "› Implement {feature}" — Codex's
+    /// rotating placeholder in an EMPTY composer — as a real user turn, so the
+    /// agent would later "remember" a request the user never made. The only
+    /// signal separating placeholder from typed input is DIM, which is lost
+    /// once runs are flattened, so it has to be carried through the diff.
+    #[test]
+    fn dim_placeholder_row_is_not_a_user_turn() {
+        use immorterm_core::log::{AttributeRun, DefaultColor, LogColor};
+        let run = |t: &str, a: u8| AttributeRun {
+            t: t.to_string(),
+            fg: LogColor::Default(DefaultColor),
+            bg: LogColor::Default(DefaultColor),
+            a,
+            r: 0,
+        };
+
+        // Codex's placeholder: the whole visible row is DIM (log attr 16).
+        assert!(row_is_all_dim(&[run("\u{203A} ", 16), run("Implement {feature}", 16)]));
+        // A real prompt is not dim, even with a dim/blank spacer alongside.
+        assert!(!row_is_all_dim(&[run("\u{203A} ", 1), run("fix the parser", 0)]));
+        assert!(!row_is_all_dim(&[run("   ", 16), run("real text", 0)]));
+        // Nothing visible at all is not a placeholder either.
+        assert!(!row_is_all_dim(&[run("    ", 0)]));
+
+        // And a tagged row is chrome for every vendor, not just Codex.
+        let e = vendor_extractor(AiTool::Codex);
+        assert_eq!(
+            e.classify_line(&format!("{GHOST_PREFIX}\u{203A} Implement {{feature}}")),
+            LineRole::None
+        );
+        let c = vendor_extractor(AiTool::Claude);
+        assert_eq!(
+            c.classify_line(&format!("{GHOST_PREFIX}\u{276F} Try refactor this")),
+            LineRole::None
+        );
+        // Untagged, the same text is still a genuine prompt.
+        assert_eq!(e.classify_line("\u{203A} Implement {feature}"), LineRole::User);
     }
 
     #[test]

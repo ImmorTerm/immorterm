@@ -6168,13 +6168,14 @@
       const stagedImgs = composeImagePaste.blobs.slice();
       const hasImages = stagedImgs.length > 0;
 
-      // Image paste only makes sense when an AI TUI is owning the input —
-      // a bash prompt would just print garbage from the empty bracketed
-      // paste markers. Refuse rather than silently mangling the session.
+      // Image paste only makes sense when an AI TUI is owning the input — a
+      // bash prompt would just print garbage from the paste keystroke. Refuse
+      // rather than silently mangling the session. Any agent we know how to
+      // signal qualifies; imagePasteRaw picks the right keystroke per vendor.
       if (hasImages) {
         const sessNow = sessions.get(activeSessionName);
-        if (!isClaudeCode(sessNow)) {
-          console.warn('[comments] image paste needs an active Claude TUI; aborting send');
+        if (!isAiActive(sessNow)) {
+          console.warn('[comments] image paste needs an active AI TUI; aborting send');
           return;
         }
       }
@@ -6207,7 +6208,15 @@
       const BP_START = '\x1b[200~';
       const BP_END = '\x1b[201~';
       const enterMsg = { type: 'input', data: '\r' };
-      const emptyPasteRaw = { type: 'input_raw', data: btoa('\x1b[200~\x1b[201~') };
+      // Keystroke that makes the running agent read the OS clipboard: an empty
+      // bracketed paste for Claude Code, Ctrl+V for Codex. See
+      // createClipboardImageRpc in gpu-terminal-input.js for the full note.
+      const imagePasteRaw = {
+        type: 'input_raw',
+        data: btoa(aiTool(sessions.get(activeSessionName)) === 'codex'
+          ? '\x16'
+          : '\x1b[200~\x1b[201~'),
+      };
 
       // Walk the assembled payload, splitting on `[Image #N]` markers
       // whose N has a matching staged blob. Each match becomes an
@@ -6320,7 +6329,7 @@
               console.warn('[comments] clipboard.write failed for image #' + seg.n, err);
               continue;
             }
-            ws.send(JSON.stringify(emptyPasteRaw));
+            ws.send(JSON.stringify(imagePasteRaw));
             await new Promise((r) => setTimeout(r, IMAGE_PASTE_GAP_MS));
           }
         }
@@ -12708,6 +12717,7 @@
             return !!(sess && sess.clipboardRpc === 'stale');
           },
           armPasteUndo: pasteUndoArm,
+          getAiTool: () => aiTool(sessions.get(activeSessionName)),
         });
         termInput = inputModule.createTerminalInput({
           getTerm: () => terminal,
@@ -13974,10 +13984,14 @@
         // [Image #N] hover preview actions. Resolves the cached file path
         // from the active session's Claude UUID + the link's `n` counter.
         const sessForImg = sessions.get(activeSessionName);
-        // `~/.claude/image-cache/` only exists for Claude Code. A Codex or
-        // Cursor session has no business resolving a hover against it.
-        const imgUuid = isClaudeCode(sessForImg) && sessForImg.claudeRaw.session_id;
-        const filePath = imgUuid ? '~/.claude/image-cache/' + imgUuid + '/' + link.n + '.png' : null;
+        // Two places an `[Image #N]` can live: Claude's own Cmd+V cache, or
+        // ImmorTerm's paste dir (Cmd+Opt+V, any vendor — Codex renders the same
+        // pill). Prefer ours; it is where we know the bytes went.
+        const imgUuid = (isClaudeCode(sessForImg) && sessForImg.claudeRaw.session_id) || null;
+        const imgWindowId = (sessForImg && sessForImg.windowId) || null;
+        const filePath = imgWindowId
+          ? '~/.immorterm/paste/' + imgWindowId + '/' + link.n + '.png'
+          : (imgUuid ? '~/.claude/image-cache/' + imgUuid + '/' + link.n + '.png' : null);
         actionsRow.appendChild(mkBtn('Copy image', async (btn) => {
           // meta.imageDataUrl is either the hub URL (standalone) or a
           // webview-safe asWebviewUri (VS Code) — fetch + clipboard.write
@@ -14218,8 +14232,12 @@
           //                             since the standalone shim only does
           //                             existence checks, not image serving.
           const sess = sessions.get(activeSessionName);
-          // Claude-only cache path — see isClaudeCode().
-          const uuid = isClaudeCode(sess) && sess.claudeRaw.session_id;
+          // The `[Image #N]` pill is not Claude-only — Codex renders it too, and
+          // ImmorTerm's own Cmd+Opt+V writes ~/.immorterm/paste/<window>/<n>.png
+          // with the same numbering. The UUID is only useful for Claude's own
+          // cache, so keep it vendor-gated while the hover itself is not.
+          const uuid = (isClaudeCode(sess) && sess.claudeRaw.session_id) || null;
+          const windowId = (sess && sess.windowId) || null;
           // On REMOTE tabs the daemon's jsonl-tail tracker often can't
           // populate session_id (the container's `~/.claude/projects/`
           // is sometimes empty even though Claude is running). Fall back
@@ -14261,7 +14279,7 @@
             activate(null);
             const requestId = 'cimg-' + (++linkStatReqSeq);
             claudeImagePending.set(requestId, { cacheKey, n: link.n });
-            vscode.postMessage({ type: 'resolve-claude-image', requestId, n: link.n, uuid: uuid || undefined });
+            vscode.postMessage({ type: 'resolve-claude-image', requestId, n: link.n, uuid: uuid || undefined, windowId: windowId || undefined });
           }
         } else if (link.kind === 'task-summary') {
           const cacheKey = 'task-summary';
@@ -15461,8 +15479,14 @@
                 // `[Image #N]` text. Rebuild the key to match what was sent
                 // to check-link-exists.
                 const sess = sessions.get(activeSessionName);
-                const uuid = isClaudeCode(sess) && sess.claudeRaw.session_id;
-                if (uuid) {
+                const uuid = (isClaudeCode(sess) && sess.claudeRaw.session_id) || null;
+                const wid = (sess && sess.windowId) || null;
+                // Must mirror the resolution order used when the request was
+                // sent, or the reply never matches its cache key.
+                if (wid) {
+                  hoverKey = '~/.immorterm/paste/' + wid + '/'
+                    + linkHoverState.link.n + '.png|0';
+                } else if (uuid) {
                   hoverKey = '~/.claude/image-cache/' + uuid + '/'
                     + linkHoverState.link.n + '.png|0';
                 }

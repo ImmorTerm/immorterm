@@ -2176,12 +2176,11 @@ impl WasmTerminalInner {
                     display_row, span.start, span.end
                 ),
                 LinkKind::ClaudeImage(n) => {
-                    // Claude Code's paste pill, and only its. Reporting it for
-                    // another agent sends the hover to ~/.claude/image-cache,
-                    // which has nothing to do with that agent's session.
-                    if self.ai_dialect != AiDialect::Claude {
-                        return String::new();
-                    }
+                    // `[Image #N]` is NOT Claude-only: Codex renders the same
+                    // pill when it attaches an image, and ImmorTerm's own
+                    // Cmd+Opt+V writes ~/.immorterm/paste/<window>/<n>.png
+                    // using the same 1-based numbering. The vendor difference
+                    // is only WHERE the bytes live, which the host resolves.
                     format!(
                         "{{\"kind\":\"claude-image\",\"text\":\"[Image #{n}]\",\"n\":{n},\"row\":{},\"start\":{},\"end\":{}}}",
                         display_row, span.start, span.end
