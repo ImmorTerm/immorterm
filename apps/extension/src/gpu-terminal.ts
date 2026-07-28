@@ -56,6 +56,11 @@ import type { Task, TaskContext } from './tasks/types';
 import { PlansStorage } from './plans';
 import { SpacesStorage } from './spaces';
 
+/** Cap on a Codex rollout we will scan for an inline image. Rollouts reach
+ *  megabytes and each pasted image is a large base64 blob; past this we skip
+ *  rather than block a hover. */
+const CODEX_ROLLOUT_MAX_BYTES = 24 * 1024 * 1024;
+
 const SOCKET_DIR = path.join(process.env.HOME || '~', '.immorterm', 'sockets');
 const WASM_RESOURCE_DIR = 'resources/wasm';
 
@@ -1577,9 +1582,38 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         // webview can't always learn the active session's Claude UUID (the
         // jsonl-tail tracker is flaky), so scan ~/.claude/image-cache/*/<N>.png
         // and pick the newest — preferring the known UUID's dir when supplied.
-        const { requestId, n, uuid, windowId } = msg as {
-          requestId: string; n: number; uuid?: string; windowId?: string; type: string;
+        const { requestId, n, uuid, windowId, transcriptPath } = msg as {
+          requestId: string; n: number; uuid?: string; windowId?: string;
+          transcriptPath?: string; type: string;
         };
+        // Codex embeds pasted images INLINE in its rollout as a data URI
+        // (`input_image` → `image_url: "data:image/png;base64,…"`) rather than
+        // writing a cache file the way Claude does. So for Codex the native
+        // resolution is "decode the Nth input_image", with no file to find.
+        // Bounded read: rollouts reach megabytes and each image is a large
+        // base64 blob, so give up rather than stall the hover.
+        if (transcriptPath && /\.codex[/\\]sessions[/\\]/.test(transcriptPath)) {
+          try {
+            if (fs.statSync(transcriptPath).size <= CODEX_ROLLOUT_MAX_BYTES) {
+              const raw = fs.readFileSync(transcriptPath, 'utf8');
+              let seen = 0;
+              let found: string | undefined;
+              for (const line of raw.split('\n')) {
+                if (!line.includes('input_image')) continue;
+                for (const m of line.matchAll(/"image_url"\s*:\s*"(data:image\/[^"]+)"/g)) {
+                  if (++seen === n) { found = m[1]; break; }
+                }
+                if (found) break;
+              }
+              if (found) {
+                this.view?.webview.postMessage({
+                  type: 'claude-image-result', requestId, exists: true, imageDataUrl: found,
+                });
+                break;
+              }
+            }
+          } catch { /* unreadable rollout — fall through to the file lookups */ }
+        }
         const cacheRoot = path.join(os.homedir(), '.claude', 'image-cache');
         const fname = String(n) + '.png';
         // Two independent flows write an `[Image #N]`, and their counters are

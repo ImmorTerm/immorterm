@@ -14280,7 +14280,13 @@
             activate(null);
             const requestId = 'cimg-' + (++linkStatReqSeq);
             claudeImagePending.set(requestId, { cacheKey, n: link.n });
-            vscode.postMessage({ type: 'resolve-claude-image', requestId, n: link.n, uuid: uuid || undefined, windowId: windowId || undefined });
+            vscode.postMessage({
+              type: 'resolve-claude-image', requestId, n: link.n,
+              uuid: uuid || undefined, windowId: windowId || undefined,
+              // Codex keeps pasted images inline in its rollout, so the host
+              // resolves them from there rather than from any cache dir.
+              transcriptPath: (sess && sess.claudeRaw && sess.claudeRaw.transcript_path) || undefined,
+            });
           }
         } else if (link.kind === 'task-summary') {
           const cacheKey = 'task-summary';
