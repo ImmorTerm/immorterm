@@ -8556,34 +8556,12 @@
             // short timeout as a fallback for a slow compositor re-establish.
             if (!_restoreRepainted) {
               _restoreRepainted = true;
-              // The per-project paint-canary PROVED the mechanism: after a reload
-              // the render loop runs and frameCount climbs (~30fps) the whole time
-              // the screen is black — so renders DO reach the WebGPU surface, but
-              // Electron's compositor never presents the canvas layer until a
-              // keystroke / scroll / manual resize invalidates it. Rendering more
-              // (the old warm-up) can't help — the presents are already happening.
-              // A backing-store realloc (tried before) reallocates the GPU
-              // swapchain but does NOT invalidate the canvas's COMPOSITOR layer,
-              // so Electron still didn't present. Invalidate the layer directly —
-              // the same fade the visibility path uses for this exact
-              // stale/absent-compositor-frame bug: an opacity change (+ a
-              // translateZ toggle) forces Electron to re-composite and present the
-              // already-rendered frame. Once presented, the compositor stays
-              // awake. Twice across the warm-up so one lands after the layer
-              // exists; the fade is invisible while black and brief once shown.
-              const _kickCompositor = () => {
-                if (!(terminal && wasmReady) || !canvas) return;
-                dirty = true;
-                canvas.style.transition = 'opacity 70ms linear';
-                canvas.style.opacity = '0';
-                canvas.style.transform = 'translateZ(0)';
-                requestAnimationFrame(() => requestAnimationFrame(() => {
-                  if (!canvas) return;
-                  canvas.style.opacity = '1';
-                  canvas.style.transform = 'none';
-                }));
-              };
-              [200, 700].forEach((ms) => setTimeout(_kickCompositor, ms));
+              // (Earlier compositor "kicks" here were a MIS-DIAGNOSIS: scrollback
+              // renders fine, only the ACTIVE screen is blank after restore — so
+              // the compositor IS presenting. Reverted to a plain repaint; the
+              // real fix lives in the restore/redraw path, guided by the
+              // scrollOffset/scrollbackLen/visibleFilled canary fields.)
+              dirty = true;
             }
             // Sync AI overlay DOM from WASM ai_layer (populated by load_snapshot).
             // Prefer get_ai_primitives_json (fast) over re-parsing the full snapshot.
@@ -11002,6 +10980,12 @@
         canvasCss: Math.round(canvasRect.width) + 'x' + Math.round(canvasRect.height),
         canvasPixels: canvas.width + 'x' + canvas.height,
         docVisible: document.visibilityState,
+        // §restore-diag — is the ACTIVE screen empty while scrollback is full?
+        // (the "black viewport, scrollback fine" bug). visibleFilled counts
+        // non-blank visible rows; scrollOffset=0 means viewport at the bottom.
+        scrollOffset: (terminal && terminal.scroll_offset) ? terminal.scroll_offset() : -1,
+        scrollbackLen: (terminal && terminal.scrollback_len) ? terminal.scrollback_len() : -1,
+        dims: (terminal && terminal.dimensions) ? terminal.dimensions().join('x') : '?',
         timestamp: Date.now(),
       };
       vscode.postMessage(health);

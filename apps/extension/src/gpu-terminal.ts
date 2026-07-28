@@ -250,7 +250,7 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
   // read (~/.immorterm/ai-health/<project>.json) shows the frame progression
   // across a reload. Diagnoses "black on reload": frames climbing while black =
   // renders never reach the compositor; frozen = the loop itself stalled.
-  private canaryHistory: Array<{ t: string; count: unknown; frameCount: unknown; renderLoopRunning: unknown; canvasPixels: unknown; healthy: boolean }> = [];
+  private canaryHistory: Array<Record<string, unknown>> = [];
   private canaryRecoveryCount = 0;
   private canaryWatchdog: ReturnType<typeof setTimeout> | undefined;
   private ensureSessionsTimer: ReturnType<typeof setTimeout> | undefined;
@@ -775,6 +775,11 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
       canvasPixels: msg.canvasPixels,
       activeSession: msg.activeSession,
       recoveryCount: this.canaryRecoveryCount,
+      // §restore-diag — terminal-buffer state to catch "black active viewport,
+      // scrollback fine": visibleFilled=0 with scrollbackLen>0 = empty screen.
+      scrollOffset: msg.scrollOffset,
+      scrollbackLen: msg.scrollbackLen,
+      dims: msg.dims,
     };
     // Throttle writes: every canary during startup (count <= 6), then every 30s
     const now = Date.now();
@@ -791,6 +796,7 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
       t: health.timestamp, count: msg.count, frameCount: msg.frameCount,
       renderLoopRunning: msg.renderLoopRunning, canvasPixels: msg.canvasPixels,
       healthy: health.healthy,
+      ...( { scrollOffset: msg.scrollOffset, scrollbackLen: msg.scrollbackLen, dims: msg.dims } as Record<string, unknown> ),
     });
     if (this.canaryHistory.length > 40) this.canaryHistory.shift();
     try {
