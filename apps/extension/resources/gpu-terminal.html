@@ -8556,14 +8556,26 @@
             // short timeout as a fallback for a slow compositor re-establish.
             if (!_restoreRepainted) {
               _restoreRepainted = true;
-              const _repaintRestore = () => {
-                if (terminal && wasmReady && canvas.width > 0 && canvas.height > 0) {
-                  try { terminal.resize(canvas.width, canvas.height); } catch (_) {}
+              // A single early repaint (enough for visibility-show) fires before
+              // a full reload's compositor has re-established its layer, so the
+              // frame never reaches the screen and the loop then goes quiet —
+              // black until a much-later scroll. We get no "compositor ready"
+              // signal, so WARM UP: restart the loop and keep repainting across a
+              // multi-second window; whichever frame lands after the compositor is
+              // live sticks (a scroll proves a plain render fixes it, so the
+              // surface is fine — this is purely about a render landing in time).
+              forceRestartRenderLoop();
+              let _warmN = 0;
+              const _warmRepaint = () => {
+                if (!(terminal && wasmReady) || _warmN >= 50) return;   // ~5s @ 100ms
+                if (canvas.width > 0 && canvas.height > 0) {
+                  if (_warmN < 10) { try { terminal.resize(canvas.width, canvas.height); } catch (_) {} } // reconfigure early
                   dirty = true;
                 }
+                _warmN++;
+                setTimeout(_warmRepaint, 100);
               };
-              requestAnimationFrame(() => requestAnimationFrame(_repaintRestore));
-              setTimeout(_repaintRestore, 250);
+              _warmRepaint();
             }
             // Sync AI overlay DOM from WASM ai_layer (populated by load_snapshot).
             // Prefer get_ai_primitives_json (fast) over re-parsing the full snapshot.

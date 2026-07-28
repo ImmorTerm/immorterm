@@ -246,6 +246,11 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
   private lastCanary: Record<string, unknown> | null = null;
   private lastTitleBySession = new Map<string, string>(); // dedup title IPC
   private lastHealthWrite = 0; // throttle ai-health.json writes
+  // Per-project render-health history — a ring of recent canaries so a single
+  // read (~/.immorterm/ai-health/<project>.json) shows the frame progression
+  // across a reload. Diagnoses "black on reload": frames climbing while black =
+  // renders never reach the compositor; frozen = the loop itself stalled.
+  private canaryHistory: Array<{ t: string; count: unknown; frameCount: unknown; renderLoopRunning: unknown; canvasPixels: unknown; healthy: boolean }> = [];
   private canaryRecoveryCount = 0;
   private canaryWatchdog: ReturnType<typeof setTimeout> | undefined;
   private ensureSessionsTimer: ReturnType<typeof setTimeout> | undefined;
@@ -778,6 +783,24 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
       this.lastHealthWrite = now;
       fs.writeFile(healthPath, JSON.stringify(health, null, 2), () => {});
     }
+
+    // Per-project health + rolling history (always written; small, async). One
+    // read shows the reload sequence for THIS project without the single-file
+    // clobbering across windows.
+    this.canaryHistory.push({
+      t: health.timestamp, count: msg.count, frameCount: msg.frameCount,
+      renderLoopRunning: msg.renderLoopRunning, canvasPixels: msg.canvasPixels,
+      healthy: health.healthy,
+    });
+    if (this.canaryHistory.length > 40) this.canaryHistory.shift();
+    try {
+      const dir = path.join(os.homedir(), '.immorterm', 'ai-health');
+      const slug = (this.projectName || 'unknown').replace(/[^A-Za-z0-9_-]/g, '-');
+      fs.mkdir(dir, { recursive: true }, () => {
+        fs.writeFile(path.join(dir, `${slug}.json`),
+          JSON.stringify({ project: this.projectName, ...health, history: this.canaryHistory }, null, 2), () => {});
+      });
+    } catch { /* best effort */ }
 
     // Auto-recovery watchdog: if frames stay at 0 for >15s after init,
     // something may be wrong. Re-render the webview as a safety net.
