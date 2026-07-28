@@ -87,6 +87,26 @@ impl AiTool {
     }
 }
 
+/// How much of a Codex rollout to read when deriving stats. Rollouts grow to
+/// megabytes over a long session and we only need the most recent
+/// `token_count`, so read a window from the end rather than the whole file.
+const CODEX_TAIL_BYTES: u64 = 96 * 1024;
+
+/// Last `max_bytes` of a file as UTF-8, or None if unreadable.
+///
+/// The first line of the window is almost always a partial record; callers
+/// parse line-by-line and skip what doesn't deserialize.
+fn read_tail(path: &str, max_bytes: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let start = len.saturating_sub(max_bytes);
+    f.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::with_capacity(max_bytes.min(len) as usize);
+    f.read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
 /// Stats pushed by Claude Code via the statusline script.
 #[derive(Debug, Clone, Default)]
 pub struct ClaudeApiStats {
@@ -224,7 +244,87 @@ impl ClaudeTracker {
             }
         }
 
+        // Codex has no statusline feed — derive its stats from the rollout so
+        // the bar shows model and ctx% rather than just RAM/CPU.
+        if self.detected_tool == Some(AiTool::Codex) {
+            self.refresh_codex_api_stats();
+        }
+
         self.claude_pid != old_pid || self.session_id != old_session
+    }
+
+    /// Fill `api_stats` for a Codex session by reading its rollout transcript.
+    ///
+    /// Claude pushes model/cost/context through its statusline feed; Codex has
+    /// no such feed, so without this `format_api_stats()` returns "" and the
+    /// status bar shows only RAM/CPU — visibly poorer than a Claude terminal
+    /// sitting next to it.
+    ///
+    /// Everything needed is already in the rollout, which the SessionStart hook
+    /// recorded in the registry:
+    ///   `token_count` → info.total_token_usage.total_tokens + model_context_window
+    ///   `turn_context` / `session_meta` → model slug
+    /// Only the tail is read (rollouts grow to megabytes) and the last matching
+    /// record wins, so this stays cheap enough for the 10s scan tick.
+    fn refresh_codex_api_stats(&mut self) {
+        let Some(path) = self.codex_rollout_path() else {
+            return;
+        };
+        let Some(tail) = read_tail(&path, CODEX_TAIL_BYTES) else {
+            return;
+        };
+
+        let mut model = String::new();
+        let mut used: f64 = 0.0;
+        let mut window: f64 = 0.0;
+        for line in tail.lines() {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue; // first line of the tail is usually a partial record
+            };
+            let payload = v.get("payload").unwrap_or(&v);
+            if let Some(m) = payload.get("model").and_then(|m| m.as_str())
+                && !m.is_empty()
+            {
+                model = m.to_string();
+            }
+            if payload.get("type").and_then(|t| t.as_str()) == Some("token_count")
+                && let Some(info) = payload.get("info")
+            {
+                if let Some(t) = info
+                    .get("total_token_usage")
+                    .and_then(|u| u.get("total_tokens"))
+                    .and_then(|t| t.as_f64())
+                {
+                    used = t;
+                }
+                if let Some(w) = info.get("model_context_window").and_then(|w| w.as_f64()) {
+                    window = w;
+                }
+            }
+        }
+
+        if !model.is_empty() {
+            self.api_stats.model = model;
+        }
+        if used > 0.0 && window > 0.0 {
+            self.api_stats.context_pct = (used / window * 100.0).clamp(0.0, 100.0);
+        }
+        self.api_stats.transcript_path = path;
+    }
+
+    /// Rollout path for this window, as announced by the SessionStart hook.
+    fn codex_rollout_path(&self) -> Option<String> {
+        if !self.api_stats.transcript_path.is_empty() {
+            return Some(self.api_stats.transcript_path.clone());
+        }
+        let window_id = std::env::var("IMMORTERM_WINDOW_ID").ok()?;
+        let registry = crate::registry::Registry::load();
+        registry
+            .sessions
+            .iter()
+            .find(|e| e.window_id == window_id)
+            .and_then(|e| e.claude_transcript_path.clone())
+            .filter(|p| !p.is_empty())
     }
 
     /// Whether any AI tool is currently active.
@@ -664,5 +764,58 @@ mod tests {
             readings.iter().any(|&c| c > 0.0),
             "busy process should report CPU% > 0 within 5 probes, got {readings:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod codex_stats_tests {
+    use super::*;
+
+    /// Real record shapes from a live 0.145 rollout. Codex has no statusline
+    /// feed, so these two records are the entire basis for its status bar.
+    const ROLLOUT: &str = concat!(
+        r#"{"type":"turn_context","payload":{"turn_id":"t1","cwd":"/x","model":"gpt-5.6-sol"}}"#, "\n",
+        r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":31819},"model_context_window":258400}}}"#, "\n",
+        r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":129200},"model_context_window":258400}}}"#, "\n",
+    );
+
+    /// `label` keeps each test's fixture in its own directory — these run in
+    /// parallel in one process, so a shared path leaks state between them.
+    fn stats_from(label: &str, text: &str) -> ClaudeApiStats {
+        let dir = std::env::temp_dir()
+            .join(format!("imcodexstats-{}-{label}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rollout.jsonl");
+        std::fs::write(&path, text).unwrap();
+
+        let mut t = ClaudeTracker::new("test-window");
+        t.api_stats.transcript_path = path.to_string_lossy().into_owned();
+        t.refresh_codex_api_stats();
+        let _ = std::fs::remove_dir_all(&dir);
+        t.api_stats
+    }
+
+    #[test]
+    fn derives_model_and_context_from_rollout() {
+        let s = stats_from("full", ROLLOUT);
+        assert_eq!(s.model, "gpt-5.6-sol");
+        // Last token_count wins: 129200 / 258400 = 50%.
+        assert!((s.context_pct - 50.0).abs() < 0.01, "got {}", s.context_pct);
+    }
+
+    #[test]
+    fn survives_a_partial_first_line_and_junk() {
+        // Reading a tail window almost always slices a record in half.
+        let text = format!("{}\n{}", r#"_count":{"total_tokens":9}}}"#, ROLLOUT);
+        let s = stats_from("partial", &text);
+        assert_eq!(s.model, "gpt-5.6-sol");
+        assert!(s.context_pct > 0.0);
+    }
+
+    #[test]
+    fn no_token_count_leaves_context_untouched() {
+        let s = stats_from("nocount", r#"{"type":"turn_context","payload":{"model":"gpt-5.6-sol"}}"#);
+        assert_eq!(s.model, "gpt-5.6-sol");
+        assert_eq!(s.context_pct, 0.0);
     }
 }
