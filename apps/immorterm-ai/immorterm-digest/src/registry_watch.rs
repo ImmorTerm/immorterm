@@ -100,32 +100,44 @@ pub(crate) fn reconcile(
             Some(s) if !s.is_empty() => s,
             _ => continue,
         };
-        // Which agent owns this window. Set by the SessionStart hook's
-        // /registry/session-link announce. Entries that predate it have none —
-        // and are NOT Claude by definition any more, so infer from the
-        // transcript path (each vendor writes under its own state dir) before
-        // falling back. Mislabelling here picks the wrong transcript adapter.
-        let tool = entry
+        // `tool` here selects the TRANSCRIPT ADAPTER, so it must describe the
+        // file we are about to parse — not whoever most recently announced
+        // themselves in this window.
+        //
+        // A window is long-lived and the user can switch vendors inside it at
+        // will (that's what `tool_history` records). `tool` and
+        // `ai_transcript_path` are both overwritten on each session-link, but
+        // not atomically and not by the same writer, so there is a window
+        // where they disagree. Trusting `tool` there hands a Codex rollout to
+        // the Claude adapter and silently yields garbage.
+        //
+        // So: when we have a transcript path, IT is the authority — every
+        // vendor writes under its own state dir, so the path names its own
+        // format. `tool` is only consulted when there's no path to read,
+        // where it's needed to build the convention path in the first place.
+        let announced_tool = entry
             .tool
             .clone()
-            .or_else(|| {
-                entry
-                    .ai_transcript_path
-                    .as_deref()
-                    .and_then(infer_tool_from_transcript)
-                    .map(str::to_string)
-            })
             .unwrap_or_else(|| "claude-code".to_string());
-        // Prefer registry's ai_transcript_path; fall back to the vendor's
-        // well-known convention path when missing. The hub's
-        // claude_tracker is supposed to populate this field every 30s,
-        // but in practice many live entries are missing it (hub chain
-        // unreliable). The bash daemon already does this dir-convention
-        // discovery; mirror it here so the Rust daemon picks up the
-        // same sessions.
-        let transcript: String = match entry.ai_transcript_path.as_deref() {
-            Some(s) if !s.is_empty() => s.to_string(),
-            _ => convention_transcript_path_for(&tool, &entry.project_dir, session_id),
+        let (tool, transcript) = match entry.ai_transcript_path.as_deref() {
+            Some(path) if !path.is_empty() => {
+                let owner = infer_tool_from_transcript(path)
+                    .map(str::to_string)
+                    .unwrap_or(announced_tool);
+                (owner, path.to_string())
+            }
+            // No path recorded — the hub's tracker is supposed to populate it
+            // every 30s but in practice often doesn't, so fall back to the
+            // vendor's well-known convention path, which needs the announced
+            // tool to know which convention to use.
+            _ => {
+                let path = convention_transcript_path_for(
+                    &announced_tool,
+                    &entry.project_dir,
+                    session_id,
+                );
+                (announced_tool, path)
+            }
         };
         // AI process must be alive. Prefer the AI tool's pid in
         // ai_stats (set by session-link); fall back to the daemon
@@ -852,6 +864,59 @@ mod tests {
         // settle on the "sse" sentinel.
         for _ in 0..10 {
             assert_ne!(derive_project_id(dir.path().to_str().unwrap()), "sse");
+        }
+    }
+
+    /// A window is long-lived and the user can switch vendors inside it at any
+    /// time. `tool` and `ai_transcript_path` are updated by different writers
+    /// and not atomically, so they disagree during the switch. `tool` drives
+    /// the TRANSCRIPT ADAPTER, so the path has to win — otherwise a Codex
+    /// rollout gets handed to the Claude parser and quietly yields nothing.
+    #[test]
+    fn transcript_path_beats_a_stale_announced_tool() {
+        let mut entry = entry_alive(
+            "w1",
+            "sess-1",
+            "/Users/u/.codex/sessions/2026/07/28/rollout-abc.jsonl",
+            "/proj",
+        );
+        entry.tool = Some("claude-code".into()); // stale: user switched to Codex
+        let file = RegistryFileView { sessions: vec![entry] };
+
+        let actions = reconcile(&file, &HashSet::new(), "host", |_| true);
+        match &actions[0] {
+            ReconcileAction::Register { tool, .. } => assert_eq!(tool, "codex"),
+            other => panic!("expected Register, got {:?}", other),
+        }
+    }
+
+    /// The mirror image: no transcript path to read, so the announced tool is
+    /// all we have and it must still pick the right convention path.
+    #[test]
+    fn announced_tool_is_used_when_no_transcript_path_recorded() {
+        let mut entry = entry_alive("w1", "sess-1", "", "/proj");
+        entry.ai_transcript_path = None;
+        entry.tool = Some("codex".into());
+        let file = RegistryFileView { sessions: vec![entry] };
+
+        let actions = reconcile(&file, &HashSet::new(), "host", |_| true);
+        match &actions[0] {
+            ReconcileAction::Register { tool, .. } => assert_eq!(tool, "codex"),
+            other => panic!("expected Register, got {:?}", other),
+        }
+    }
+
+    /// An unrecognised path must not override an explicit announce.
+    #[test]
+    fn unknown_transcript_path_keeps_the_announced_tool() {
+        let mut entry = entry_alive("w1", "sess-1", "/var/tmp/custom.jsonl", "/proj");
+        entry.tool = Some("cursor".into());
+        let file = RegistryFileView { sessions: vec![entry] };
+
+        let actions = reconcile(&file, &HashSet::new(), "host", |_| true);
+        match &actions[0] {
+            ReconcileAction::Register { tool, .. } => assert_eq!(tool, "cursor"),
+            other => panic!("expected Register, got {:?}", other),
         }
     }
 }
