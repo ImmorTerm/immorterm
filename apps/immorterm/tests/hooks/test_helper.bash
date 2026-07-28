@@ -10,7 +10,28 @@
 #   - assert_mock_received_json             — verify request body via jq
 
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HOOKS_DIR="$(cd "$TESTS_DIR/../../../../.claude/hooks" && pwd)"
+# These tests exercise the hooks as INSTALLED, so they need a project that has
+# had `immorterm init` run in it. Two things moved since this was written: the
+# install target went .claude/hooks → .immorterm/hooks, and this repo became a
+# subrepo of immorterm-org (which is the initialized project). So walk up from
+# here and take the first hook dir we find, rather than assuming a fixed depth —
+# a wrong guess aborts the whole suite inside load(), which is exactly how this
+# stayed broken unnoticed.
+_probe="$TESTS_DIR"
+while [ "$_probe" != "/" ]; do
+  for _candidate in "$_probe/.immorterm/hooks" "$_probe/.claude/hooks"; do
+    if [ -d "$_candidate" ]; then
+      HOOKS_DIR="$(cd "$_candidate" && pwd)"
+      break 2
+    fi
+  done
+  _probe="$(dirname "$_probe")"
+done
+if [ -z "${HOOKS_DIR:-}" ]; then
+  echo "test_helper: no installed hooks found in any parent of $TESTS_DIR" >&2
+  echo "             run 'immorterm init' in the repo root first" >&2
+  exit 1
+fi
 MOCK_SERVER="$TESTS_DIR/mock-server.py"
 
 # ── Mock Server ──────────────────────────────────────────────────

@@ -41,6 +41,11 @@ vi.mock("@immorterm/services", () => ({
 		mcpHealthy: true,
 	})),
 	findBinary: vi.fn(() => "/usr/local/bin/immorterm-memory"),
+	// SetupWizard's vendor step probes these on mount.
+	detectVendors: vi.fn(() => [
+		{ id: "claudeCode", display: "Claude Code", bin: "claude", installed: true, configured: true },
+	]),
+	detectedVendorIds: vi.fn(() => ["claudeCode"]),
 	checkGatewayHealth: vi.fn(async () => ({
 		running: true,
 		healthy: true,

@@ -60,9 +60,14 @@ export {
 	updateHooksIfNeeded,
 	writeAllVendorConfigs,
 	resolveVendors,
+	removeClaudeCodeConfig,
 } from "./hook-installer.js";
 export type { InstallProjectHooksResult } from "./project-hooks.js";
-export { installProjectHooks } from "./project-hooks.js";
+export { installProjectHooks, setProjectVendors } from "./project-hooks.js";
+
+// Vendor detection
+export type { VendorProbe } from "./vendor-detect.js";
+export { detectVendors, detectedVendorIds, isOnPath } from "./vendor-detect.js";
 
 // Versions
 export type { ComponentVersion } from "./versions.js";

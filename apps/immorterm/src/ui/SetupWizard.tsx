@@ -4,14 +4,17 @@
  * Multi-step interactive wizard for `immorterm init`:
  * 1. Theme selection
  * 2. Service selection (checkboxes)
- * 3. License key (optional text input)
- * 4. Summary + write config
+ * 3. AI tool (vendor) selection — pre-ticked from what's installed
+ * 4. License key (optional text input)
+ * 5. Summary + write config
  *
  * Uses ink's built-in primitives only (no extra form deps).
  */
 
 import React, { useState, useEffect, useCallback } from "react";
 import { Box, Text, useApp, useInput } from "ink";
+import type { VendorId } from "@immorterm/config";
+import type { VendorProbe } from "@immorterm/services";
 import { Spinner } from "./shared.js";
 
 // ── Types ────────────────────────────────────────────────────────
@@ -20,9 +23,11 @@ interface WizardResult {
 	enableMemory: boolean;
 	enableGateway: boolean;
 	licenseKey: string | null;
+	/** Per-PROJECT selection — the caller writes it to the cwd's config. */
+	vendors: VendorId[];
 }
 
-type Step = "services" | "license" | "theme" | "writing" | "done" | "error";
+type Step = "services" | "vendors" | "license" | "theme" | "writing" | "done" | "error";
 
 // ── Progress Bar ─────────────────────────────────────────────────
 
@@ -79,9 +84,14 @@ export function SetupWizard({
 	const [selectedTheme, setSelectedTheme] = useState("default");
 	const [themePreviewFn, setThemePreviewFn] = useState<((name: string) => string) | null>(null);
 
-	const STEP_LABELS = ["Theme", "Services", "License", "Done"];
+	// Vendor state — probed on mount, detected ones sorted first and pre-ticked
+	const [probes, setProbes] = useState<VendorProbe[]>([]);
+	const [vendorSel, setVendorSel] = useState<VendorId[]>([]);
+	const [vendorCursor, setVendorCursor] = useState(0);
+
+	const STEP_LABELS = ["Theme", "Services", "AI Tools", "License", "Done"];
 	const stepIndex: Record<Step, number> = {
-		theme: 0, services: 1, license: 2, writing: 3, done: 3, error: 3,
+		theme: 0, services: 1, vendors: 2, license: 3, writing: 4, done: 4, error: 4,
 	};
 
 	// Load theme info on mount
@@ -91,6 +101,24 @@ export function SetupWizard({
 			setThemeNames(banner.THEME_NAMES);
 			setThemeDescriptions(banner.THEME_DESCRIPTIONS);
 			setThemePreviewFn(() => banner.renderThemePreview);
+		})();
+	}, []);
+
+	// Probe installed AI CLIs on mount. Detected-and-used tools sort to the top
+	// and start ticked, so the common case is "press enter".
+	useEffect(() => {
+		(async () => {
+			const { detectVendors, detectedVendorIds } = await import("@immorterm/services");
+			const found = detectVendors();
+			const detected = detectedVendorIds(found);
+			setProbes(
+				[...found].sort((a, b) => {
+					const rank = (p: VendorProbe) => (detected.includes(p.id) ? 0 : p.installed ? 1 : 2);
+					return rank(a) - rank(b);
+				}),
+			);
+			// Nothing detected (fresh machine) — fall back to the shipped default.
+			setVendorSel(detected.length > 0 ? detected : ["claudeCode"]);
 		})();
 	}, []);
 
@@ -155,13 +183,14 @@ export function SetupWizard({
 				enableMemory: services.memory,
 				enableGateway: services.gateway,
 				licenseKey: key,
+				vendors: vendorSel,
 			});
 		},
-		[services, selectedTheme, onComplete],
+		[services, selectedTheme, vendorSel, onComplete],
 	);
 
 	// ── Step navigation helpers ──
-	const STEP_ORDER: Step[] = ["theme", "services", "license"];
+	const STEP_ORDER: Step[] = ["theme", "services", "vendors", "license"];
 	const goBack = useCallback(() => {
 		const idx = STEP_ORDER.indexOf(step);
 		if (idx > 0) {
@@ -178,7 +207,7 @@ export function SetupWizard({
 
 		// Left arrow = go back on interactive steps
 		if (key.leftArrow && !wantsLicense) {
-			if (step === "services" || step === "license" || step === "theme") {
+			if (step === "services" || step === "vendors" || step === "license" || step === "theme") {
 				goBack();
 				return;
 			}
@@ -194,6 +223,22 @@ export function SetupWizard({
 					setServices((s) => ({ ...s, memory: !s.memory }));
 				} else if (serviceCursor === 1) {
 					setServices((s) => ({ ...s, gateway: !s.gateway }));
+				}
+			}
+			if (key.return || key.rightArrow) setStep("vendors");
+		}
+
+		// Vendors step: one row per AI tool, plus a trailing "Continue" row.
+		if (step === "vendors") {
+			const last = probes.length; // index of the Continue row
+			if (key.upArrow) setVendorCursor((c) => Math.max(0, c - 1));
+			if (key.downArrow) setVendorCursor((c) => Math.min(last, c + 1));
+			if (input === " ") {
+				const probe = probes[vendorCursor];
+				if (probe) {
+					setVendorSel((sel) =>
+						sel.includes(probe.id) ? sel.filter((v) => v !== probe.id) : [...sel, probe.id],
+					);
 				}
 			}
 			if (key.return || key.rightArrow) setStep("license");
@@ -325,7 +370,47 @@ export function SetupWizard({
 				</Box>
 			)}
 
-			{/* Step 3: License */}
+			{/* Step 3: AI tools (vendors) — per-project */}
+			{step === "vendors" && (
+				<Box flexDirection="column">
+					<Text bold>Which AI tools should ImmorTerm hook into?</Text>
+					<Text dimColor>
+						Detected tools are already ticked — press enter to accept. Applies to
+						this project ({shortCwd()}).
+					</Text>
+					<Text> </Text>
+
+					{probes.length === 0 ? (
+						<Spinner label="Looking for installed AI CLIs..." />
+					) : (
+						probes.map((p, i) => (
+							<VendorCheckbox
+								key={p.id}
+								probe={p}
+								checked={vendorSel.includes(p.id)}
+								focused={vendorCursor === i}
+							/>
+						))
+					)}
+
+					<Text> </Text>
+					<Box>
+						<Text color={vendorCursor === probes.length ? "magenta" : "gray"}>
+							{vendorCursor === probes.length ? "❯" : " "}{" "}
+						</Text>
+						<Text
+							bold={vendorCursor === probes.length}
+							color={vendorCursor === probes.length ? "cyan" : "gray"}
+						>
+							Continue →
+						</Text>
+					</Box>
+					<Text> </Text>
+					<Text dimColor>↑↓ navigate · space toggle · enter continue · ← back</Text>
+				</Box>
+			)}
+
+			{/* Step 4: License */}
 			{step === "license" && !wantsLicense && (
 				<Box flexDirection="column">
 					<Text bold>Do you have a license key?</Text>
@@ -414,6 +499,17 @@ export function SetupWizard({
 						{"  "}Theme:{" "}
 						<Text color="magenta">{selectedTheme}</Text>
 					</Text>
+					<Text>
+						{"  "}AI tools:{" "}
+						<Text color={vendorSel.length > 0 ? "green" : "gray"}>
+							{vendorSel.length > 0
+								? probes
+										.filter((p) => vendorSel.includes(p.id))
+										.map((p) => p.display)
+										.join(", ")
+								: "none"}
+						</Text>
+					</Text>
 					<Text> </Text>
 					<Text>
 						Next: <Text color="cyan">immorterm start</Text> to start services
@@ -425,6 +521,46 @@ export function SetupWizard({
 }
 
 // ── Sub-components ───────────────────────────────────────────────
+
+/** `~`-relative cwd, so the vendor step says which project it's configuring. */
+function shortCwd(): string {
+	const cwd = process.cwd();
+	const home = process.env.HOME;
+	return home && cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
+}
+
+function VendorCheckbox({
+	probe,
+	checked,
+	focused,
+}: {
+	probe: VendorProbe;
+	checked: boolean;
+	focused: boolean;
+}): React.ReactElement {
+	// Three states worth distinguishing: used before, on PATH but never run,
+	// and absent. Only the first is pre-ticked.
+	const badge = probe.configured ? "✓ detected" : probe.installed ? "installed" : "not found";
+	const badgeColor = probe.configured ? "green" : probe.installed ? "yellow" : "gray";
+	return (
+		<Box flexDirection="column">
+			<Text>
+				<Text color={focused ? "magenta" : "gray"}>{focused ? "❯" : " "} </Text>
+				<Text color={checked ? "green" : "gray"}>{checked ? "◉" : "○"} </Text>
+				<Text bold={focused} dimColor={!probe.installed}>
+					{probe.display}
+				</Text>
+				<Text color={badgeColor}> {badge}</Text>
+			</Text>
+			{focused && !probe.installed && (
+				<Text dimColor>
+					{"    "}`{probe.bin}` is not on your PATH — you can still enable it and
+					install the CLI later.
+				</Text>
+			)}
+		</Box>
+	);
+}
 
 function ServiceCheckbox({
 	label,

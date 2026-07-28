@@ -1725,6 +1725,7 @@ export function createModalSystem({
     head.appendChild(title);
     const sub = el('div', 'modal-row-detail',
       'ImmorTerm writes hooks into this project for every tool you pick, so their sessions feed into memory. ' +
+      'Un-ticking one removes the files it owns again — your own hooks, MCP servers and settings are left alone. ' +
       'Detected = CLI is on PATH. Configured = signed in. ' +
       'Needs trust = the tool asks you to approve its hooks the first time it starts here.');
     sub.style.cssText = 'font-size:12px;color:#a6adc8;line-height:1.4;';

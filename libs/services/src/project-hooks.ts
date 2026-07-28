@@ -13,10 +13,13 @@
 
 import * as path from "node:path";
 import {
+	defaultProjectConfig,
 	defaultVendorsConfig,
 	ensureProjectIdentity,
 	readProjectConfig,
+	writeProjectConfig,
 } from "@immorterm/config";
+import type { VendorId, VendorsConfig } from "@immorterm/config";
 import { getMemoryPort } from "./memory.js";
 import { installMemoryHooks, resolveVendors } from "./hook-installer.js";
 
@@ -37,6 +40,31 @@ export interface InstallProjectHooksResult {
  * @param resourceRoots Candidate dirs containing `hooks/digest-llm-invoke.sh`
  *   and `hooks/immorterm-notify.mjs` (see HookInstallDeps.resourceRoots).
  */
+/**
+ * Persist an explicit vendor selection for `projectRoot`.
+ *
+ * Sets `services.vendorsChosen` so `resolveVendors` honours the map verbatim —
+ * without it an all-enabled selection is indistinguishable from the legacy
+ * auto-written opt-out default and silently collapses back to Claude-only.
+ *
+ * Call BEFORE `installProjectHooks`, which reads the selection back out.
+ */
+export function setProjectVendors(
+	projectRoot: string,
+	enabled: readonly VendorId[],
+): VendorsConfig {
+	const { id: projectId } = ensureProjectIdentity(projectRoot);
+	const config = readProjectConfig(projectRoot) ?? defaultProjectConfig(projectId);
+	const vendors = defaultVendorsConfig();
+	for (const key of Object.keys(vendors) as VendorId[]) {
+		vendors[key] = { enabled: enabled.includes(key) };
+	}
+	config.services.vendors = vendors;
+	config.services.vendorsChosen = true;
+	writeProjectConfig(projectRoot, config);
+	return vendors;
+}
+
 export function installProjectHooks(
 	projectRoot: string,
 	opts?: { resourceRoots?: string[] },

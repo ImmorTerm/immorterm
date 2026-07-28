@@ -32,8 +32,12 @@ CANNED
 DIGEST_MOCK_CLAUDE
   chmod +x "$MOCK_BIN_DIR/claude"
 
+  # Copy the WHOLE hooks dir, not just the digest script: it sources siblings
+  # (lib/digest-llm-invoke.sh, _immorterm-env.sh, lib/ensure-*.sh) that it did
+  # not have when this test was written. A lone copy exits 127 on the first
+  # call to a function those files were meant to define.
   TEST_BIN_DIR="$(mktemp -d)"
-  cp "$HOOKS_DIR/immorterm-memory-digest.sh" "$TEST_BIN_DIR/immorterm-memory-digest.sh"
+  cp -R "$HOOKS_DIR/." "$TEST_BIN_DIR/"
   export TEST_BIN_DIR
 
   # Create JSONL directory with a sample transcript

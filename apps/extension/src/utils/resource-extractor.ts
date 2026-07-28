@@ -12,6 +12,7 @@ import {
   getRenamesDir as getRenamesDirFromConfig,
   getGlobalScriptPath,
   getProjectScreenrcPath,
+  isVendorEnabled,
 } from './immorterm-config';
 import { getScrollbackBuffer } from './settings';
 
@@ -201,10 +202,15 @@ export function extractResources(
   // live as real files in resources/skills/ (editable with syntax highlight)
   // rather than as TS template literals in hook-installer.ts. Any directory
   // under resources/skills/ containing a SKILL.md gets deployed.
+  //
+  // Skipped when the user has un-ticked Claude Code for this project, so a
+  // Codex-only workspace never grows a `.claude/` it will not read. Removal of
+  // an already-deployed skill is handled by removeClaudeCodeConfig in the
+  // hook installer, which runs on the same vendor-selection change.
   const skillsSrc = path.join(resourcesPath, 'skills');
   const skillsDst = path.join(workspacePath, '.claude', 'skills');
   try {
-    if (fs.existsSync(skillsSrc)) {
+    if (fs.existsSync(skillsSrc) && isVendorEnabled(workspacePath, 'claudeCode')) {
       for (const skillName of fs.readdirSync(skillsSrc)) {
         const skillSrcDir = path.join(skillsSrc, skillName);
         if (!fs.statSync(skillSrcDir).isDirectory()) continue;

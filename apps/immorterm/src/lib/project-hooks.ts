@@ -6,6 +6,7 @@
  * CLI's static resource locations and prints what was installed.
  */
 
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import consola from "consola";
@@ -41,7 +42,11 @@ export function ensureProjectMemoryHooks(projectRoot: string): boolean {
 		if (res.ok) {
 			consola.success(`Memory hooks installed for this project ${pc.dim(`(${res.projectId})`)}`);
 			consola.info(`  Hooks:    ${pc.dim(res.hooksDir)}`);
-			consola.info(`  Settings: ${pc.dim(res.settingsPath)} ${pc.dim("(Claude Code hooks + MCP server)")}`);
+			// Only mention Claude's settings file when Claude Code is actually
+			// enabled — a Codex-only project has no .claude/ at all now.
+			if (fs.existsSync(res.settingsPath)) {
+				consola.info(`  Settings: ${pc.dim(res.settingsPath)} ${pc.dim("(Claude Code hooks + MCP server)")}`);
+			}
 			return true;
 		}
 		consola.warn(`Memory hook install failed. Retry with: ${pc.cyan("immorterm memory install")}`);

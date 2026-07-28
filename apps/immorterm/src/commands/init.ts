@@ -8,8 +8,9 @@
  * Walks through:
  * 1. Theme selection
  * 2. Service selection (memory, gateway)
- * 3. License key entry (optional)
- * 4. Write global config
+ * 3. AI tool (vendor) selection — per-project, pre-ticked from what's installed
+ * 4. License key entry (optional)
+ * 5. Write global config
  */
 
 import { defineCommand } from "citty";
@@ -20,7 +21,15 @@ import {
 	readGlobalConfig,
 	writeGlobalConfig,
 } from "@immorterm/config";
-import { autoInstallExtension, findBinary, installMemoryBinary } from "@immorterm/services";
+import type { VendorId } from "@immorterm/config";
+import {
+	autoInstallExtension,
+	detectVendors,
+	detectedVendorIds,
+	findBinary,
+	installMemoryBinary,
+	setProjectVendors,
+} from "@immorterm/services";
 import { activateLicense } from "@immorterm/license";
 import { identify, track } from "@immorterm/analytics";
 import { ensureProjectMemoryHooks } from "../lib/project-hooks.js";
@@ -33,28 +42,52 @@ interface InitFlags {
 	gateway?: boolean;
 	theme?: string;
 	licenseKey?: string;
+	/** Comma-separated vendor ids. Omitted = whatever is detected on this machine. */
+	vendors?: string;
 }
 
-/** Run the ink-based rich TUI wizard */
-async function runInkWizard(): Promise<void> {
+/**
+ * Vendor selection for a non-interactive run: the explicit flag if given,
+ * otherwise whatever is installed AND has been used. A fresh machine with no
+ * AI CLI at all still gets Claude Code, matching the shipped default.
+ */
+function resolveVendorFlag(flag: string | undefined): VendorId[] {
+	if (flag !== undefined) {
+		const known = new Set(detectVendors().map((p) => p.id as string));
+		const asked = flag.split(",").map((s) => s.trim()).filter(Boolean);
+		const unknown = asked.filter((v) => !known.has(v));
+		if (unknown.length > 0) {
+			consola.warn(`Unknown vendor id(s) ignored: ${unknown.join(", ")}`);
+		}
+		return asked.filter((v) => known.has(v)) as VendorId[];
+	}
+	const detected = detectedVendorIds();
+	return detected.length > 0 ? detected : ["claudeCode"];
+}
+
+/** Run the ink-based rich TUI wizard. Resolves with the vendor selection. */
+async function runInkWizard(): Promise<VendorId[] | null> {
 	const React = await import("react");
 	const { render } = await import("ink");
 	const { SetupWizard } = await import("../ui/SetupWizard.js");
 
-	return new Promise<void>((resolve) => {
+	return new Promise<VendorId[] | null>((resolve) => {
+		let picked: VendorId[] | null = null;
 		const { waitUntilExit } = render(
 			React.createElement(SetupWizard, {
-				onComplete: () => {
-					resolve();
+				onComplete: (result: { vendors: VendorId[] }) => {
+					picked = result.vendors;
+					resolve(picked);
 				},
 			}),
 		);
-		waitUntilExit().then(() => resolve());
+		// Quitting mid-wizard (q / ctrl-c) resolves null — leave vendors untouched.
+		waitUntilExit().then(() => resolve(picked));
 	});
 }
 
 /** Fallback consola-prompt wizard for non-interactive terminals */
-async function runConsolaWizard(): Promise<void> {
+async function runConsolaWizard(): Promise<VendorId[] | null> {
 	consola.box("ImmorTerm Setup");
 	consola.info("");
 
@@ -101,7 +134,34 @@ async function runConsolaWizard(): Promise<void> {
 		initial: false,
 	});
 
-	// Step 3: License key
+	// Step 3: AI tools (per-project). Detected tools are pre-ticked so the
+	// common case is a single enter.
+	consola.info("");
+	consola.info(pc.bold("Which AI tools should ImmorTerm hook into?"));
+	consola.info(`  ${pc.dim("Applies to this project. Enabling a tool writes its hook config into the project root.")}`);
+	const probes = detectVendors();
+	const detected = detectedVendorIds(probes);
+	const initialVendors = detected.length > 0 ? detected : (["claudeCode"] as VendorId[]);
+	const vendorChoice = await consola.prompt("AI tools:", {
+		type: "multiselect",
+		required: false,
+		options: [...probes]
+			.sort((a, b) => Number(b.configured) - Number(a.configured) || Number(b.installed) - Number(a.installed))
+			.map((p) => ({
+				value: p.id,
+				label: `${p.display}${p.configured ? " ✓ detected" : p.installed ? " (installed)" : ""}`,
+			})),
+		initial: initialVendors as unknown as string[],
+	});
+	// consola's multiselect resolves to the selected values, though its type
+	// says option objects — normalize both shapes.
+	const selectedVendors: VendorId[] = Array.isArray(vendorChoice)
+		? (vendorChoice as unknown[]).map((v) =>
+				(typeof v === "string" ? v : (v as { value: string }).value) as VendorId,
+			)
+		: initialVendors;
+
+	// Step 4: License key
 	consola.info("");
 	const hasLicense = await consola.prompt("Do you have a license key?", {
 		type: "confirm",
@@ -123,7 +183,7 @@ async function runConsolaWizard(): Promise<void> {
 		}
 	}
 
-	// Step 4: Write config
+	// Step 5: Write config
 	ensureGlobalConfig();
 	const config = readGlobalConfig();
 
@@ -163,15 +223,26 @@ async function runConsolaWizard(): Promise<void> {
 	consola.info(`  Memory: ${enableMemory ? pc.green("enabled") : pc.dim("disabled")}`);
 	consola.info(`  Gateway: ${enableGateway ? pc.green("enabled") : pc.dim("disabled")}`);
 	consola.info(`  License: ${licenseResult?.success ? pc.green("Pro") : pc.dim("Free")}`);
+	consola.info(`  AI tools: ${formatVendorList(selectedVendors)}`);
 	consola.info("");
 	consola.info(`Next: ${pc.cyan("immorterm start")} to start services`);
+
+	return selectedVendors;
+}
+
+/** Human-readable vendor list for the init summary. */
+function formatVendorList(vendors: readonly VendorId[]): string {
+	if (vendors.length === 0) return pc.dim("none");
+	const byId = new Map(detectVendors().map((p) => [p.id, p.display]));
+	return pc.green(vendors.map((v) => byId.get(v) ?? v).join(", "));
 }
 
 /** Non-interactive init — no prompts, write defaults + flags directly */
-async function runNonInteractive(flags: InitFlags): Promise<void> {
+async function runNonInteractive(flags: InitFlags): Promise<VendorId[]> {
 	const enableMemory = flags.memory ?? true;
 	const enableGateway = flags.gateway ?? false;
 	const theme = flags.theme ?? DEFAULT_THEME;
+	const vendors = resolveVendorFlag(flags.vendors);
 
 	ensureGlobalConfig();
 	const config = readGlobalConfig();
@@ -214,6 +285,9 @@ async function runNonInteractive(flags: InitFlags): Promise<void> {
 	consola.info(`  Memory: ${enableMemory ? pc.green("enabled") : pc.dim("disabled")}`);
 	consola.info(`  Gateway: ${enableGateway ? pc.green("enabled") : pc.dim("disabled")}`);
 	consola.info(`  License: ${licenseActivated ? pc.green("Pro") : pc.dim("Free")}`);
+	consola.info(`  AI tools: ${formatVendorList(vendors)}`);
+
+	return vendors;
 }
 
 /** Install the VS Code extension for all init paths — non-fatal, always printed */
@@ -262,11 +336,24 @@ async function offerMemoryBinaryInstall(interactive: boolean): Promise<void> {
 }
 
 /** If memory ended up enabled, install hooks into the current project.
- *  Without this, CLI-only users get a memory service that captures nothing. */
-function installHooksForCurrentProject(): void {
+ *  Without this, CLI-only users get a memory service that captures nothing.
+ *
+ *  `vendors` is the wizard's per-project selection; it must be persisted BEFORE
+ *  the install so the installer reads it back and writes exactly those vendors'
+ *  config files. Null = the user quit the wizard; leave any existing selection
+ *  alone. */
+function installHooksForCurrentProject(vendors: VendorId[] | null): void {
 	const config = readGlobalConfig();
 	if (!config.defaults.services.memory.enabled) return;
-	ensureProjectMemoryHooks(process.cwd());
+	const cwd = process.cwd();
+	if (vendors) {
+		try {
+			setProjectVendors(cwd, vendors);
+		} catch (e: any) {
+			consola.warn(`Could not save AI tool selection: ${e.message}`);
+		}
+	}
+	ensureProjectMemoryHooks(cwd);
 }
 
 /** Entry point — picks ink wizard, consola fallback, or non-interactive path */
@@ -274,22 +361,23 @@ export async function runInit(flags: InitFlags = {}): Promise<void> {
 	const isTTY = process.stdin.isTTY && process.stdout.isTTY;
 	const nonInteractive = !isTTY || flags.yes === true;
 
+	let vendors: VendorId[] | null = null;
 	if (nonInteractive) {
 		// Piped/non-TTY stdin can't answer prompts — never enter a wizard
-		await runNonInteractive(flags);
+		vendors = await runNonInteractive(flags);
 	} else {
 		try {
-			await runInkWizard();
+			vendors = await runInkWizard();
 		} catch {
 			// Ink failed (missing deps, raw mode issue) — fallback
-			await runConsolaWizard();
+			vendors = await runConsolaWizard();
 		}
 	}
 
 	// Post-wizard steps for ALL paths — non-fatal
 	await tryInstallExtension();
 	await offerMemoryBinaryInstall(!nonInteractive);
-	installHooksForCurrentProject();
+	installHooksForCurrentProject(vendors);
 }
 
 export const initCommand = defineCommand({
@@ -320,6 +408,11 @@ export const initCommand = defineCommand({
 			type: "string",
 			description: "License key to activate (non-interactive)",
 		},
+		vendors: {
+			type: "string",
+			description:
+				"Comma-separated AI tools to hook into, e.g. --vendors=codex,claudeCode (non-interactive, default: auto-detected)",
+		},
 	},
 	async run({ args }) {
 		await runInit({
@@ -328,6 +421,7 @@ export const initCommand = defineCommand({
 			gateway: typeof args.gateway === "boolean" ? args.gateway : undefined,
 			theme: typeof args.theme === "string" ? args.theme : undefined,
 			licenseKey: typeof args.licenseKey === "string" ? args.licenseKey : undefined,
+			vendors: typeof args.vendors === "string" ? args.vendors : undefined,
 		});
 	},
 });

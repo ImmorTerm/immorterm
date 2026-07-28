@@ -362,6 +362,15 @@ const ENV_HELPER_FILE = '_immorterm-env.sh';
 const RECALL_COMMAND_FILE = 'immorterm/recall.md';
 const ASK_COMMAND_FILE = 'immorterm/ask.md';
 
+/** Pre-subdir command files, written straight into .claude/commands/. Cleanup only. */
+const LEGACY_ROOT_COMMAND_FILES = [
+  'recall.md',
+  'ask.md',
+  'digest-book.md',
+  'create-expert.md',
+  'add-source.md',
+];
+
 /** Marker comments for the git post-commit trampoline */
 const GIT_HOOK_BEGIN_MARKER = '# BEGIN IMMORTERM post-commit v1';
 const GIT_HOOK_END_MARKER = '# END IMMORTERM post-commit';
@@ -7752,9 +7761,111 @@ function writeVendorConfigs(projectPath: string, vendors: VendorsConfig): string
   }
 
   // ── Gemini: no config file (polling only) ─────────────────
-  // Claude Code: handled separately via `.claude/settings.local.json` write above.
+  // Claude Code: its enabled-branch is `.claude/settings.local.json` + the
+  // slash commands, written inline in installMemoryHooks (it needs projectId
+  // and the memory port). Only the disabled branch belongs here, so that
+  // un-ticking Claude Code cleans the project the same way un-ticking any
+  // other vendor does.
+  if (!vendors.claudeCode?.enabled) {
+    removeClaudeCodeConfig(projectPath);
+  }
 
   return written;
+}
+
+/**
+ * Strip ImmorTerm's Claude Code integration from a project: our hook entries
+ * and the `immorterm-memory` MCP server out of `.claude/settings.local.json`,
+ * plus the `/immorterm:*` slash commands.
+ *
+ * Never deletes hooks or MCP servers the user added themselves — entries are
+ * matched on an `immorterm` substring in the command. Leaves `.claude/` itself
+ * alone; Claude Code owns that directory, we were only a guest in two files.
+ */
+export function removeClaudeCodeConfig(projectPath: string): void {
+  const settingsPath = path.join(projectPath, '.claude', 'settings.local.json');
+  if (fs.existsSync(settingsPath)) {
+    try {
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+
+      if (settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)) {
+        for (const eventKey of Object.keys(settings.hooks)) {
+          const eventHooks = settings.hooks[eventKey];
+          if (Array.isArray(eventHooks)) {
+            settings.hooks[eventKey] = eventHooks.filter(
+              (hookGroup: Record<string, unknown>) => {
+                if (Array.isArray(hookGroup.hooks)) {
+                  return !(hookGroup.hooks as Array<{ command?: string }>).some(
+                    (h) => h.command?.includes('immorterm')
+                  );
+                }
+                return true;
+              }
+            );
+            if (settings.hooks[eventKey].length === 0) {
+              delete settings.hooks[eventKey];
+            }
+          }
+        }
+        if (Object.keys(settings.hooks).length === 0) {
+          delete settings.hooks;
+        }
+      }
+
+      if (settings.mcpServers && settings.mcpServers['immorterm-memory']) {
+        delete settings.mcpServers['immorterm-memory'];
+        if (Object.keys(settings.mcpServers).length === 0) {
+          delete settings.mcpServers;
+        }
+      }
+
+      // Nothing of the user's left → the file was ours; drop it.
+      if (Object.keys(settings).length === 0) {
+        fs.unlinkSync(settingsPath);
+      } else {
+        fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+      }
+    } catch {
+      // Parse error — leave it alone rather than clobber a hand-edited file.
+    }
+  }
+
+  // Slash commands: the immorterm/ subdir plus the pre-subdir legacy files.
+  const commandsDir = path.join(projectPath, '.claude', 'commands');
+  const immortermCommandsDir = path.join(commandsDir, 'immorterm');
+  if (fs.existsSync(immortermCommandsDir)) {
+    fs.rmSync(immortermCommandsDir, { recursive: true, force: true });
+  }
+  for (const legacyCmd of LEGACY_ROOT_COMMAND_FILES) {
+    const cmdPath = path.join(commandsDir, legacyCmd);
+    if (fs.existsSync(cmdPath)) {
+      fs.unlinkSync(cmdPath);
+    }
+  }
+  pruneIfEmpty(commandsDir);
+
+  // Skills (deployed as static files by the extension's resource-extractor).
+  const skillsDir = path.join(projectPath, '.claude', 'skills');
+  const createPrSkillDir = path.join(skillsDir, 'create-pr');
+  if (fs.existsSync(createPrSkillDir)) {
+    fs.rmSync(createPrSkillDir, { recursive: true, force: true });
+  }
+  pruneIfEmpty(skillsDir);
+
+  // `.claude/` itself is left behind on purpose when the user still has other
+  // Claude Code state in it; an empty one is ours to clean.
+  pruneIfEmpty(path.join(projectPath, '.claude'));
+}
+
+/** rmdir a directory only if it exists and is empty. Never throws. */
+function pruneIfEmpty(dir: string): void {
+  try {
+    if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) {
+      fs.rmdirSync(dir);
+    }
+  } catch {
+    // non-empty, racing, or unreadable — leave it
+  }
 }
 
 /**
@@ -7893,19 +8004,27 @@ export function installMemoryHooks(
       console.error(`[memory] Failed to deploy ${NOTIFY_WRAPPER_FILE}:`, err);
     }
 
+    // Everything from here to writeAllVendorConfigs writes into `.claude/` —
+    // Claude Code's own directory. Skip it when the vendor is un-ticked, or a
+    // Codex-only project sprouts a .claude/ it will never use. Absent key =
+    // enabled, matching defaultVendorsConfig and pre-vendor-map callers.
+    const claudeEnabled = deps.vendors.claudeCode?.enabled !== false;
+
     // Install commands to .claude/commands/immorterm/
     const commandsDir = path.join(projectPath, '.claude', 'commands');
     const immortermCommandsDir = path.join(commandsDir, 'immorterm');
-    if (!fs.existsSync(immortermCommandsDir)) {
-      fs.mkdirSync(immortermCommandsDir, { recursive: true });
-    }
-    const commandFiles: Array<{ name: string; generator: () => string }> = [
-      { name: RECALL_COMMAND_FILE, generator: generateRecallCommand },
-      { name: ASK_COMMAND_FILE, generator: generateAskCommand },
-    ];
-    for (const { name, generator } of commandFiles) {
-      const cmdPath = path.join(commandsDir, name);
-      fs.writeFileSync(cmdPath, generator());
+    if (claudeEnabled) {
+      if (!fs.existsSync(immortermCommandsDir)) {
+        fs.mkdirSync(immortermCommandsDir, { recursive: true });
+      }
+      const commandFiles: Array<{ name: string; generator: () => string }> = [
+        { name: RECALL_COMMAND_FILE, generator: generateRecallCommand },
+        { name: ASK_COMMAND_FILE, generator: generateAskCommand },
+      ];
+      for (const { name, generator } of commandFiles) {
+        const cmdPath = path.join(commandsDir, name);
+        fs.writeFileSync(cmdPath, generator());
+      }
     }
 
     // Skills are deployed by resource-extractor.ts from
@@ -7921,94 +8040,98 @@ export function installMemoryHooks(
     }
 
     // Remove legacy command files (moved to commands/immorterm/)
-    for (const legacyCmd of ['recall.md', 'ask.md', 'digest-book.md', 'create-expert.md', 'add-source.md']) {
-      const legacyCmdPath = path.join(commandsDir, legacyCmd);
-      if (fs.existsSync(legacyCmdPath)) {
-        fs.unlinkSync(legacyCmdPath);
+    if (claudeEnabled) {
+      for (const legacyCmd of LEGACY_ROOT_COMMAND_FILES) {
+        const legacyCmdPath = path.join(commandsDir, legacyCmd);
+        if (fs.existsSync(legacyCmdPath)) {
+          fs.unlinkSync(legacyCmdPath);
+        }
       }
     }
 
     // Write hooks to settings.local.json (the correct location for Claude Code hooks)
     // Claude Code reads hooks from settings files, NOT from a standalone hooks.json
-    const settingsPath = path.join(projectPath, '.claude', 'settings.local.json');
-    const ourHooksConfig = generateHooksConfig(projectPath) as {
-      hooks: Record<string, unknown[]>;
-    };
+    if (claudeEnabled) {
+      const settingsPath = path.join(projectPath, '.claude', 'settings.local.json');
+      const ourHooksConfig = generateHooksConfig(projectPath) as {
+        hooks: Record<string, unknown[]>;
+      };
 
-    // Load existing settings.local.json or start fresh
-    let settings: Record<string, unknown> = {};
-    if (fs.existsSync(settingsPath)) {
-      try {
-        settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-      } catch {
-        // Parse error — start fresh but preserve the file by not overwriting non-JSON content
-        settings = {};
-      }
-    }
-
-    // Get or create the hooks section in settings
-    let existingHooks: Record<string, unknown[]> = {};
-    if (settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)) {
-      existingHooks = settings.hooks as Record<string, unknown[]>;
-    }
-
-    // Remove all existing immorterm hooks from every event type
-    for (const eventKey of Object.keys(existingHooks)) {
-      const eventHooks = existingHooks[eventKey];
-      if (Array.isArray(eventHooks)) {
-        existingHooks[eventKey] = eventHooks.filter(
-          (hookGroup: unknown) => {
-            const group = hookGroup as Record<string, unknown>;
-            // Check nested hooks array for immorterm commands
-            if (Array.isArray(group.hooks)) {
-              return !(group.hooks as Array<{ command?: string }>).some(
-                (h) => h.command?.includes('immorterm')
-              );
-            }
-            return true;
-          }
-        );
-      }
-    }
-
-    // Add our hooks for each event type
-    for (const [eventKey, eventHooks] of Object.entries(ourHooksConfig.hooks)) {
-      const existing = existingHooks[eventKey] || [];
-      existingHooks[eventKey] = [...existing, ...eventHooks];
-    }
-
-    // Clean up empty event arrays
-    for (const eventKey of Object.keys(existingHooks)) {
-      if (Array.isArray(existingHooks[eventKey]) && existingHooks[eventKey].length === 0) {
-        delete existingHooks[eventKey];
-      }
-    }
-
-    // Write back to settings.local.json with hooks merged in
-    settings.hooks = existingHooks;
-
-    // Add project-scoped MCP server config for memory isolation
-    // Each project gets its own user_id in the URL path, so memories are isolated per-project
-    const mcpServers = (settings.mcpServers || {}) as Record<string, unknown>;
-    mcpServers['immorterm-memory'] = {
-      type: 'http',
-      url: `http://127.0.0.1:${deps.memoryPort}/mcp/claude-code/${projectId}`,
-    };
-    settings.mcpServers = mcpServers;
-
-    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
-
-    // Clean up legacy hooks.json if it exists (no longer used)
-    const legacyHooksJson = path.join(projectPath, '.claude', 'hooks.json');
-    if (fs.existsSync(legacyHooksJson)) {
-      try {
-        const legacyContent = JSON.parse(fs.readFileSync(legacyHooksJson, 'utf8'));
-        // Only remove if it only contains hooks (our file) — don't delete if it has other content
-        if (legacyContent.hooks && Object.keys(legacyContent).length === 1) {
-          fs.unlinkSync(legacyHooksJson);
+      // Load existing settings.local.json or start fresh
+      let settings: Record<string, unknown> = {};
+      if (fs.existsSync(settingsPath)) {
+        try {
+          settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+        } catch {
+          // Parse error — start fresh but preserve the file by not overwriting non-JSON content
+          settings = {};
         }
-      } catch {
-        // If we can't parse it, leave it alone
+      }
+
+      // Get or create the hooks section in settings
+      let existingHooks: Record<string, unknown[]> = {};
+      if (settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)) {
+        existingHooks = settings.hooks as Record<string, unknown[]>;
+      }
+
+      // Remove all existing immorterm hooks from every event type
+      for (const eventKey of Object.keys(existingHooks)) {
+        const eventHooks = existingHooks[eventKey];
+        if (Array.isArray(eventHooks)) {
+          existingHooks[eventKey] = eventHooks.filter(
+            (hookGroup: unknown) => {
+              const group = hookGroup as Record<string, unknown>;
+              // Check nested hooks array for immorterm commands
+              if (Array.isArray(group.hooks)) {
+                return !(group.hooks as Array<{ command?: string }>).some(
+                  (h) => h.command?.includes('immorterm')
+                );
+              }
+              return true;
+            }
+          );
+        }
+      }
+
+      // Add our hooks for each event type
+      for (const [eventKey, eventHooks] of Object.entries(ourHooksConfig.hooks)) {
+        const existing = existingHooks[eventKey] || [];
+        existingHooks[eventKey] = [...existing, ...eventHooks];
+      }
+
+      // Clean up empty event arrays
+      for (const eventKey of Object.keys(existingHooks)) {
+        if (Array.isArray(existingHooks[eventKey]) && existingHooks[eventKey].length === 0) {
+          delete existingHooks[eventKey];
+        }
+      }
+
+      // Write back to settings.local.json with hooks merged in
+      settings.hooks = existingHooks;
+
+      // Add project-scoped MCP server config for memory isolation
+      // Each project gets its own user_id in the URL path, so memories are isolated per-project
+      const mcpServers = (settings.mcpServers || {}) as Record<string, unknown>;
+      mcpServers['immorterm-memory'] = {
+        type: 'http',
+        url: `http://127.0.0.1:${deps.memoryPort}/mcp/claude-code/${projectId}`,
+      };
+      settings.mcpServers = mcpServers;
+
+      fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+
+      // Clean up legacy hooks.json if it exists (no longer used)
+      const legacyHooksJson = path.join(projectPath, '.claude', 'hooks.json');
+      if (fs.existsSync(legacyHooksJson)) {
+        try {
+          const legacyContent = JSON.parse(fs.readFileSync(legacyHooksJson, 'utf8'));
+          // Only remove if it only contains hooks (our file) — don't delete if it has other content
+          if (legacyContent.hooks && Object.keys(legacyContent).length === 1) {
+            fs.unlinkSync(legacyHooksJson);
+          }
+        } catch {
+          // If we can't parse it, leave it alone
+        }
       }
     }
 
@@ -8169,103 +8292,14 @@ export function removeMemoryHooks(projectPath: string): boolean {
       }
     }
 
-    // Clean up settings.local.json — remove immorterm hooks and MCP server
-    const settingsPath = path.join(projectPath, '.claude', 'settings.local.json');
-    if (fs.existsSync(settingsPath)) {
-      try {
-        const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-
-        // Remove immorterm hooks from settings.hooks
-        if (settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)) {
-          for (const eventKey of Object.keys(settings.hooks)) {
-            const eventHooks = settings.hooks[eventKey];
-            if (Array.isArray(eventHooks)) {
-              settings.hooks[eventKey] = eventHooks.filter(
-                (hookGroup: Record<string, unknown>) => {
-                  if (Array.isArray(hookGroup.hooks)) {
-                    return !(hookGroup.hooks as Array<{ command?: string }>).some(
-                      (h) => h.command?.includes('immorterm')
-                    );
-                  }
-                  return true;
-                }
-              );
-              if (settings.hooks[eventKey].length === 0) {
-                delete settings.hooks[eventKey];
-              }
-            }
-          }
-          if (Object.keys(settings.hooks).length === 0) {
-            delete settings.hooks;
-          }
-        }
-
-        // Remove immorterm-memory MCP server config
-        if (settings.mcpServers && settings.mcpServers['immorterm-memory']) {
-          delete settings.mcpServers['immorterm-memory'];
-          if (Object.keys(settings.mcpServers).length === 0) {
-            delete settings.mcpServers;
-          }
-        }
-
-        // Write back or delete if empty
-        const remainingKeys = Object.keys(settings).filter(k => k !== 'permissions' || Object.keys(settings.permissions || {}).length > 0);
-        if (Object.keys(settings).length === 0) {
-          fs.unlinkSync(settingsPath);
-        } else {
-          fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
-        }
-      } catch {
-        // Parse error — leave it alone
-      }
-    }
-
-    // Remove .claude/commands/immorterm/ directory
-    const immortermCommandsDir = path.join(projectPath, '.claude', 'commands', 'immorterm');
-    if (fs.existsSync(immortermCommandsDir)) {
-      fs.rmSync(immortermCommandsDir, { recursive: true, force: true });
-    }
-    // Also remove legacy command files at .claude/commands/ root
-    const commandsDir = path.join(projectPath, '.claude', 'commands');
-    for (const legacyCmd of ['recall.md', 'ask.md', 'digest-book.md', 'create-expert.md', 'add-source.md']) {
-      const cmdPath = path.join(commandsDir, legacyCmd);
-      if (fs.existsSync(cmdPath)) {
-        fs.unlinkSync(cmdPath);
-      }
-    }
+    // settings.local.json, slash commands and skills — shared with the
+    // "un-tick Claude Code in the vendor picker" path.
+    removeClaudeCodeConfig(projectPath);
 
     // Remove git post-commit trampoline from all possible locations
     removeGitPostCommitTrampoline(projectPath);
 
-    // Remove hooks directory if empty
-    if (fs.existsSync(hooksDir)) {
-      const remaining = fs.readdirSync(hooksDir);
-      if (remaining.length === 0) {
-        fs.rmdirSync(hooksDir);
-      }
-    }
-
-    // Remove .claude/commands/ directory if empty
-    if (fs.existsSync(commandsDir)) {
-      const remaining = fs.readdirSync(commandsDir);
-      if (remaining.length === 0) {
-        fs.rmdirSync(commandsDir);
-      }
-    }
-
-    // Remove ImmorTerm skills
-    const skillsDir = path.join(projectPath, '.claude', 'skills');
-    const createPrSkillDir = path.join(skillsDir, 'create-pr');
-    if (fs.existsSync(createPrSkillDir)) {
-      fs.rmSync(createPrSkillDir, { recursive: true, force: true });
-    }
-    // Remove .claude/skills/ directory if empty
-    if (fs.existsSync(skillsDir)) {
-      const remaining = fs.readdirSync(skillsDir);
-      if (remaining.length === 0) {
-        fs.rmdirSync(skillsDir);
-      }
-    }
+    pruneIfEmpty(hooksDir);
 
     return true;
   } catch (error) {

@@ -33,6 +33,12 @@ vi.mock("@immorterm/config", () => ({
 vi.mock("@immorterm/services", () => ({
 	findBinary: vi.fn(() => null),
 	checkMemoryHealth: vi.fn(async () => false),
+	// Vendor step: two probes, only Codex "detected" so it starts ticked.
+	detectVendors: vi.fn(() => [
+		{ id: "claudeCode", display: "Claude Code", bin: "claude", installed: false, configured: false },
+		{ id: "codex", display: "OpenAI Codex", bin: "codex", installed: true, configured: true },
+	]),
+	detectedVendorIds: vi.fn(() => ["codex"]),
 }));
 
 vi.mock("@immorterm/license", () => ({

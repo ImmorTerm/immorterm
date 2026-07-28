@@ -312,4 +312,44 @@ describe('Phase A T2 — vendor-router (writeAllVendorConfigs)', () => {
     // SessionEnd is hard-clamped to 3s by Codex; asking for more just warns.
     expect(cfg.hooks.SessionEnd[0].hooks[0].timeout).toBe(3);
   });
+
+  it('un-ticking Claude Code strips our .claude/ entries but keeps the user\'s', () => {
+    // Simulate an already-installed Claude integration sitting alongside the
+    // user's own hook, MCP server and permissions.
+    const claudeDir = path.join(tmp, '.claude');
+    mkdirSync(path.join(claudeDir, 'commands', 'immorterm'), { recursive: true });
+    mkdirSync(path.join(claudeDir, 'skills', 'create-pr'), { recursive: true });
+    fs.writeFileSync(path.join(claudeDir, 'commands', 'immorterm', 'recall.md'), '# recall');
+    fs.writeFileSync(path.join(claudeDir, 'skills', 'create-pr', 'SKILL.md'), '# skill');
+    fs.writeFileSync(
+      path.join(claudeDir, 'settings.local.json'),
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            { matcher: 'Bash', hooks: [{ type: 'command', command: 'bash .immorterm/hooks/immorterm-x.sh' }] },
+            { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo mine' }] },
+          ],
+        },
+        mcpServers: { 'immorterm-memory': { type: 'http' }, mine: { type: 'stdio' } },
+        permissions: { allow: ['Bash(ls:*)'] },
+      })
+    );
+
+    seedConfig({ claudeCode: { enabled: false } });
+    writeAllVendorConfigs(tmp);
+
+    const settings = JSON.parse(
+      fs.readFileSync(path.join(claudeDir, 'settings.local.json'), 'utf8')
+    );
+    // Ours gone, theirs untouched.
+    expect(JSON.stringify(settings)).not.toContain('immorterm');
+    expect(settings.hooks.PreToolUse).toHaveLength(1);
+    expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe('echo mine');
+    expect(settings.mcpServers).toEqual({ mine: { type: 'stdio' } });
+    expect(settings.permissions).toEqual({ allow: ['Bash(ls:*)'] });
+
+    // Slash commands and skills we deployed are removed.
+    expect(fs.existsSync(path.join(claudeDir, 'commands'))).toBe(false);
+    expect(fs.existsSync(path.join(claudeDir, 'skills'))).toBe(false);
+  });
 });

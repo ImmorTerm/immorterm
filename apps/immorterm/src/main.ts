@@ -28,6 +28,7 @@ import { logsCommand } from "./commands/logs.js";
 import { memoryCommand } from "./commands/memory.js";
 import { hooksCommand } from "./commands/hooks.js";
 import { insightsCommand } from "./commands/insights.js";
+import { vendorsCommand } from "./commands/vendors.js";
 
 const main = defineCommand({
 	meta: {
@@ -53,6 +54,7 @@ const main = defineCommand({
 		logs: logsCommand,
 		memory: memoryCommand,
 		hooks: hooksCommand,
+		vendors: vendorsCommand,
 		insights: insightsCommand,
 	},
 	async run({ rawArgs }) {
@@ -77,6 +79,7 @@ const main = defineCommand({
 			"logs",
 			"memory",
 			"hooks",
+			"vendors",
 			"insights",
 		];
 		if (rawArgs.some((arg: string) => subcommands.includes(arg))) {
