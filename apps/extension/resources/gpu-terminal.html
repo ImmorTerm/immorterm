@@ -13984,14 +13984,15 @@
         // [Image #N] hover preview actions. Resolves the cached file path
         // from the active session's Claude UUID + the link's `n` counter.
         const sessForImg = sessions.get(activeSessionName);
-        // Two places an `[Image #N]` can live: Claude's own Cmd+V cache, or
-        // ImmorTerm's paste dir (Cmd+Opt+V, any vendor — Codex renders the same
-        // pill). Prefer ours; it is where we know the bytes went.
+        // Two flows, two independent counters. Cmd+V: the agent reads the
+        // clipboard and Claude assigns N in its own cache. Cmd+Opt+V: we save
+        // the PNG and type its path. Claude's cache wins when it applies —
+        // preferring ours would resolve a Cmd+V pill to an unrelated file.
         const imgUuid = (isClaudeCode(sessForImg) && sessForImg.claudeRaw.session_id) || null;
         const imgWindowId = (sessForImg && sessForImg.windowId) || null;
-        const filePath = imgWindowId
-          ? '~/.immorterm/paste/' + imgWindowId + '/' + link.n + '.png'
-          : (imgUuid ? '~/.claude/image-cache/' + imgUuid + '/' + link.n + '.png' : null);
+        const filePath = imgUuid
+          ? '~/.claude/image-cache/' + imgUuid + '/' + link.n + '.png'
+          : (imgWindowId ? '~/.immorterm/paste/' + imgWindowId + '/' + link.n + '.png' : null);
         actionsRow.appendChild(mkBtn('Copy image', async (btn) => {
           // meta.imageDataUrl is either the hub URL (standalone) or a
           // webview-safe asWebviewUri (VS Code) — fetch + clipboard.write
@@ -15483,11 +15484,11 @@
                 const wid = (sess && sess.windowId) || null;
                 // Must mirror the resolution order used when the request was
                 // sent, or the reply never matches its cache key.
-                if (wid) {
-                  hoverKey = '~/.immorterm/paste/' + wid + '/'
-                    + linkHoverState.link.n + '.png|0';
-                } else if (uuid) {
+                if (uuid) {
                   hoverKey = '~/.claude/image-cache/' + uuid + '/'
+                    + linkHoverState.link.n + '.png|0';
+                } else if (wid) {
+                  hoverKey = '~/.immorterm/paste/' + wid + '/'
                     + linkHoverState.link.n + '.png|0';
                 }
               }

@@ -1582,11 +1582,17 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         };
         const cacheRoot = path.join(os.homedir(), '.claude', 'image-cache');
         const fname = String(n) + '.png';
-        // ImmorTerm's own Cmd+Opt+V writes ~/.immorterm/paste/<window_id>/<n>.png
-        // with the same 1-based numbering the `[Image #N]` pill uses. Check it
-        // first: we know we put the bytes there, whichever agent is running.
-        // Claude's image-cache below only ever holds Claude's own Cmd+V pastes,
-        // so for Codex (which renders the identical pill) this is the only hit.
+        // Two independent flows write an `[Image #N]`, and their counters are
+        // NOT the same counter:
+        //   Cmd+V     — the agent reads the clipboard itself. Claude writes
+        //               ~/.claude/image-cache/<uuid>/<n>.png and assigns N.
+        //   Cmd+Opt+V — ImmorTerm saves the PNG and types its path; the agent
+        //               attaches our file and assigns its own N.
+        // So Claude's cache must win whenever it has a hit: preferring our
+        // paste dir would resolve a Cmd+V `[Image #1]` to an unrelated older
+        // Cmd+Opt+V file from the same window. Our dir is the fallback, and for
+        // Codex — which renders the identical pill but has no cache we can read
+        // — it is the only hit.
         const pasteRoots = [
           windowId ? path.join(os.homedir(), '.immorterm', 'paste', windowId, fname) : null,
           path.join(os.homedir(), '.immorterm', 'paste', 'default', fname),
@@ -1598,10 +1604,10 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
           }
           this.view?.webview.postMessage({ type: 'claude-image-result', requestId, exists: !!imageDataUrl, imageDataUrl });
         };
-        const ownPaste = pasteRoots.find((c) => fs.existsSync(c));
-        if (ownPaste) { reply(ownPaste); break; }
         const preferred = uuid ? path.join(cacheRoot, uuid, fname) : null;
         if (preferred && fs.existsSync(preferred)) { reply(preferred); break; }
+        const ownPaste = pasteRoots.find((c) => fs.existsSync(c));
+        if (ownPaste) { reply(ownPaste); break; }
         fs.readdir(cacheRoot, { withFileTypes: true }, (err, dirents) => {
           if (err) { reply(); return; }
           let best: { p: string; m: number } | null = null;
