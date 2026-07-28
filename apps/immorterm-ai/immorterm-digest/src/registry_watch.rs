@@ -235,6 +235,14 @@ fn convention_transcript_path_for(tool: &str, project_dir: &str, session_id: &st
 
 /// Newest Codex rollout file whose name ends in `<session_id>.jsonl`.
 ///
+/// Codex also records the absolute path in `state_5.sqlite` (`threads.
+/// rollout_path`), which would be exact — but this is a fallback of a
+/// fallback (the SessionStart hook's session-link announce supplies the real
+/// path, and it wins above), so reading another product's private database,
+/// or hand-parsing it to avoid a driver dependency, buys very little for the
+/// fragility it adds. The walk is O(sessions) once per registration and has
+/// no schema to drift.
+///
 /// Codex date-shards its transcripts:
 ///   `~/.codex/sessions/YYYY/MM/DD/rollout-<ISO8601>-<uuid>.jsonl`
 /// so unlike Claude there is no single derivable path — the date prefix isn't
