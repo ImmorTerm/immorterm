@@ -942,9 +942,10 @@ except Exception: pass
 if not slug:
     # .immorterm/ is canonical; .claude/ is the legacy home and still read so
     # existing projects keep resolving to the same slug (and the same plans dir).
-    for d in ('.immorterm', '.claude'):
+    # NOT .immorterm/project-id — that holds the identity UUID, not a slug.
+    for d, f in (('.immorterm', 'project-slug'), ('.claude', 'project-id')):
         try:
-            pid = open(os.path.join(root, d, 'project-id')).read().strip()
+            pid = open(os.path.join(root, d, f)).read().strip()
             if pid:
                 slug = sanitize(pid)
                 break

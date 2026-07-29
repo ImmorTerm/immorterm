@@ -22,8 +22,14 @@ use std::path::Path;
 
 /// Probed in order. First non-empty hit wins.
 const PROJECT_ID_PATHS: &[&str] = &[
-    ".immorterm/project-id", // canonical
-    ".claude/project-id",    // legacy — still authoritative where it exists
+    // NOTE: deliberately NOT `.immorterm/project-id`. That filename is already
+    // taken by the IDENTITY system, where it holds a UUID (see
+    // registry.rs::read_or_create_project). This cascade resolves a SLUG — a
+    // path component under ~/.immorterm/{tasks,plans}. Reading the UUID file
+    // here silently repoints a project at an empty task/plan set, which is
+    // exactly what happened when the two were conflated.
+    ".immorterm/project-slug", // canonical, vendor-neutral
+    ".claude/project-id",      // legacy — still authoritative where it exists
 ];
 
 /// Read a project's saved id, or `None` when neither file exists or both are
@@ -70,11 +76,26 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+    /// REGRESSION GUARD. `.immorterm/project-id` holds the identity UUID, not a
+    /// slug. Reading it here repointed a real project from 23 tasks to 1.
+    #[test]
+    fn identity_uuid_file_is_never_mistaken_for_a_slug() {
+        let d = tmp("uuidfile");
+        write(&d, ".immorterm/project-id", "e407e41a-bc07-4902-a737-e9e89af4620b\n");
+        write(&d, ".claude/project-id", "immorterm-org\n");
+        assert_eq!(
+            read_project_id_file(d.to_str().unwrap()).as_deref(),
+            Some("immorterm-org"),
+            "the identity UUID must not win over the legacy slug"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn immorterm_location_wins_when_both_exist() {
         let d = tmp("both");
         write(&d, ".claude/project-id", "old-id\n");
-        write(&d, ".immorterm/project-id", "new-id\n");
+        write(&d, ".immorterm/project-slug", "new-id\n");
         assert_eq!(
             read_project_id_file(d.to_str().unwrap()).as_deref(),
             Some("new-id")
@@ -85,7 +106,7 @@ mod tests {
     #[test]
     fn empty_file_falls_through_to_the_next_candidate() {
         let d = tmp("empty");
-        write(&d, ".immorterm/project-id", "   \n");
+        write(&d, ".immorterm/project-slug", "   \n");
         write(&d, ".claude/project-id", "fallback\n");
         assert_eq!(
             read_project_id_file(d.to_str().unwrap()).as_deref(),
@@ -106,7 +127,7 @@ mod tests {
         // `tasks` relies on the unsanitized value; sanitizing here would
         // silently relocate every existing project's task files.
         let d = tmp("raw");
-        write(&d, ".immorterm/project-id", "Weird Name/../x\n");
+        write(&d, ".immorterm/project-slug", "Weird Name/../x\n");
         assert_eq!(
             read_project_id_file(d.to_str().unwrap()).as_deref(),
             Some("Weird Name/../x")

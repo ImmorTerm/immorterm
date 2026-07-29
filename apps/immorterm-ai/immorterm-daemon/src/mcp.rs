@@ -4865,8 +4865,11 @@ fn get_stable_project_id() -> Result<String, String> {
 /// component under ~/.immorterm (tasks AND plans), so raw traversal like
 /// `../../../evil` must not pass through.
 fn project_id_from_file(cwd: &std::path::Path) -> Option<String> {
-    for rel in [".immorterm", ".claude"] {
-        let Ok(id) = std::fs::read_to_string(cwd.join(rel).join("project-id")) else {
+    // (dir, filename) — NOT `.immorterm/project-id`: that file holds the
+    // identity UUID, not a slug. Conflating them repoints tasks and plans at
+    // an empty set.
+    for (dir, file) in [(".immorterm", "project-slug"), (".claude", "project-id")] {
+        let Ok(id) = std::fs::read_to_string(cwd.join(dir).join(file)) else {
             continue;
         };
         let id = id.trim();
@@ -6072,16 +6075,25 @@ mod tests {
         std::fs::create_dir_all(both.join(".claude")).unwrap();
         std::fs::create_dir_all(both.join(".immorterm")).unwrap();
         std::fs::write(both.join(".claude").join("project-id"), "old-proj\n").unwrap();
-        std::fs::write(both.join(".immorterm").join("project-id"), "new-proj\n").unwrap();
+        std::fs::write(both.join(".immorterm").join("project-slug"), "new-proj\n").unwrap();
         assert_eq!(project_id_from_file(&both).as_deref(), Some("new-proj"));
 
         // Traversal is still sanitized out of BOTH locations.
         let evil = base.join("evil");
         std::fs::create_dir_all(evil.join(".immorterm")).unwrap();
-        std::fs::write(evil.join(".immorterm").join("project-id"), "../../../evil\n").unwrap();
+        std::fs::write(evil.join(".immorterm").join("project-slug"), "../../../evil\n").unwrap();
         let got = project_id_from_file(&evil).unwrap();
         assert!(!got.contains(".."), "traversal survived sanitization: {got}");
         assert!(!got.contains('/'), "separator survived sanitization: {got}");
+
+        // REGRESSION: .immorterm/project-id is the identity UUID, not a slug.
+        // Reading it repointed a real project from 23 tasks to 1.
+        let uuid = base.join("uuid");
+        std::fs::create_dir_all(uuid.join(".immorterm")).unwrap();
+        std::fs::create_dir_all(uuid.join(".claude")).unwrap();
+        std::fs::write(uuid.join(".immorterm").join("project-id"), "e407e41a-bc07\n").unwrap();
+        std::fs::write(uuid.join(".claude").join("project-id"), "immorterm-org\n").unwrap();
+        assert_eq!(project_id_from_file(&uuid).as_deref(), Some("immorterm-org"));
 
         // Neither.
         let none = base.join("none");
