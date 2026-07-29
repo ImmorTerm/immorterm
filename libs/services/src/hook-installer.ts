@@ -5847,19 +5847,30 @@ print('on' if val is True else 'off')
 " "$PROJECT_ROOT" 2>/dev/null)
 [ -n "$ENFORCE" ] || exit 0
 
-FULL=$(cat <<'PLAN_FULL'
+# IFS= read -r -d '' (not $(cat <<H)) so the body can contain apostrophes and
+# parens freely — a heredoc inside $() makes bash scan the body for a matching
+# quote/paren and an odd apostrophe count breaks it. read returns non-zero at
+# EOF (no NUL) but still fills FULL; harmless without set -e.
+IFS= read -r -d '' FULL <<'PLAN_FULL'
 <planning_discipline>
 ### Planning Discipline — ACTIVE for this project
 
-Maintain a live plan with the \`immorterm_plan\` MCP tool for any non-trivial task:
-- **One stable id per effort** (kebab-case, e.g. \`auth-refactor\`). Always create-or-update that id — never mint a new id for the same work.
-- **Tag open decisions** in \`decisions[]\`: \`{id, label, options[], recommendation}\`. The user resolves them from the plan overlay and submits in one batch — do not stall waiting; proceed on your recommendation and adjust when the submission arrives.
-- **Author the \`html\` as a rich, self-contained visual brief in THIS PROJECT's own brand** — its tokens, fonts (inline as data URIs), and voice, NOT a generic or ImmorTerm-themed look. Same craft as a published artifact: real type hierarchy, considered spacing, a proper palette. The plan body is the project's; ImmorTerm only frames it. Keep it self-contained (inline CSS in a leading \`<style>\`; no external stylesheets/scripts — they are stripped).
-- **Anchor sections for comments**: wrap each major section of the plan \`html\` in an element with \`data-plan-section="<stable-section-id>"\` (e.g. \`data-plan-section="rollout"\`). User comments attach to these anchors.
-- **Keep it current**: update status/summary/html as work progresses. When a message "Plan <id> submitted: ..." arrives, read the decision resolutions and comments, apply them to the plan, and continue.
+Keep a LIVE plan for any non-trivial task with the \`immorterm_plan\` MCP tool. It renders in the ImmorTerm Plans panel as a visual brief the user opens, comments on, and resolves decisions in.
+
+**Plan mechanics**
+- ONE STABLE id per effort (kebab-case, e.g. \`auth-refactor\`) — always create-or-update that id; never mint a new id for the same work.
+- Put user-owned choices in \`decisions[]\`: \`{id, label, options[], recommendation}\`. ImmorTerm renders each as selectable option buttons with a Submit bar — you do NOT build those controls, only author the decision content. Never stall waiting: proceed on your recommendation and adjust when a "Plan <id> submitted: ..." message arrives with the user's resolutions + comments.
+- Wrap each major section of the \`html\` in \`data-plan-section="<stable-id>"\` (e.g. \`data-plan-section="rollout"\`) — user comments anchor to these.
+- Keep status/summary/html current as work progresses.
+
+**Design the \`html\` to the SAME BAR as a Claude Code artifact — a plan must look no less designed or beautiful than one.**
+- USE THE PROJECT'S OWN DESIGN LANGUAGE. Look first for its tokens — CLAUDE.md, a theme/tokens file, existing CSS custom properties, component styles — and author in THAT palette, type scale, and voice. If none exist, choose a considered palette grounded in the project (deliberate neutrals with a slight hue bias toward one accent). Never a generic, default-AI, or ImmorTerm-themed look — the body is the PROJECT's; ImmorTerm only frames it.
+- REAL TYPOGRAPHY. A clear type scale and hierarchy; \`text-wrap: balance\` on headings; body measure ~65ch; uppercase labels get letter-spacing. The plan renders in a shadow DOM with NO external network, so do NOT link web fonts (they fail silently) — use a refined system stack or inline a face as a \`@font-face\` data URI.
+- LET LAYOUT DO THE SPACING — flex/grid + \`gap\`, not stacked per-element margins. Wide content (tables, code, diagrams) sits in its own \`overflow-x:auto\` container so the body never scrolls sideways. \`font-variant-numeric: tabular-nums\` wherever digits align.
+- AVOID AI-SLOP DEFAULTS: not Inter/Roboto, not purple-on-white gradients, not everything-centered, not emoji section markers, not \`rounded-lg\` on everything. Spend boldness in ONE place and keep the rest quiet. Structure (numbering, eyebrows, dividers) must encode something true, not decorate. Copy is design material: active voice, real content, no lorem.
+- SELF-CONTAINED + SAFE: put ALL CSS inline in a single leading \`<style>\`. No external stylesheets/scripts/fonts (they are stripped). Emit RAW HTML only — NEVER wrap the html in \`<![CDATA[ ... ]]>\` or in markdown code fences, which corrupt parsing and dump your CSS on screen as plain text.
 </planning_discipline>
 PLAN_FULL
-)
 
 REMINDER='<planning_discipline id="reminder">Keep your live plan current with immorterm_plan — update the SAME plan id, tag open decisions, and do not drift into ad-hoc replies.</planning_discipline>'
 RESET='<planning_discipline id="reset">Planning discipline is now OFF for this project. You no longer need to maintain a live immorterm_plan.</planning_discipline>'
@@ -5917,7 +5928,8 @@ VALUE="off"
 PTAG=""
 [ -n "$PREFIX" ] && PTAG=" Prefix every task title with \\"[\${PREFIX} #N]\\" (e.g. \\"[\${PREFIX} #1] Add login\\") so they group under \\"\${PREFIX}\\" in the Tasks panel."
 
-FULL=$(cat <<TASKS_FULL
+# IFS= read -r -d '' (see plan hook) — unquoted delimiter so \${PTAG} still expands.
+IFS= read -r -d '' FULL <<TASKS_FULL
 <task_discipline>
 ### Task Management — use ImmorTerm's task tools for this project
 
@@ -5928,7 +5940,6 @@ Manage your working task list with the ImmorTerm task MCP tools, NOT a vendor-lo
 This keeps your tasks visible to the user in the ImmorTerm panel and durable across sessions.
 </task_discipline>
 TASKS_FULL
-)
 
 REMINDER='<task_discipline id="reminder">Track your tasks with the immorterm_* task tools (not a local todo list); keep statuses current.</task_discipline>'
 RESET='<task_discipline id="reset">You no longer need to manage your task list in ImmorTerm for this project.</task_discipline>'
