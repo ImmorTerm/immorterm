@@ -306,11 +306,13 @@ export function createModalSystem({
           // Hub without the plans keys → leave the section hidden (deploy-
           // ordering guard: modals.js can ship before the hub binary).
           if (!cfg || typeof cfg.plansEnforce === 'undefined' || !pdProjectDir) return;
+          const globalDefault = !!cfg.globalPlansEnforce;
           const pdHeader = el('div', 'modal-section-header', 'Planning');
           pdHeader.style.cssText = 'margin-bottom:4px;font-weight:600;font-size:11px;text-transform:uppercase;opacity:0.6';
           pdWrap.appendChild(pdHeader);
           const pdHint = el('div', 'modal-row-detail',
-            'Instructs AI agents to keep a live plan with tagged decisions and comment anchors. Applies at next session start.');
+            'Instructs AI agents to keep a live plan with tagged decisions and comment anchors. Applies at next session start. '
+            + 'Default follows your global setting (currently ' + (globalDefault ? 'On' : 'Off') + ').');
           pdHint.style.cssText = 'margin-bottom:8px;font-size:11px;opacity:0.7';
           pdWrap.appendChild(pdHint);
           const pdRow = el('div', 'modal-row');
@@ -318,10 +320,9 @@ export function createModalSystem({
           const pdSeg = el('div', 'modal-segmented');
           pdRow.appendChild(pdSeg);
           pdWrap.appendChild(pdRow);
-          const globalDefault = !!cfg.globalPlansEnforce;
           const raw = (typeof cfg.projectPlansEnforce === 'boolean') ? cfg.projectPlansEnforce : null;
           const choices = [
-            { value: null, label: 'Default (' + (globalDefault ? 'On' : 'Off') + ')' },
+            { value: null, label: 'Default' },
             { value: true, label: 'On' },
             { value: false, label: 'Off' },
           ];
