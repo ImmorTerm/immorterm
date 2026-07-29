@@ -5915,7 +5915,7 @@ VALUE="off"
 [ "$STATE" = "on" ] && VALUE="on:\${PREFIX}"
 
 PTAG=""
-[ -n "$PREFIX" ] && PTAG=" Prefix every task title you create with \\"\${PREFIX}\\" (e.g. \\"\${PREFIX} #1 …\\")."
+[ -n "$PREFIX" ] && PTAG=" Prefix every task title with \\"[\${PREFIX} #N]\\" (e.g. \\"[\${PREFIX} #1] Add login\\") so they group under \\"\${PREFIX}\\" in the Tasks panel."
 
 FULL=$(cat <<TASKS_FULL
 <task_discipline>

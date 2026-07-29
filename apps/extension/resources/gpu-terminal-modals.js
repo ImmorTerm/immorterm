@@ -350,6 +350,88 @@ export function createModalSystem({
         .catch(err => console.warn('[plans-enforce] config load failed', err));
     }
 
+    // ── Task management (tasks.manageInImmorTerm) — imm #13 ──────────────
+    // Per-project opt-out (DEFAULT ON): instruct AI agents to manage their
+    // task list with ImmorTerm's task MCP tools under an optional prefix,
+    // instead of a vendor-local todo list. Written via the generic shallow-
+    // merge project-config PUT (the whole tasks object is replaced, so both
+    // keys ship together); read at hook RUNTIME so it applies from the next
+    // prompt with no reinstall. Own fetch chain so it's independent of the
+    // plans keys (works on hubs that predate them).
+    {
+      const tWrap = el('div');
+      tWrap.style.marginTop = '14px';
+      section.appendChild(tWrap);
+
+      let tProjectDir = null;
+      const tState = { manageInImmorTerm: true, prefix: '' };
+      fetch(HUB + '/api/info')
+        .then(r => r.json())
+        .catch(() => ({}))
+        .then(info => {
+          tProjectDir = (info && (info.projectDir || info.project_dir)) || null;
+          if (!tProjectDir) return null;
+          return fetch(configReadUrl('project_dir=' + encodeURIComponent(tProjectDir)))
+            .then(r => r.json()).catch(() => ({}));
+        })
+        .then(cfg => {
+          if (!tProjectDir) return;
+          const t = (cfg && cfg.tasks) || {};
+          // Default ON: absent → on; only an explicit false opts out.
+          tState.manageInImmorTerm = t.manageInImmorTerm !== false;
+          tState.prefix = (typeof t.prefix === 'string') ? t.prefix : '';
+
+          const tHeader = el('div', 'modal-section-header', 'Tasks');
+          tHeader.style.cssText = 'margin-bottom:4px;font-weight:600;font-size:11px;text-transform:uppercase;opacity:0.6';
+          tWrap.appendChild(tHeader);
+          const tHint = el('div', 'modal-row-detail',
+            "Have AI agents manage their task list with ImmorTerm's task tools — visible in the Tasks panel and durable across sessions — instead of a vendor-local to-do list. On by default; applies from the next prompt.");
+          tHint.style.cssText = 'margin-bottom:8px;font-size:11px;opacity:0.7';
+          tWrap.appendChild(tHint);
+
+          const save = () => {
+            fetch(configProjectWriteUrl(), {
+              method: 'PUT',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                projectDir: tProjectDir,
+                tasks: { manageInImmorTerm: tState.manageInImmorTerm, prefix: tState.prefix },
+              }),
+            }).catch(err => console.error('[tasks-manage] save failed', err));
+          };
+
+          // Prefix input row — built first so the toggle handler can show/hide it.
+          const prefixRow = el('div', 'modal-row');
+          prefixRow.appendChild(el('span', 'modal-row-label', 'Task prefix'));
+          const prefixInput = el('input', 'modal-input');
+          prefixInput.type = 'text';
+          prefixInput.placeholder = 'e.g. ' + ((tProjectDir.split('/').filter(Boolean).pop()) || 'proj');
+          prefixInput.value = tState.prefix;
+          prefixInput.style.maxWidth = '160px';
+          prefixInput.addEventListener('change', () => {
+            tState.prefix = prefixInput.value.trim();
+            save();
+          });
+          prefixRow.appendChild(prefixInput);
+
+          const tRow = el('div', 'modal-row');
+          tRow.appendChild(el('span', 'modal-row-label', 'Manage tasks in ImmorTerm'));
+          const tToggle = el('div', 'modal-toggle' + (tState.manageInImmorTerm ? ' on' : ''));
+          tRow.appendChild(tToggle);
+          tRow.style.cursor = 'pointer';
+          tRow.addEventListener('click', () => {
+            tState.manageInImmorTerm = !tToggle.classList.contains('on');
+            tToggle.classList.toggle('on', tState.manageInImmorTerm);
+            prefixRow.style.display = tState.manageInImmorTerm ? 'flex' : 'none';
+            save();
+          });
+          tWrap.appendChild(tRow);
+          prefixRow.style.display = tState.manageInImmorTerm ? 'flex' : 'none';
+          tWrap.appendChild(prefixRow);
+        })
+        .catch(err => console.warn('[tasks-manage] config load failed', err));
+    }
+
     // Border toggle
     addToggleRow('Border', prefs.borderEnabled, (v) => {
       setPrefs({ borderEnabled: v });
