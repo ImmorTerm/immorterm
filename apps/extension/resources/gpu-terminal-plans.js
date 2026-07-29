@@ -38,6 +38,28 @@ const PLAN_URL_ATTRS = [
   'data', 'background', 'poster', 'ping',
 ];
 const PLAN_SAFE_DATA_IMG = /^data:image\/(png|jpe?g|gif|webp)[;,]/;
+/** Strip agent-authoring wrappers that corrupt HTML parsing BEFORE the parser
+ *  sees them — the fix must precede parseFromString, not sanitizePlanDoc (by
+ *  then the damage is done). Two seen in the wild:
+ *   • XML CDATA (`<![CDATA[ … ]]>`) — HTML has no CDATA in the html namespace,
+ *     so `<!` opens a bogus comment that runs to the first `>` and EATS the
+ *     leading `<style>` tag, dumping the CSS as visible body text.
+ *   • Markdown code fences (```html … ```) — an agent pasting a fenced block.
+ *  Returns cleaned html. Idempotent + safe on already-clean input. */
+export function unwrapPlanHtml(html) {
+  let s = String(html == null ? '' : html).trim();
+  // Markdown code fence: ```html\n … \n```  (language tag optional)
+  const fm = /^```[a-zA-Z-]*\s*\n([\s\S]*?)\n?```$/.exec(s);
+  if (fm) s = fm[1].trim();
+  // XML CDATA wrapper (leading; trailing ]]> stripped only if present)
+  if (s.startsWith('<![CDATA[')) {
+    s = s.slice(9);
+    if (s.endsWith(']]>')) s = s.slice(0, -3);
+    s = s.trim();
+  }
+  return s;
+}
+
 export function sanitizePlanDoc(doc) {
   // Whole document (head + body): a leading <style> is routed to <head> and
   // carried across, so head must be scrubbed too.
@@ -312,7 +334,7 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
     shadow.appendChild(style);
 
     const wrapper = el('div', 'ai-html-content');
-    const doc = new DOMParser().parseFromString(plan.html || '<p>(empty plan)</p>', 'text/html');
+    const doc = new DOMParser().parseFromString(unwrapPlanHtml(plan.html) || '<p>(empty plan)</p>', 'text/html');
     // Plan html is untrusted (any vendor/agent authors it) — neutralize ALL
     // active content, not just <script>: inline on*= handlers and
     // javascript:/data: URLs execute even with scripts removed, and the hub

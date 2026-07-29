@@ -9796,8 +9796,9 @@
       const host = el('div', 'plan-body-host');
       body.appendChild(host);
       if (!plansModule || !rec) { host.textContent = rec ? '' : '(plan unavailable)'; return; }
-      // Untrusted plan html: parse → shared sanitize gate → shared shadow mount.
-      const doc = new DOMParser().parseFromString(rec.html || '<p>(empty plan)</p>', 'text/html');
+      // Untrusted plan html: unwrap authoring wrappers (CDATA/fences) → parse →
+      // shared sanitize gate → shared shadow mount.
+      const doc = new DOMParser().parseFromString(plansModule.unwrapPlanHtml(rec.html) || '<p>(empty plan)</p>', 'text/html');
       plansModule.sanitizePlanDoc(doc);
       plansModule.renderPlanBodyInto(host, doc);
     }
