@@ -737,9 +737,11 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
       `media-src ${webview.cspSource} blob:`,
       // Link-preview HTML iframe loads from asWebviewUri (cspSource origin).
       // Without this, default-src='none' blocks the iframe entirely.
+      // 'self' permits the plan-artifact srcdoc iframe (sandboxed, opaque
+      // origin — its own strict CSP governs what runs inside it).
       // Google entries enable the explore-popup's embedded search via igu=1
       // (the unblocked-frame variant that doesn't set X-Frame-Options:DENY).
-      `frame-src ${webview.cspSource} https://www.google.com https://*.google.com`,
+      `frame-src 'self' ${webview.cspSource} https://www.google.com https://*.google.com`,
     ].join('; ');
 
     html = html.replace('__CSS_URI__', cssUri.toString());

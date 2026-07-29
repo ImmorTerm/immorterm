@@ -161,6 +161,48 @@ export function renderPlanBodyInto(shadowHost, doc) {
   return bodyShadow;
 }
 
+/** Render a plan's html as a SANDBOXED IFRAME artifact — the claude.ai model:
+ *  a real document with full CSS + JS, isolated in an opaque origin
+ *  (sandbox=allow-scripts, NO allow-same-origin → it cannot reach the parent
+ *  webview or Tauri's native IPC). A strict in-frame CSP blocks ALL external
+ *  network (default-src 'none', no connect-src) so an untrusted artifact stays
+ *  self-contained and can't exfiltrate — no script-stripping needed. The frame
+ *  auto-sizes to its content via a postMessage height bridge (capped, so a tall
+ *  plan scrolls internally). Returns the iframe. */
+export function renderPlanArtifactIframe(host, html) {
+  const body = unwrapPlanHtml(html) || '<p style="font-family:system-ui;opacity:.6;padding:16px">(empty plan)</p>';
+  const csp = "default-src 'none'; img-src data: blob:; media-src data: blob:; "
+    + "style-src 'unsafe-inline'; script-src 'unsafe-inline'; font-src data:;";
+  const bridge =
+    '<script>(function(){function p(){try{parent.postMessage({__immPlanFrame:1,'
+    + 'h:document.documentElement.scrollHeight},"*")}catch(e){}}'
+    + 'addEventListener("load",p);setTimeout(p,60);setTimeout(p,350);'
+    + 'if(window.ResizeObserver){new ResizeObserver(p).observe(document.documentElement)}})();<\/script>';
+  const srcdoc = '<!doctype html><html><head><meta charset="utf-8">'
+    + '<meta http-equiv="Content-Security-Policy" content="' + csp + '">'
+    + '<meta name="color-scheme" content="dark light">'
+    + '<style>html,body{margin:0}body{overflow:auto}</style></head><body>'
+    + body + bridge + '</body></html>';
+
+  const iframe = document.createElement('iframe');
+  iframe.className = 'plan-artifact-frame';
+  iframe.setAttribute('sandbox', 'allow-scripts');
+  iframe.setAttribute('referrerpolicy', 'no-referrer');
+  iframe.style.cssText = 'width:100%;border:0;display:block;background:transparent;min-height:140px';
+  iframe.srcdoc = srcdoc;
+
+  // Height bridge — self-cleans once the overlay (and iframe) are gone.
+  const onMsg = (e) => {
+    if (!iframe.isConnected) { window.removeEventListener('message', onMsg); return; }
+    if (e.source !== iframe.contentWindow || !e.data || e.data.__immPlanFrame !== 1) return;
+    const cap = Math.round((window.innerHeight || 800) * 0.78);
+    iframe.style.height = Math.max(140, Math.min(Number(e.data.h) || 0, cap)) + 'px';
+  };
+  window.addEventListener('message', onMsg);
+  host.appendChild(iframe);
+  return iframe;
+}
+
 /** Compact wake summary typed into the agent's input box — cap ~300 chars;
  *  comment texts are referenced by count, the agent reads the record. */
 // Security: planId, decision ids, and option labels are free-form MCP args
@@ -334,12 +376,6 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
     shadow.appendChild(style);
 
     const wrapper = el('div', 'ai-html-content');
-    const doc = new DOMParser().parseFromString(unwrapPlanHtml(plan.html) || '<p>(empty plan)</p>', 'text/html');
-    // Plan html is untrusted (any vendor/agent authors it) — neutralize ALL
-    // active content, not just <script>: inline on*= handlers and
-    // javascript:/data: URLs execute even with scripts removed, and the hub
-    // (standalone/Tauri) has no CSP backstop like the VS Code webview does.
-    sanitizePlanDoc(doc);
 
     // ── Local form state — plain in-memory, discarded on close. Selecting
     //    and typing never wakes anyone; only Submit persists. ──
@@ -372,18 +408,14 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
       return slot;
     }
 
-    // Comment affordance under every data-plan-section anchor (agent-authored
-    // per the discipline hook).
-    for (const sectionEl of doc.body.querySelectorAll('[data-plan-section]')) {
-      const sectionId = sectionEl.getAttribute('data-plan-section') || '';
-      sectionEl.insertAdjacentElement('afterend', makeCommentSlot('section:' + sectionId, 'Comment on this section…', '+ comment'));
-    }
-    // The plan BODY renders in its OWN shadow root, in the PROJECT's brand
-    // (repo tokens/fonts) — isolated so its CSS can neither clobber nor be
-    // clobbered by the ImmorTerm decision-form chrome below. The design
-    // contract: body = project brand, chrome = ImmorTerm frame.
+    // The plan BODY renders as a SANDBOXED IFRAME — a real document with full
+    // JS, isolated in an opaque origin (no allow-same-origin), the claude.ai
+    // artifact model. A strict per-frame CSP keeps it self-contained. The
+    // decision + general-comment + submit chrome below is native and unchanged.
+    // (Section-anchored comments move to a geometry bridge next — a sandboxed
+    // frame can't be injected into.)
     const bodyHost = el('div', 'plan-body-host');
-    renderPlanBodyInto(bodyHost, doc); // doc sanitized above; section comment slots already inserted
+    renderPlanArtifactIframe(bodyHost, plan.html);
     wrapper.appendChild(bodyHost);
 
     // ── Decision form (from structured decisions[], never plan html) ──
