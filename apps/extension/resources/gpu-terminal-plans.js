@@ -245,6 +245,9 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
   let _plans = [];
   const _submittedIds = new Set(); // plans submitted with no live agent to wake
   let _pendingSubmit = null;       // { planId, onResult } for the open overlay
+  // Unsubmitted comment drafts, kept across overlay close/reopen so typing is
+  // never lost. Key: `${planId} ${slotKey}`. Cleared on successful submit.
+  const _planDrafts = new Map();
 
   // ── Plan consume-drag (body, not the grip) ──────────────────────────
   // Grip = spatial drag into the Spaces grid (native PLAN_MIME, §6B). Body =
@@ -422,14 +425,24 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
       }
       const input = el('textarea', 'plan-comment-input');
       input.placeholder = placeholder;
+      // Restore an unsubmitted draft (kept across close/reopen) so typing is
+      // never lost. Seed formState so Submit reflects it immediately on open.
+      const draftKey = plan.id + ' ' + key;
+      const draftVal = _planDrafts.get(draftKey) || '';
+      if (draftVal) { input.value = draftVal; formState.comments.set(key, draftVal); }
       if (addLabel) {
         const add = el('button', 'plan-comment-add', addLabel);
         add.type = 'button';
-        input.hidden = true;
+        if (draftVal) { add.hidden = true; } else { input.hidden = true; } // a draft forces the box open
         add.addEventListener('click', () => { add.hidden = true; input.hidden = false; input.focus(); });
         slot.appendChild(add);
       }
-      input.addEventListener('input', () => { formState.comments.set(key, input.value); updateSubmitBar(); });
+      input.addEventListener('input', () => {
+        formState.comments.set(key, input.value);
+        if (input.value.trim()) _planDrafts.set(draftKey, input.value);
+        else _planDrafts.delete(draftKey);
+        updateSubmitBar();
+      });
       // Keep terminal keybindings out of the textarea (Escape still closes).
       input.addEventListener('keydown', (e) => { if (e.key !== 'Escape') e.stopPropagation(); });
       slot.appendChild(input);
@@ -511,6 +524,7 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
     // Mount the fully-built content into the card's shadow root. (Without
     // this the card renders empty — the form/comments live on `wrapper`.)
     shadow.appendChild(wrapper);
+    updateSubmitBar(); // reflect any restored drafts immediately on open
 
     function updateSubmitBar() {
       if (!submitBtn) return;
@@ -552,6 +566,11 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
               errorLabel.textContent = msg.error || 'Submit failed';
             }
             return;
+          }
+          // Submitted successfully → drop this plan's saved drafts (they're
+          // now persisted as real comments).
+          for (const k of [..._planDrafts.keys()]) {
+            if (k.indexOf(plan.id + ' ') === 0) _planDrafts.delete(k);
           }
           // The wake + sidebar refresh must fire even if the user closed the
           // overlay after submitting — the write already persisted, so the
