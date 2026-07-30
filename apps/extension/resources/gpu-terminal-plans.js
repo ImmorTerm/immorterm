@@ -107,7 +107,13 @@ const COMMENT_SLOT_CSS =
   + '.plan-comment-add:hover{color:var(--sidebar-text,#cdd6f4)}'
   + '.plan-comment-input{width:100%;box-sizing:border-box;background:var(--sidebar-hover,#1e1e2e);'
   + 'border:1px solid var(--sidebar-border,#313244);border-radius:6px;color:var(--sidebar-text,#cdd6f4);'
-  + 'font:inherit;font-size:12px;padding:6px;resize:vertical;min-height:40px}';
+  + 'font:inherit;font-size:12px;padding:6px;resize:vertical;min-height:40px}'
+  // Persisted comments shown on open (thread above the input slot).
+  + '.plan-comment-prior{background:var(--sidebar-hover,#1e1e2e);border:1px solid var(--sidebar-border,#313244);'
+  + 'border-radius:8px;padding:7px 9px;margin-bottom:6px}'
+  + '.plan-comment-prior-meta{font-size:10px;color:var(--sidebar-muted,#a6adc8);margin-bottom:3px;'
+  + 'font-family:ui-monospace,Menlo,monospace}'
+  + '.plan-comment-prior-text{font-size:12.5px;color:var(--sidebar-text,#cdd6f4);white-space:pre-wrap;line-height:1.45}';
 
 // Scrollbar rules duplicated from the draw_html shadow-DOM path
 // (gpu-terminal.html ~9228-9231) — shadow DOM can't see page styles.
@@ -384,6 +390,18 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
       comments: new Map(),   // 'section:<id>' | 'decision:<id>' | 'general' -> text
     };
 
+    // Persisted comments render on OPEN so a user always sees what they (and
+    // the agent) previously wrote — plan comments are durable, not ephemeral.
+    // decision:<id> → that decision's slot; everything else (general + section-
+    // anchored) → the general slot for now, so nothing a user wrote is hidden
+    // (section-anchored ones move inline once the geometry bridge lands).
+    const priorComments = Array.isArray(plan.comments) ? plan.comments : [];
+    function priorFor(key) {
+      return priorComments.filter(c => key.startsWith('decision:')
+        ? c.decisionId === key.slice(9)
+        : (key === 'general' ? !c.decisionId : c.sectionId === key.slice(8)));
+    }
+
     function commentCount() {
       let n = 0;
       for (const t of formState.comments.values()) if (t.trim()) n++;
@@ -392,6 +410,16 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
 
     function makeCommentSlot(key, placeholder, addLabel) {
       const slot = el('div', 'plan-comment-slot');
+      // Existing thread first — so reopening a plan shows prior comments.
+      for (const c of priorFor(key)) {
+        const bubble = el('div', 'plan-comment-prior');
+        const who = (c.author && String(c.author).split('@')[0]) || 'user';
+        let metaText = who + ' · ' + relativeTime(c.ts || 0);
+        if (key === 'general' && c.sectionId) metaText += ' · on ' + c.sectionId;
+        bubble.appendChild(el('div', 'plan-comment-prior-meta', metaText));
+        bubble.appendChild(el('div', 'plan-comment-prior-text', c.text || ''));
+        slot.appendChild(bubble);
+      }
       const input = el('textarea', 'plan-comment-input');
       input.placeholder = placeholder;
       if (addLabel) {
