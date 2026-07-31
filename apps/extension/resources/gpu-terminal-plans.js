@@ -174,20 +174,34 @@ export function renderPlanBodyInto(shadowHost, doc) {
  *  network (default-src 'none', no connect-src) so an untrusted artifact stays
  *  self-contained and can't exfiltrate — no script-stripping needed. The frame
  *  auto-sizes to its content via a postMessage height bridge (capped, so a tall
- *  plan scrolls internally). Returns the iframe. */
-export function renderPlanArtifactIframe(host, html) {
+ *  plan scrolls internally). The optional `onWake({action,label})` fires when a
+ *  real user clicks an element carrying `data-plan-action` inside the artifact
+ *  — the interactivity bridge — so plan authors can add buttons that wake the
+ *  agent. Returns the iframe. */
+export function renderPlanArtifactIframe(host, html, onWake) {
   const body = unwrapPlanHtml(html) || '<p style="font-family:system-ui;opacity:.6;padding:16px">(empty plan)</p>';
   const csp = "default-src 'none'; img-src data: blob:; media-src data: blob:; "
     + "style-src 'unsafe-inline'; script-src 'unsafe-inline'; font-src data:;";
+  // In-frame bridge: (1) height reporting, (2) wake — forward ONLY genuine
+  // user clicks (ev.isTrusted, so a hostile artifact can't synthesize a click
+  // to spam-wake the agent) on [data-plan-action] elements, with the author's
+  // action verb + a short label. The panel scrubs + throttles on receipt.
   const bridge =
-    '<script>(function(){function p(){try{parent.postMessage({__immPlanFrame:1,'
-    + 'h:document.documentElement.scrollHeight},"*")}catch(e){}}'
+    '<script>(function(){'
+    + 'function p(){try{parent.postMessage({__immPlanFrame:1,h:document.documentElement.scrollHeight},"*")}catch(e){}}'
     + 'addEventListener("load",p);setTimeout(p,60);setTimeout(p,350);'
-    + 'if(window.ResizeObserver){new ResizeObserver(p).observe(document.documentElement)}})();<\/script>';
+    + 'if(window.ResizeObserver){new ResizeObserver(p).observe(document.documentElement)}'
+    + 'document.addEventListener("click",function(ev){'
+    + 'if(!ev.isTrusted)return;'
+    + 'var t=ev.target&&ev.target.closest?ev.target.closest("[data-plan-action]"):null;if(!t)return;'
+    + 'var a=String(t.getAttribute("data-plan-action")||"").slice(0,80);'
+    + 'var l=String(t.getAttribute("data-plan-label")||t.textContent||"").replace(/\\s+/g," ").trim().slice(0,120);'
+    + 'try{parent.postMessage({__immPlanFrame:1,wake:{action:a,label:l}},"*")}catch(e){}'
+    + '},true);})();<\/script>';
   const srcdoc = '<!doctype html><html><head><meta charset="utf-8">'
     + '<meta http-equiv="Content-Security-Policy" content="' + csp + '">'
     + '<meta name="color-scheme" content="dark light">'
-    + '<style>html,body{margin:0}body{overflow:auto}</style></head><body>'
+    + '<style>html,body{margin:0}body{overflow:auto}[data-plan-action]{cursor:pointer}</style></head><body>'
     + body + bridge + '</body></html>';
 
   const iframe = document.createElement('iframe');
@@ -197,10 +211,20 @@ export function renderPlanArtifactIframe(host, html) {
   iframe.style.cssText = 'width:100%;border:0;display:block;background:transparent;min-height:140px';
   iframe.srcdoc = srcdoc;
 
-  // Height bridge — self-cleans once the overlay (and iframe) are gone.
+  // Message bridge — self-cleans once the overlay (and iframe) are gone.
+  let lastWake = 0;
   const onMsg = (e) => {
     if (!iframe.isConnected) { window.removeEventListener('message', onMsg); return; }
     if (e.source !== iframe.contentWindow || !e.data || e.data.__immPlanFrame !== 1) return;
+    if (e.data.wake) {
+      // A wake submits a prompt to the agent — throttle so a runaway or
+      // rapid-fire artifact can't spam-submit. ~1.2s is invisible to a human.
+      const now = Date.now();
+      if (typeof onWake !== 'function' || now - lastWake < 1200) return;
+      lastWake = now;
+      onWake(e.data.wake);
+      return;
+    }
     const cap = Math.round((window.innerHeight || 800) * 0.78);
     iframe.style.height = Math.max(140, Math.min(Number(e.data.h) || 0, cap)) + 'px';
   };
@@ -218,6 +242,26 @@ export function renderPlanArtifactIframe(host, html) {
 function scrubForPty(str) {
   return String(str).replace(/[\x00-\x1f\x7f]/g, ' ');
 }
+/** Transient toast confirming an artifact-button wake — the button lives in a
+ *  sandboxed frame that may target a session whose tile isn't visible, so the
+ *  user needs feedback that the click did something. Auto-removes. */
+function flashWake(overlay, ok, label) {
+  if (!overlay) return;
+  const toast = document.createElement('div');
+  toast.textContent = ok
+    ? '▶ Sent to your agent' + (label ? ' · ' + label : '')
+    : 'No live session to wake';
+  toast.style.cssText = 'position:fixed;left:50%;bottom:26px;transform:translateX(-50%);'
+    + 'z-index:5;pointer-events:none;border-radius:9px;padding:8px 15px;'
+    + 'font:600 12px -apple-system,BlinkMacSystemFont,system-ui,sans-serif;'
+    + 'box-shadow:0 8px 22px rgba(0,0,0,.45);'
+    + (ok
+      ? 'background:#16311f;color:#7fe0b0;border:1px solid #2e7d5b'
+      : 'background:#2a2a3d;color:#a6adc8;border:1px solid #3a3a4d');
+  overlay.appendChild(toast);
+  setTimeout(() => toast.remove(), 2300);
+}
+
 function buildWakeSummary(planId, selections, nComments) {
   const parts = [];
   for (const [id, opt] of selections) parts.push(scrubForPty(id) + '→' + scrubForPty(opt));
@@ -456,7 +500,22 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
     // (Section-anchored comments move to a geometry bridge next — a sandboxed
     // frame can't be injected into.)
     const bodyHost = el('div', 'plan-body-host');
-    renderPlanArtifactIframe(bodyHost, plan.html);
+    renderPlanArtifactIframe(bodyHost, plan.html, (w) => {
+      // A user clicked a [data-plan-action] element inside the artifact →
+      // wake the plan's agent with the action. All values are author-
+      // controlled DOM text: scrub for the PTY and cap before it's typed.
+      if (typeof wakeAgent !== 'function') return;
+      const label = scrubForPty(String(w.label || '')).trim().slice(0, 120);
+      const action = scrubForPty(String(w.action || '')).trim().slice(0, 80);
+      const shown = label || action || 'a button';
+      let msg = 'Plan ' + scrubForPty(plan.id) + ': the user clicked "' + shown + '"'
+        + (action && action !== label ? ' [action=' + action + ']' : '')
+        + ' in the plan artifact. Open it with immorterm_list_plans id=' + scrubForPty(plan.id)
+        + ' and act on it.';
+      if (msg.length > 300) msg = msg.slice(0, 297) + '…';
+      const woke = wakeAgent(plan.sessionName, msg);
+      flashWake(overlay, woke, shown);
+    });
     wrapper.appendChild(bodyHost);
 
     // ── Decision form (from structured decisions[], never plan html) ──

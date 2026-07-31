@@ -5861,6 +5861,7 @@ Keep a LIVE plan for any non-trivial task with the \`immorterm_plan\` MCP tool. 
 - ONE STABLE id per effort (kebab-case, e.g. \`auth-refactor\`) — always create-or-update that id; never mint a new id for the same work.
 - Put user-owned choices in \`decisions[]\`: \`{id, label, options[], recommendation}\`. ImmorTerm renders each as selectable option buttons with a Submit bar — you do NOT build those controls, only author the decision content. Never stall waiting: proceed on your recommendation and adjust when a "Plan <id> submitted: ..." message arrives with the user's resolutions + comments.
 - Wrap each major section of the \`html\` in \`data-plan-section="<stable-id>"\` (e.g. \`data-plan-section="rollout"\`) — user comments anchor to these.
+- INTERACTIVE BUTTONS (optional but powerful): the plan renders as a live artifact, so you can add buttons the user clicks to wake you. Put \`data-plan-action="<verb>"\` on any clickable element (e.g. \`<button data-plan-action="approve-rollout">Approve rollout</button>\`). A real user click sends you "Plan <id>: the user clicked ..." — you then read the plan and act. Use these for lightweight one-tap actions BEYOND the formal \`decisions[]\` (which already render their own option buttons + Submit); the button's own JS may also update the artifact in place.
 - Keep status/summary/html current as work progresses.
 
 **Design the \`html\` to the SAME BAR as a Claude Code artifact — a plan must look no less designed or beautiful than one.**

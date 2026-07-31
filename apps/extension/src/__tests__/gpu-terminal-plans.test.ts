@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect } from 'vitest';
-import { unwrapPlanHtml } from '../../resources/gpu-terminal-plans.js';
+import { unwrapPlanHtml, renderPlanArtifactIframe } from '../../resources/gpu-terminal-plans.js';
 
 describe('unwrapPlanHtml — strip authoring wrappers that corrupt HTML parsing', () => {
   it('strips a leading <![CDATA[ … ]]> wrapper (the delulus break)', () => {
@@ -24,7 +24,29 @@ describe('unwrapPlanHtml — strip authoring wrappers that corrupt HTML parsing'
 
   it('is safe on empty / null', () => {
     expect(unwrapPlanHtml('')).toBe('');
-    // @ts-expect-error — exercising the null guard
-    expect(unwrapPlanHtml(null)).toBe('');
+    expect(unwrapPlanHtml(null as unknown as string)).toBe('');
+  });
+});
+
+describe('renderPlanArtifactIframe — sandboxed artifact + wake bridge', () => {
+  it('renders a sandboxed iframe carrying the wake bridge', () => {
+    const host = document.createElement('div');
+    const frame = renderPlanArtifactIframe(host, '<button data-plan-action="go">Go</button>');
+    expect(frame.tagName).toBe('IFRAME');
+    // opaque origin: allow-scripts WITHOUT allow-same-origin
+    expect(frame.getAttribute('sandbox')).toBe('allow-scripts');
+    const doc = frame.getAttribute('srcdoc') || '';
+    expect(doc).toContain('data-plan-action');   // author's button survives
+    expect(doc).toContain('__immPlanFrame');      // bridge present
+    // the security gate: only genuine user clicks are forwarded
+    expect(doc).toContain('ev.isTrusted');
+  });
+
+  it('embeds a strict CSP that blocks external network', () => {
+    const host = document.createElement('div');
+    const frame = renderPlanArtifactIframe(host, '<p>hi</p>');
+    const doc = frame.getAttribute('srcdoc') || '';
+    expect(doc).toContain("default-src 'none'");
+    expect(doc).not.toContain('connect-src');     // no network egress granted
   });
 });
