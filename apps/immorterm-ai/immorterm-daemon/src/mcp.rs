@@ -62,6 +62,55 @@ fn browser_reopen() {
     BROWSER_CLOSED.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Reap the browser after this long with no AI tool call and no human panel
+/// input. Without it, a browser opened once outlives the work by days: the
+/// session is process-global and nothing but an explicit `browser_close` ever
+/// tears it down, so headless Chrome sits on ~500MB of leader + renderers
+/// forever (observed: a width-probe tab still alive 2 days later).
+/// ponytail: one fixed timeout, no config knob — add one when 15min is wrong.
+const BROWSER_IDLE_TIMEOUT_MS: u64 = 15 * 60 * 1000;
+
+/// `now_ms()` of the last browser tool call or human panel input. 0 = never
+/// used (no browser open yet), which never expires.
+static BROWSER_LAST_USED_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Mark the browser as actively used — resets the idle reaper. Called from
+/// every browser tool call and whenever the human drives the panel.
+fn browser_touch() {
+    BROWSER_LAST_USED_MS.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Has the browser gone untouched past the idle timeout? A paused browser (the
+/// human has the wheel and may just be reading) never expires.
+fn browser_idle_expired() -> bool {
+    if browser_is_paused() {
+        return false;
+    }
+    let last = BROWSER_LAST_USED_MS.load(std::sync::atomic::Ordering::Relaxed);
+    last != 0 && now_ms().saturating_sub(last) > BROWSER_IDLE_TIMEOUT_MS
+}
+
+/// The single browser teardown path — explicit close, idle reap, and process
+/// exit all route here. Closes + reaps the exact Chrome pid (via `Drop`),
+/// clears the human-paused flag, and releases the cross-process ownership lock
+/// if it is ours. Returns the pid it killed, if any.
+fn teardown_browser(guard: &mut Option<BrowserSession>) -> Option<u32> {
+    let session = guard.take()?;
+    let pid = session.pid();
+    drop(session); // Drop → close() stops the screencast + kills the exact PID.
+    BROWSER_PAUSED.store(false, std::sync::atomic::Ordering::Relaxed);
+    // Release the ownership lock only if it is ours (don't clobber a lock
+    // another live session took over).
+    if envoyage::browser_lock::read()
+        .map(|l| l.owner_pid == std::process::id())
+        .unwrap_or(false)
+    {
+        envoyage::browser_lock::release();
+    }
+    Some(pid)
+}
+
 /// Interval between screencast pump ticks (~60fps). Frame coalescing means a
 /// slower tick just drops intermediate frames — never buffers unbounded — so
 /// the real ceiling is how fast CDP produces frames + IPC throughput, not this.
@@ -105,12 +154,27 @@ fn browser_pump_loop(session: String) {
         // synchronous CDP work (dispatch input, ensure screencast, poll frame)
         // holds the lock, and only briefly.
         let inputs = poll_browser_input(&session, &rt);
+        if !inputs.is_empty() {
+            browser_touch(); // human is driving — don't reap under them
+        }
         let mut copied: Option<String> = None;
         let (frame, title, url) = {
             let mut guard = match browser_slot().lock() {
                 Ok(g) => g,
                 Err(_) => continue,
             };
+            // Idle reap: nobody has touched the browser in BROWSER_IDLE_TIMEOUT.
+            // The pump is the only thread that ticks regardless of tool calls,
+            // so it owns the timer.
+            if guard.is_some() && browser_idle_expired() {
+                if let Some(pid) = teardown_browser(&mut guard) {
+                    eprintln!(
+                        "[immorterm] closed idle browser (pid {pid}) after {}m without use",
+                        BROWSER_IDLE_TIMEOUT_MS / 60_000
+                    );
+                }
+                continue;
+            }
             let Some(b) = guard.as_mut() else { continue };
             for ev in inputs {
                 if let Some(text) = dispatch_browser_input(b, ev) {
@@ -2252,6 +2316,10 @@ pub fn serve_stdio() -> Result<()> {
         writer.flush()?;
     }
 
+    // Client disconnected (Claude session ended). `BROWSER` is a static, and
+    // Rust never drops statics at exit — without this the browser we spawned
+    // outlives us as an orphaned headless Chrome tree.
+    let _ = handle_browser_close();
     Ok(())
 }
 
@@ -3208,18 +3276,38 @@ fn with_browser<T>(
     let mut guard = browser_slot()
         .lock()
         .map_err(|_| "browser lock poisoned".to_string())?;
+    browser_touch();
     if guard.is_none() {
         // Route-vs-own: only launch if we may own the browser.
         let self_pid = std::process::id();
+        let lock = envoyage::browser_lock::read();
         // Own / AlreadyOwn / stale-takeover all fall through to launch; only a
         // live foreign owner blocks us.
         if let envoyage::browser_lock::Decision::RouteTo { owner_pid, .. } =
-            envoyage::browser_lock::decide(envoyage::browser_lock::read().as_ref(), self_pid)
+            envoyage::browser_lock::decide(lock.as_ref(), self_pid)
         {
             return Err(format!(
                 "ImmorTerm's browser is already open and owned by another session \
                  (pid {owner_pid}). Use that session's browser, or close it first."
             ));
+        }
+        // Stale lock (owner process gone) → its browser was NEVER closed: the
+        // BROWSER static isn't dropped at process exit, and a SIGKILLed owner
+        // runs no teardown at all. Reap that orphan before spawning ours, or
+        // every dead owner leaves a headless Chrome tree alive until reboot.
+        // ponytail: could live in envoyage::browser_lock (it owns browser_pid),
+        // move it there when a second consumer needs it.
+        if let Some(l) = lock.as_ref()
+            && l.owner_pid != self_pid
+            && envoyage::browser_lock::pid_alive(l.browser_pid)
+        {
+            eprintln!(
+                "[immorterm] reaping orphaned browser (pid {}) — owner {} is gone",
+                l.browser_pid, l.owner_pid
+            );
+            // SAFETY: signalling the process group envoyage created for the
+            // browser it spawned; `pid_alive` just confirmed it exists.
+            unsafe { nix::libc::kill(-(l.browser_pid as i32), nix::libc::SIGKILL) };
         }
         let url = launch_url.unwrap_or("about:blank");
         let session = BrowserSession::launch(rt, url)?;
@@ -3556,24 +3644,10 @@ fn handle_browser_close() -> Result<String, String> {
     let mut guard = browser_slot()
         .lock()
         .map_err(|_| "browser lock poisoned".to_string())?;
-    match guard.take() {
-        Some(session) => {
-            let pid = session.pid();
-            drop(session); // Drop → close() stops screencast + kills the exact PID.
-            // Clear the human-paused flag so a fresh browser starts un-paused.
-            BROWSER_PAUSED.store(false, std::sync::atomic::Ordering::Relaxed);
-            // Release the ownership lock only if it is ours (don't clobber a
-            // lock another live session took over).
-            if envoyage::browser_lock::read()
-                .map(|l| l.owner_pid == std::process::id())
-                .unwrap_or(false)
-            {
-                envoyage::browser_lock::release();
-            }
-            Ok(format!("Browser closed (pid {pid})."))
-        }
-        None => Ok("No browser session was open.".to_string()),
-    }
+    Ok(match teardown_browser(&mut guard) {
+        Some(pid) => format!("Browser closed (pid {pid})."),
+        None => "No browser session was open.".to_string(),
+    })
 }
 
 /// AI proactively hands the browser to the human (it noticed a bot-check /
@@ -5683,6 +5757,29 @@ fn task_counts(tasks: &[immorterm_core::team::TeamTask]) -> (usize, usize, usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The idle reaper's whole contract: expire only when the browser has been
+    /// untouched past the timeout AND no human holds the wheel.
+    #[test]
+    fn browser_idle_reaper_respects_touch_and_pause() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let stale = now_ms() - BROWSER_IDLE_TIMEOUT_MS - 1;
+
+        BROWSER_PAUSED.store(false, Relaxed);
+        BROWSER_LAST_USED_MS.store(0, Relaxed);
+        assert!(!browser_idle_expired(), "never used → nothing to reap");
+
+        BROWSER_LAST_USED_MS.store(stale, Relaxed);
+        assert!(browser_idle_expired(), "untouched past the timeout → reap");
+
+        browser_touch();
+        assert!(!browser_idle_expired(), "a tool call resets the timer");
+
+        BROWSER_LAST_USED_MS.store(stale, Relaxed);
+        BROWSER_PAUSED.store(true, Relaxed);
+        assert!(!browser_idle_expired(), "human has the wheel → never reap");
+        BROWSER_PAUSED.store(false, Relaxed);
+    }
 
     #[test]
     fn dead_pipe_classifies_transport_death() {
