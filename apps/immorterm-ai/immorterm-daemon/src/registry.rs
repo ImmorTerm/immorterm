@@ -1376,14 +1376,24 @@ mod project_identity_tests {
         assert_eq!(hint, None, "CLI found → install path, no hint");
         assert!(!Path::new(&owner).join(".immorterm").join(MEMORY_HINT_FLAG).exists());
 
-        // Non-blocking spawn — poll briefly for the fake CLI's output.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        // Non-blocking spawn — poll for the fake CLI's output. Wait for the
+        // EXPECTED content, not merely for the file to become readable: the
+        // shell's `>` truncates before it writes, so a first successful read
+        // can legitimately return "". Breaking on that produced a load-dependent
+        // flake that failed with an empty-string mismatch and no explanation.
+        let want = format!("hooks install --project {}", owner);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut args = String::new();
         while std::time::Instant::now() < deadline {
-            if let Ok(s) = fs::read_to_string(&out) { args = s; break }
+            args = fs::read_to_string(&out).unwrap_or_default();
+            if args.trim() == want { break }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        assert_eq!(args.trim(), format!("hooks install --project {}", owner));
+        assert_eq!(
+            args.trim(), want,
+            "fake CLI never recorded the expected argv (empty = it was never \
+             spawned or never ran; different = wrong spawn contract)"
+        );
         let _ = fs::remove_dir_all(&owner);
     }
 
