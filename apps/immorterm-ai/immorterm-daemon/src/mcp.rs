@@ -67,8 +67,22 @@ fn browser_reopen() {
 /// session is process-global and nothing but an explicit `browser_close` ever
 /// tears it down, so headless Chrome sits on ~500MB of leader + renderers
 /// forever (observed: a width-probe tab still alive 2 days later).
-/// ponytail: one fixed timeout, no config knob — add one when 15min is wrong.
+/// ponytail: one knob, `IMMORTERM_BROWSER_IDLE_MS`, only because a 15-minute
+/// hardcode makes the reaper untestable end-to-end. Not otherwise configurable.
 const BROWSER_IDLE_TIMEOUT_MS: u64 = 15 * 60 * 1000;
+
+/// The effective idle timeout — `IMMORTERM_BROWSER_IDLE_MS` if it parses, else
+/// the 15-minute default. Read once per process.
+fn browser_idle_timeout_ms() -> u64 {
+    static CACHED: OnceLock<u64> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("IMMORTERM_BROWSER_IDLE_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+            .unwrap_or(BROWSER_IDLE_TIMEOUT_MS)
+    })
+}
 
 /// `now_ms()` of the last browser tool call or human panel input. 0 = never
 /// used (no browser open yet), which never expires.
@@ -88,7 +102,7 @@ fn browser_idle_expired() -> bool {
         return false;
     }
     let last = BROWSER_LAST_USED_MS.load(std::sync::atomic::Ordering::Relaxed);
-    last != 0 && now_ms().saturating_sub(last) > BROWSER_IDLE_TIMEOUT_MS
+    last != 0 && now_ms().saturating_sub(last) > browser_idle_timeout_ms()
 }
 
 /// The single browser teardown path — explicit close, idle reap, and process
@@ -169,8 +183,8 @@ fn browser_pump_loop(session: String) {
             if guard.is_some() && browser_idle_expired() {
                 if let Some(pid) = teardown_browser(&mut guard) {
                     eprintln!(
-                        "[immorterm] closed idle browser (pid {pid}) after {}m without use",
-                        BROWSER_IDLE_TIMEOUT_MS / 60_000
+                        "[immorterm] closed idle browser (pid {pid}) after {}s without use",
+                        browser_idle_timeout_ms() / 1000
                     );
                 }
                 continue;
@@ -3329,6 +3343,10 @@ fn with_browser<T>(
     // re-pin to the newest remaining page before acting. A fully-dead browser
     // surfaces as a dead-pipe error, handled by the reset below.
     let result = session.ensure_live_target().and_then(|()| f(session));
+    // Touch again on completion: the idle window should start when the work
+    // finishes, not when it began, or a slow call (navigate + screenshot) spends
+    // its own idle budget.
+    browser_touch();
     // Dead-pipe auto-reset: if the call failed because the browser crashed or
     // the user closed the window, evict the corpse session so the NEXT call
     // (including immorterm_browser_open) launches a fresh one instead of
@@ -5760,7 +5778,7 @@ mod tests {
     #[test]
     fn browser_idle_reaper_respects_touch_and_pause() {
         use std::sync::atomic::Ordering::Relaxed;
-        let stale = now_ms() - BROWSER_IDLE_TIMEOUT_MS - 1;
+        let stale = now_ms() - browser_idle_timeout_ms() - 1;
 
         BROWSER_PAUSED.store(false, Relaxed);
         BROWSER_LAST_USED_MS.store(0, Relaxed);
