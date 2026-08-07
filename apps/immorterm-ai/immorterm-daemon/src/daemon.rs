@@ -1191,7 +1191,9 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                             let mut registry = crate::registry::Registry::load();
                             if old_session.as_deref() != Some(&ai_event.session_id) {
                                 info!("Claude session via OSC: {}", &ai_event.session_id[..8.min(ai_event.session_id.len())]);
-                                registry.update_claude_session(&state.window_id, &ai_event.session_id);
+                                if !registry.update_claude_session(&state.window_id, &ai_event.session_id) {
+                                    warn!("Resume id from OSC dropped: no registry entry for window_id={} (self-heal will re-register)", state.window_id);
+                                }
                             }
                             registry.update_ai_stats(&state.window_id, &state.claude);
                             let _ = registry.save();
@@ -1637,7 +1639,9 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                     state.claude.session_id = Some(uuid.clone());
                     state.claude.had_ai_session = true;
                     let mut registry = crate::registry::Registry::load();
-                    registry.update_claude_session(&state.window_id, &uuid);
+                    if !registry.update_claude_session(&state.window_id, &uuid) {
+                        warn!("Backfilled resume id dropped: no registry entry for window_id={} (self-heal will re-register)", state.window_id);
+                    }
                     if let Err(e) = registry.save() {
                         warn!("Failed to persist backfilled ai_session_id: {}", e);
                     }
@@ -1789,8 +1793,10 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
 
                     // Update Claude stats on state change
                     if changed {
-                        if let Some(ref sid) = state.claude.session_id {
-                            registry.update_claude_session(&state.window_id, sid);
+                        if let Some(ref sid) = state.claude.session_id
+                            && !registry.update_claude_session(&state.window_id, sid)
+                        {
+                            warn!("Resume id dropped on stats tick: no registry entry for window_id={}", state.window_id);
                         }
                         registry.update_ai_stats(&state.window_id, &state.claude);
                     }
@@ -2417,7 +2423,9 @@ async fn handle_client_connection(
                 let mut registry = crate::registry::Registry::load();
                 if old_session.as_deref() != Some(&session_id) {
                     info!("Claude session pushed via IPC: {}", &session_id[..8.min(session_id.len())]);
-                    registry.update_claude_session(&state.window_id, &session_id);
+                    if !registry.update_claude_session(&state.window_id, &session_id) {
+                        warn!("Resume id pushed via IPC dropped: no registry entry for window_id={}", state.window_id);
+                    }
                 }
                 registry.update_ai_stats(&state.window_id, &state.claude);
                 if let Err(e) = registry.save() {

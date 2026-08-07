@@ -1087,9 +1087,24 @@ impl Registry {
     }
 
     /// Update the Claude session ID for a window.
-    pub fn update_claude_session(&mut self, window_id: &str, claude_id: &str) {
-        if let Some(entry) = self.sessions.iter_mut().find(|e| e.window_id == window_id) {
-            entry.ai_session_id = Some(claude_id.to_string());
+    /// Returns false when no entry matches `window_id` — i.e. the resume id was
+    /// dropped on the floor.
+    ///
+    /// This used to be a silent no-op, which is why not one registry entry in
+    /// 200 backup snapshots ever carried a resume id: all four writers of the
+    /// AI session id call this, and a session whose entry had been clobbered by
+    /// the (now fixed) write race had nothing to write into. The id was
+    /// discovered correctly every time and then discarded without a word.
+    /// Self-healing re-registers a missing entry within ~10s and carries the id
+    /// with it, so a `false` here is recoverable — but it must be visible.
+    #[must_use = "a dropped resume id means that session can never be resumed"]
+    pub fn update_claude_session(&mut self, window_id: &str, claude_id: &str) -> bool {
+        match self.sessions.iter_mut().find(|e| e.window_id == window_id) {
+            Some(entry) => {
+                entry.ai_session_id = Some(claude_id.to_string());
+                true
+            }
+            None => false,
         }
     }
 
@@ -1422,6 +1437,20 @@ mod merge_tests {
         let ours = reg(vec![entry("a", "A"), entry("b", "B")], vec![entry("b", "B")]);
         let out = ours.merge_with(vec![entry("a", "A"), entry("b", "B")]);
         assert_eq!(names(&out), vec!["b"], "a delete we made is still a delete");
+    }
+
+    /// A resume id written against a window_id that has no entry is a session
+    /// that can never be resumed. It must report the failure, not swallow it —
+    /// this is why 200 backup snapshots contained zero resume ids.
+    #[test]
+    fn update_claude_session_reports_a_missing_entry() {
+        let mut reg = reg(vec![], vec![entry("a", "A")]);
+        assert!(reg.update_claude_session("a", "uuid-1"), "entry present → written");
+        assert_eq!(reg.sessions[0].ai_session_id.as_deref(), Some("uuid-1"));
+        assert!(
+            !reg.update_claude_session("ghost", "uuid-2"),
+            "no entry for that window_id → must report false, not silently drop"
+        );
     }
 
     /// The exact production scenario, in miniature: many daemons registering
