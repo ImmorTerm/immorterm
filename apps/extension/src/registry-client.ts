@@ -434,6 +434,11 @@ function readRegistry(): RegistryJson | null {
 
         normalizeRegistryKeys(data);
         cache = { data, mtime: currentMtime };
+        // Snapshot what disk actually said, before any caller mutates `data`
+        // in place. flushRegistryToDisk() diffs against this to work out which
+        // entries WE changed, so it can impose only those instead of stamping
+        // our whole (possibly stale) view over everyone else's.
+        diskBaseline = structuredClone(data);
         return data;
     } catch (err) {
         // ROOT CAUSE FIX #2: Instead of returning null (which leads to empty overwrites),
@@ -454,6 +459,13 @@ function readRegistry(): RegistryJson | null {
 // (so reads always see fresh data), but disk I/O is deferred by 100ms.
 let writeTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingWriteData: RegistryJson | null = null;
+
+/**
+ * The registry exactly as last read from (or written to) disk, before any
+ * in-place mutation by callers. `flushRegistryToDisk()` diffs the pending data
+ * against this to identify which entries this process actually changed.
+ */
+let diskBaseline: RegistryJson | null = null;
 
 /**
  * Copy of `data` with each vendor-neutral key mirrored back under its legacy
@@ -483,12 +495,100 @@ function withLegacyKeyMirror(data: RegistryJson): RegistryJson {
     };
 }
 
+// ── Cross-process write serialization ─────────────────────────────
+//
+// registry.json has ~90 daemon writers plus one extension host per VS Code
+// window, and every one of them does read → modify → write. Nothing serialized
+// them, so a writer's snapshot silently erased entries that appeared after its
+// read — measured at 87 live sessions with only 28 registered, and worst during
+// a multi-window restore when every host flushes at once.
+//
+// Two changes fix it together: this advisory lock (same file the Rust daemon
+// locks in registry.rs), and the three-way merge below. The lock is what makes
+// the re-read inside the merge meaningful.
+const REGISTRY_LOCK_PATH = path.join(os.homedir(), '.immorterm', 'registry.lock');
+
+/**
+ * Run `fn` holding an exclusive advisory lock on the registry.
+ *
+ * ponytail: O_EXLOCK (macOS/BSD) rather than a lockfile spin — it's one syscall
+ * and blocks until acquired. On platforms without it we run unlocked; the merge
+ * still prevents whole-file clobbering, which is the damaging half.
+ */
+function withRegistryLock<T>(fn: () => T): T {
+    const EXLOCK = (fs.constants as { O_EXLOCK?: number }).O_EXLOCK;
+    let fd: number | undefined;
+    if (EXLOCK !== undefined) {
+        try {
+            fs.mkdirSync(path.dirname(REGISTRY_LOCK_PATH), { recursive: true });
+            fd = fs.openSync(REGISTRY_LOCK_PATH, fs.constants.O_CREAT | fs.constants.O_RDWR | EXLOCK);
+        } catch (err) {
+            logFn(`[registry] lock unavailable (${err}) — writing unserialized`);
+        }
+    }
+    try {
+        return fn();
+    } finally {
+        if (fd !== undefined) {
+            try { fs.closeSync(fd); } catch { /* lock releases with the fd anyway */ }
+        }
+    }
+}
+
+/** Identity for merge purposes — mirrors the Rust side: name, else window_id. */
+function mergeKey(e: RegistryEntryJson): string {
+    return (e.name as string) || (e.window_id as string) || '';
+}
+
+/**
+ * Apply only OUR changes on top of whatever is on disk right now:
+ *   - in baseline, gone from ours    → we deleted it        → drop
+ *   - ours differs from baseline     → we changed it        → write ours
+ *   - unchanged since baseline       → someone else owns it → keep disk's
+ *   - on disk, never in our baseline → arrived after we read → keep
+ */
+function mergeRegistry(
+    disk: RegistryEntryJson[],
+    baseline: RegistryEntryJson[],
+    mine: RegistryEntryJson[],
+): RegistryEntryJson[] {
+    const baseMap = new Map(baseline.map(e => [mergeKey(e), JSON.stringify(e)]));
+    const mineMap = new Map(mine.map(e => [mergeKey(e), e]));
+    const out: RegistryEntryJson[] = [];
+
+    for (const diskEntry of disk) {
+        const key = mergeKey(diskEntry);
+        const ours = mineMap.get(key);
+        if (ours) {
+            const base = baseMap.get(key);
+            out.push(base === undefined || base !== JSON.stringify(ours) ? ours : diskEntry);
+        } else if (!baseMap.has(key)) {
+            out.push(diskEntry);   // appeared after our read — not ours to delete
+        }
+    }
+    const seen = new Set(out.map(mergeKey));
+    for (const e of mine) {
+        if (!seen.has(mergeKey(e))) out.push(e);
+    }
+    return out;
+}
+
+/** Read the registry straight from disk, bypassing the in-memory cache. */
+function readRegistryFromDisk(): RegistryEntryJson[] {
+    try {
+        const parsed = JSON.parse(fs.readFileSync(REGISTRY_PATH, 'utf8')) as RegistryJson;
+        if (!parsed.sessions || !Array.isArray(parsed.sessions)) return [];
+        normalizeRegistryKeys(parsed);
+        return parsed.sessions;
+    } catch {
+        return [];
+    }
+}
+
 function flushRegistryToDisk(): void {
     if (!pendingWriteData) return;
     const data = pendingWriteData;
     pendingWriteData = null;
-
-    const entryCount = data.sessions?.length ?? 0;
 
     try {
         const dir = path.dirname(REGISTRY_PATH);
@@ -496,12 +596,25 @@ function flushRegistryToDisk(): void {
             fs.mkdirSync(dir, { recursive: true });
         }
 
-        // LAYER 1: Backup current file before overwriting
-        backupRegistry();
+        withRegistryLock(() => {
+            // Re-read under the lock: our snapshot may be up to 100ms stale,
+            // and during a multi-window restore that is exactly when other
+            // hosts and daemons are registering.
+            data.sessions = mergeRegistry(
+                readRegistryFromDisk(),
+                diskBaseline?.sessions ?? data.sessions,
+                data.sessions ?? [],
+            );
 
-        const tmp = REGISTRY_PATH + '.tmp';
-        fs.writeFileSync(tmp, JSON.stringify(withLegacyKeyMirror(data), null, 2) + '\n');
-        fs.renameSync(tmp, REGISTRY_PATH);
+            // LAYER 1: Backup current file before overwriting
+            backupRegistry();
+
+            const tmp = REGISTRY_PATH + '.tmp';
+            fs.writeFileSync(tmp, JSON.stringify(withLegacyKeyMirror(data), null, 2) + '\n');
+            fs.renameSync(tmp, REGISTRY_PATH);
+        });
+        diskBaseline = structuredClone(data);
+        const entryCount = data.sessions?.length ?? 0;
 
         // Update cache with actual mtime from disk
         try {
@@ -514,7 +627,7 @@ function flushRegistryToDisk(): void {
         logFn(`[registry] flushed ${entryCount} entries to disk`);
     } catch (err) {
         cache = { data: null, mtime: 0 };
-        logFn(`[registry] flush FAILED (${entryCount} entries): ${err}`);
+        logFn(`[registry] flush FAILED (${data.sessions?.length ?? 0} entries): ${err}`);
     }
 }
 

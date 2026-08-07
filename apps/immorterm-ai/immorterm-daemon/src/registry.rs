@@ -356,6 +356,43 @@ fn registry_path() -> PathBuf {
         .join("registry.json")
 }
 
+/// Path to the advisory write lock guarding `registry.json`.
+fn registry_lock_path() -> PathBuf {
+    let dir = socket_dir();
+    dir.parent().unwrap_or(&dir).join("registry.lock")
+}
+
+/// Advisory lock serializing registry read-modify-writes across processes,
+/// mirroring `mcp.rs`'s `lock_plan_dir()`. Held for the duration of a `save()`
+/// and released on drop.
+///
+/// Returns `None` if the lock can't be taken (unwritable dir, or the flock call
+/// itself fails). Degrading to the old unlocked behaviour is deliberate: a
+/// session that can't lock should still register — losing the race is bad, but
+/// refusing to appear at all is worse.
+/// ponytail: blocking exclusive lock, no timeout — held only across one 15KB
+/// read-merge-write, so contention is microseconds. Add a try_lock + backoff
+/// only if a wedged holder is ever observed in the wild.
+fn lock_registry() -> Option<nix::fcntl::Flock<std::fs::File>> {
+    let path = registry_lock_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .ok()?;
+    match nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive) {
+        Ok(guard) => Some(guard),
+        Err((_, e)) => {
+            warn!("registry lock unavailable ({e}) — writing unserialized");
+            None
+        }
+    }
+}
+
 /// Path to the backup directory.
 fn backup_dir() -> PathBuf {
     let dir = socket_dir();
@@ -708,6 +745,12 @@ pub struct RegistryEntry {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Registry {
     pub sessions: Vec<RegistryEntry>,
+    /// Snapshot of `sessions` exactly as it was read from disk by `load()`.
+    /// Never serialized — it exists so `save()` can tell "I changed this entry"
+    /// apart from "I never knew about this entry", which is what makes the
+    /// three-way merge in `save()` possible. See the comment there.
+    #[serde(skip)]
+    baseline: Vec<RegistryEntry>,
 }
 
 /// Serialize a registry to `Value` and mirror each vendor-neutral key back
@@ -750,6 +793,14 @@ impl Registry {
     /// Load the registry from disk (or return empty if doesn't exist).
     /// On parse failure, attempts recovery from the latest backup.
     pub fn load() -> Self {
+        let mut loaded = Self::load_raw();
+        loaded.baseline = loaded.sessions.clone();
+        loaded
+    }
+
+    /// `load()` without stamping the baseline — used by `save()`'s merge to
+    /// re-read the current on-disk state, which must NOT become our baseline.
+    fn load_raw() -> Self {
         let path = registry_path();
         match fs::read_to_string(&path) {
             Ok(contents) => {
@@ -789,8 +840,30 @@ impl Registry {
             fs::create_dir_all(parent)?;
         }
 
+        // Serialize the whole read-modify-write against every other writer
+        // (~90 session daemons plus one VS Code extension host per window).
+        // Without this, `load()` → mutate → `save()` is not atomic across
+        // processes: any entry another writer added after our load is erased,
+        // because our in-memory snapshot never contained it. Measured before
+        // this landed: 87 live sessions, 28 registered, and the entry count
+        // dropping on its own while nothing was happening.
+        //
+        // The lock is taken on WRITES only. Readers stay lock-free — the
+        // tmp+rename below is atomic, so a reader always sees a whole file.
+        let _lock = lock_registry();
+
+        // Three-way merge against the CURRENT disk state, so we only impose
+        // the entries we actually touched:
+        //   • in baseline, gone from ours   → we deleted it       → drop
+        //   • ours differs from baseline    → we changed it       → write ours
+        //   • unchanged since baseline      → someone else owns it → keep disk's
+        //   • on disk, never in our baseline → arrived after we loaded → keep
+        // Holding the lock is what makes this re-read meaningful: without it
+        // another writer can land between the read and the rename.
+        let merged = self.merge_over_disk();
+
         // Shrinkage guard
-        let new_count = self.sessions.len();
+        let new_count = merged.len();
         if let Ok(disk_data) = fs::read_to_string(&path)
             && let Ok(disk_reg) = serde_json::from_str::<Registry>(&disk_data)
         {
@@ -810,12 +883,77 @@ impl Registry {
         // LAYER 1: Backup before overwriting
         backup_registry();
 
+        let to_write = Registry { sessions: merged, baseline: Vec::new() };
         let tmp = path.with_extension("tmp");
-        let json = serde_json::to_string_pretty(&dual_write_legacy_keys(self)?)
+        let json = serde_json::to_string_pretty(&dual_write_legacy_keys(&to_write)?)
             .map_err(std::io::Error::other)?;
         fs::write(&tmp, json)?;
         fs::rename(&tmp, &path)?;
         Ok(())
+    }
+
+    /// Identity of an entry for merge purposes. `register()` dedups by name OR
+    /// window_id, so name is the primary key with window_id as the fallback for
+    /// entries that carry no name.
+    fn merge_key(e: &RegistryEntry) -> String {
+        if !e.name.is_empty() { e.name.clone() } else { e.window_id.clone() }
+    }
+
+    /// Compare by serialized form — `RegistryEntry` nests several types that
+    /// don't derive `PartialEq`, and entries are small enough that this is
+    /// cheaper than threading derives through all of them.
+    fn entry_repr(e: &RegistryEntry) -> String {
+        serde_json::to_string(e).unwrap_or_default()
+    }
+
+    /// Apply only OUR changes on top of whatever is on disk right now.
+    /// Caller must hold the registry lock.
+    fn merge_over_disk(&self) -> Vec<RegistryEntry> {
+        self.merge_with(Self::load_raw().sessions)
+    }
+
+    /// The merge itself, with the on-disk state passed in so it can be tested
+    /// without touching the filesystem.
+    fn merge_with(&self, disk: Vec<RegistryEntry>) -> Vec<RegistryEntry> {
+        use std::collections::HashMap;
+        let base: HashMap<String, String> = self
+            .baseline
+            .iter()
+            .map(|e| (Self::merge_key(e), Self::entry_repr(e)))
+            .collect();
+        let mine: HashMap<String, &RegistryEntry> =
+            self.sessions.iter().map(|e| (Self::merge_key(e), e)).collect();
+
+        let mut out: Vec<RegistryEntry> = Vec::new();
+        for disk_entry in disk {
+            let key = Self::merge_key(&disk_entry);
+            match mine.get(&key) {
+                // We still have it: ours wins only if we actually changed it.
+                Some(ours) => {
+                    let changed = base
+                        .get(&key)
+                        .map(|b| *b != Self::entry_repr(ours))
+                        .unwrap_or(true);
+                    out.push(if changed { (*ours).clone() } else { disk_entry });
+                }
+                // Missing from ours: a deliberate delete only if we had it at
+                // load time. Otherwise it arrived after us and must survive.
+                None => {
+                    if !base.contains_key(&key) {
+                        out.push(disk_entry);
+                    }
+                }
+            }
+        }
+        // Entries we added that aren't on disk yet.
+        let seen: std::collections::HashSet<String> =
+            out.iter().map(Self::merge_key).collect();
+        for e in &self.sessions {
+            if !seen.contains(&Self::merge_key(e)) {
+                out.push(e.clone());
+            }
+        }
+        out
     }
 
     /// Prune dead sessions (process no longer alive).
@@ -1234,6 +1372,74 @@ pub fn deregister_session() {
     registry.deregister(pid);
     if let Err(e) = registry.save() {
         error!("Failed to deregister session from registry: {}", e);
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    fn entry(name: &str, display: &str) -> RegistryEntry {
+        serde_json::from_value(serde_json::json!({
+            "pid": 1, "name": name, "window_id": name, "display_name": display,
+            "project_dir": "/tmp/p", "shell": "/bin/zsh", "created_at": 0,
+        }))
+        .expect("minimal entry should deserialize")
+    }
+
+    fn reg(baseline: Vec<RegistryEntry>, sessions: Vec<RegistryEntry>) -> Registry {
+        Registry { sessions, baseline }
+    }
+
+    fn names(v: &[RegistryEntry]) -> Vec<&str> {
+        v.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    /// The whole point of the merge: a writer must impose only its own changes,
+    /// never its whole snapshot. Each case here is a way the old whole-file
+    /// overwrite lost data.
+    #[test]
+    fn merge_imposes_only_our_own_changes() {
+        // We loaded [a], then registered b. Meanwhile another daemon added c.
+        let ours = reg(vec![entry("a", "A")], vec![entry("a", "A"), entry("b", "B")]);
+        let disk = vec![entry("a", "A"), entry("c", "C")];
+        let out = ours.merge_with(disk);
+        assert!(names(&out).contains(&"c"), "an entry added after our load must survive");
+        assert!(names(&out).contains(&"b"), "our new entry must land");
+        assert!(names(&out).contains(&"a"), "untouched entries stay");
+
+        // We changed a's display name → ours wins.
+        let ours = reg(vec![entry("a", "A")], vec![entry("a", "RENAMED")]);
+        let out = ours.merge_with(vec![entry("a", "A")]);
+        assert_eq!(out[0].display_name, "RENAMED");
+
+        // We did NOT touch a, but another process did → keep theirs.
+        let ours = reg(vec![entry("a", "A")], vec![entry("a", "A")]);
+        let out = ours.merge_with(vec![entry("a", "THEIRS")]);
+        assert_eq!(out[0].display_name, "THEIRS", "unchanged entries must not clobber");
+
+        // We deliberately removed a (it was in our baseline) → it goes.
+        let ours = reg(vec![entry("a", "A"), entry("b", "B")], vec![entry("b", "B")]);
+        let out = ours.merge_with(vec![entry("a", "A"), entry("b", "B")]);
+        assert_eq!(names(&out), vec!["b"], "a delete we made is still a delete");
+    }
+
+    /// The exact production scenario, in miniature: many daemons registering
+    /// concurrently, each holding a snapshot from before the others existed.
+    #[test]
+    fn concurrent_registrations_all_survive() {
+        let disk_start = vec![entry("existing", "E")];
+        let mut disk = disk_start.clone();
+        for name in ["d1", "d2", "d3", "d4", "d5"] {
+            // Every daemon loaded the SAME stale snapshot, then registered itself.
+            let mut mine = disk_start.clone();
+            mine.push(entry(name, name));
+            disk = reg(disk_start.clone(), mine).merge_with(disk);
+        }
+        let got = names(&disk);
+        for name in ["existing", "d1", "d2", "d3", "d4", "d5"] {
+            assert!(got.contains(&name), "{name} was lost; got {got:?}");
+        }
     }
 }
 
