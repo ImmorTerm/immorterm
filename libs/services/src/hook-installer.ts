@@ -529,7 +529,17 @@ fi
 # but IMMORTERM_PROJECT_ID must still be scoped to prevent cross-project memory leakage
 if [ -n "$SESSION_ID" ]; then
   mkdir -p "$HOME/.immorterm/claude-env"
-  cat > "$HOME/.immorterm/claude-env/$SESSION_ID.env" << _ENVEOF
+  _IM_ENV_PATH="$HOME/.immorterm/claude-env/$SESSION_ID.env"
+  # Never overwrite a known terminal id with an empty one. This file is the
+  # ONLY reverse lookup from a Claude session UUID back to its ImmorTerm
+  # window, and it is what the daemon's resume-id backfill matches on. Hooks
+  # that fire without IMMORTERM_WINDOW_ID in their environment (subagents,
+  # compaction recovery) used to blank it, permanently costing that session
+  # its resume id — observed on 15 files, one of them a live session.
+  if [ -z "$IMMORTERM_ID" ] && [ -f "$_IM_ENV_PATH" ]; then
+    IMMORTERM_ID=$(sed -n 's/^IMMORTERM_ID=//p' "$_IM_ENV_PATH" | head -1)
+  fi
+  cat > "$_IM_ENV_PATH" << _ENVEOF
 IMMORTERM_ID=$IMMORTERM_ID
 IMMORTERM_PROJECT_ID=$PROJECT_ID
 _ENVEOF
