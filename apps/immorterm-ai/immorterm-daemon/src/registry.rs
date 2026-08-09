@@ -356,6 +356,25 @@ fn registry_path() -> PathBuf {
         .join("registry.json")
 }
 
+/// `~/.immorterm/registry.d/<project_id>/`  (the per-project directory).
+/// Sibling of `registry.json`; base mirrors `registry_path()`.
+fn registry_d_project_dir(project_id: &str) -> PathBuf {
+    let dir = socket_dir();
+    dir.parent()
+        .unwrap_or(&dir)
+        .join("registry.d")
+        .join(project_id)
+}
+
+/// Path to a session's per-session registry file:
+///   `~/.immorterm/registry.d/<project_id>/<window_id>.json`
+/// Both components are UUIDs / separator-free slugs used verbatim as single
+/// path segments. Callers MUST never pass an empty component (see the guards
+/// in `write_session_file` / `remove_session_file`).
+fn registry_d_path(project_id: &str, window_id: &str) -> PathBuf {
+    registry_d_project_dir(project_id).join(format!("{window_id}.json"))
+}
+
 /// Path to the advisory write lock guarding `registry.json`.
 fn registry_lock_path() -> PathBuf {
     let dir = socket_dir();
@@ -418,14 +437,14 @@ fn backup_registry() {
 
     let new_count = fs::read_to_string(&path)
         .ok()
-        .and_then(|s| serde_json::from_str::<Registry>(&s).ok())
+        .and_then(|s| parse_registry(&s).ok())
         .map(|r| r.sessions.len())
         .unwrap_or(0);
 
     if let Some((latest_path, _)) = collect_backup_files(&dir).last() {
         let latest_count = fs::read_to_string(latest_path)
             .ok()
-            .and_then(|s| serde_json::from_str::<Registry>(&s).ok())
+            .and_then(|s| parse_registry(&s).ok())
             .map(|r| r.sessions.len())
             .unwrap_or(0);
         if latest_count > 5 && new_count * 5 < latest_count * 4 {
@@ -529,7 +548,7 @@ pub fn recover_entry_from_backup(pid: u32, window_id: &str) -> Option<RegistryEn
     let files = collect_backup_files(&dir);
     for (backup_path, _) in files.iter().rev() {
         let Ok(contents) = fs::read_to_string(backup_path) else { continue };
-        let Ok(registry) = serde_json::from_str::<Registry>(&contents) else { continue };
+        let Ok(registry) = parse_registry(&contents) else { continue };
         if let Some(entry) = registry.sessions.iter().find(|e| e.pid == pid) {
             info!(
                 "Recovered entry from backup {:?} (matched PID {})",
@@ -559,7 +578,7 @@ fn read_latest_backup() -> Option<Registry> {
     let files = collect_backup_files(&dir);
     for (backup_path, _) in files.iter().rev() {
         let Ok(contents) = fs::read_to_string(backup_path) else { continue };
-        let Ok(registry) = serde_json::from_str::<Registry>(&contents) else { continue };
+        let Ok(registry) = parse_registry(&contents) else { continue };
         if !registry.sessions.is_empty() {
             info!(
                 "Recovered registry from backup: {:?} ({} sessions)",
@@ -768,25 +787,95 @@ pub struct Registry {
 ///
 /// REMOVE once no pre-T20 daemon can still be running (a release cycle plus a
 /// machine reboot); the reader-side aliases stay forever for old files.
-fn dual_write_legacy_keys<T: Serialize>(value: &T) -> std::io::Result<serde_json::Value> {
-    const MIRRORED: &[(&str, &str)] = &[
-        ("ai_session_id", "claude_session_id"),
-        ("ai_transcript_path", "claude_transcript_path"),
-        ("ai_stats", "claude_stats"),
-    ];
+/// Single source of truth for the vendor-neutral → legacy key mirror list.
+const MIRRORED: &[(&str, &str)] = &[
+    ("ai_session_id", "claude_session_id"),
+    ("ai_transcript_path", "claude_transcript_path"),
+    ("ai_stats", "claude_stats"),
+];
 
+/// Mirror each `MIRRORED` key into one already-serialized entry object, in place.
+fn mirror_legacy_keys(obj: &mut serde_json::Map<String, serde_json::Value>) {
+    for (modern, legacy) in MIRRORED {
+        if let Some(v) = obj.get(*modern).cloned() {
+            obj.insert((*legacy).to_string(), v);
+        }
+    }
+}
+
+/// Serialize ONE entry to a `Value` with the three legacy keys mirrored in —
+/// the per-entry variant of [`dual_write_legacy_keys`], used by the per-session
+/// `registry.d` writer (which stores a bare entry, not a `Registry`).
+fn dual_write_entry_legacy_keys(entry: &RegistryEntry) -> std::io::Result<serde_json::Value> {
+    let mut v = serde_json::to_value(entry).map_err(std::io::Error::other)?;
+    if let Some(obj) = v.as_object_mut() {
+        mirror_legacy_keys(obj);
+    }
+    Ok(v)
+}
+
+fn dual_write_legacy_keys<T: Serialize>(value: &T) -> std::io::Result<serde_json::Value> {
     let mut root = serde_json::to_value(value).map_err(std::io::Error::other)?;
     if let Some(sessions) = root.get_mut("sessions").and_then(|s| s.as_array_mut()) {
         for entry in sessions.iter_mut() {
-            let Some(obj) = entry.as_object_mut() else { continue };
-            for (modern, legacy) in MIRRORED {
-                if let Some(v) = obj.get(*modern).cloned() {
-                    obj.insert((*legacy).to_string(), v);
-                }
+            if let Some(obj) = entry.as_object_mut() {
+                mirror_legacy_keys(obj);
             }
         }
     }
     Ok(root)
+}
+
+/// Inverse of [`mirror_legacy_keys`]: collapse each mirrored pair to the MODERN
+/// key in one entry object, in place. If both keys are present (a dual-written
+/// entry) the legacy duplicate is dropped; if only the legacy key is present (an
+/// old file) it is promoted to the modern name.
+///
+/// This MUST run before deserializing into `RegistryEntry`: `ai_session_id`
+/// carries `#[serde(alias = "claude_session_id")]`, and serde rejects an object
+/// that has BOTH the field and its alias as a `duplicate field` error. Without
+/// this step `from_str::<Registry>` fails on our own `dual_write_legacy_keys`
+/// output, `load()` falls through to an (also dual-written) backup that fails the
+/// same way, and returns an EMPTY registry — a self-inflicted wipe. Mirrors the
+/// TS side's `normalizeRegistryKeys`.
+fn unmirror_legacy_keys(obj: &mut serde_json::Map<String, serde_json::Value>) {
+    for (modern, legacy) in MIRRORED {
+        let has_modern = obj.contains_key(*modern);
+        // remove() runs regardless (drops the duplicate when modern is present);
+        // only promote the legacy value when the modern key is absent.
+        if let Some(legacy_val) = obj.remove(*legacy)
+            && !has_modern
+        {
+            obj.insert((*modern).to_string(), legacy_val);
+        }
+    }
+}
+
+/// Parse a whole `registry.json` document, normalizing legacy keys first so that
+/// dual-written entries deserialize. Use this everywhere instead of
+/// `serde_json::from_str::<Registry>` — see [`unmirror_legacy_keys`].
+fn parse_registry(contents: &str) -> Result<Registry, serde_json::Error> {
+    let mut root: serde_json::Value = serde_json::from_str(contents)?;
+    if let Some(sessions) = root.get_mut("sessions").and_then(|s| s.as_array_mut()) {
+        for entry in sessions.iter_mut() {
+            if let Some(obj) = entry.as_object_mut() {
+                unmirror_legacy_keys(obj);
+            }
+        }
+    }
+    serde_json::from_value(root)
+}
+
+/// Parse ONE bare `registry.d/<project>/<window>.json` entry, normalizing legacy
+/// keys first (the per-session files are dual-written too). Phase-2 readers of
+/// `registry.d` MUST go through here, not raw `from_str::<RegistryEntry>`.
+#[allow(dead_code)]
+fn parse_session_entry(contents: &str) -> Result<RegistryEntry, serde_json::Error> {
+    let mut v: serde_json::Value = serde_json::from_str(contents)?;
+    if let Some(obj) = v.as_object_mut() {
+        unmirror_legacy_keys(obj);
+    }
+    serde_json::from_value(v)
 }
 
 impl Registry {
@@ -804,7 +893,7 @@ impl Registry {
         let path = registry_path();
         match fs::read_to_string(&path) {
             Ok(contents) => {
-                match serde_json::from_str::<Registry>(&contents) {
+                match parse_registry(&contents) {
                     Ok(registry) => registry,
                     Err(e) => {
                         // ROOT CAUSE FIX #2: Parse failure — recover from backup
@@ -865,7 +954,7 @@ impl Registry {
         // Shrinkage guard
         let new_count = merged.len();
         if let Ok(disk_data) = fs::read_to_string(&path)
-            && let Ok(disk_reg) = serde_json::from_str::<Registry>(&disk_data)
+            && let Ok(disk_reg) = parse_registry(&disk_data)
         {
             let disk_count = disk_reg.sessions.len();
             if disk_count > 5 && new_count * 5 < disk_count * 4 {
@@ -978,18 +1067,37 @@ impl Registry {
             return;
         }
 
+        let removed = self.dead_session_files();
         self.sessions.retain(|entry| is_process_alive(entry.pid));
+        for (project_id, window_id) in removed {
+            remove_session_file(&project_id, &window_id);
+        }
     }
 
     /// Force-prune dead sessions regardless of safety threshold.
     /// Only use via explicit `--force` flag.
     pub fn prune_force(&mut self) {
         let before = self.sessions.len();
+        let removed = self.dead_session_files();
         self.sessions.retain(|entry| is_process_alive(entry.pid));
+        for (project_id, window_id) in removed {
+            remove_session_file(&project_id, &window_id);
+        }
         let pruned = before - self.sessions.len();
         if pruned > 0 {
             warn!("Force-pruned {}/{} dead sessions", pruned, before);
         }
+    }
+
+    /// (project_id, window_id) of every entry whose PID is dead — the set
+    /// `prune`/`prune_force` are about to drop, so their per-session
+    /// `registry.d` files can be removed to match.
+    fn dead_session_files(&self) -> Vec<(String, String)> {
+        self.sessions
+            .iter()
+            .filter(|e| !is_process_alive(e.pid) && !e.window_id.is_empty())
+            .filter_map(|e| project_id_for_entry(e).map(|pid| (pid, e.window_id.clone())))
+            .collect()
     }
 
     /// Register a new session, merging forward any fields that existed on a prior
@@ -1122,6 +1230,23 @@ impl Registry {
                 context_pct: if claude.api_stats.context_pct > 0.0 { Some(claude.api_stats.context_pct) } else { None },
             });
         }
+    }
+
+    /// Persist one window's entry to all destinations: the global registry
+    /// (`save()` — keeps its lock/merge/backup/shrinkage guard), `session.json`,
+    /// and the per-session `registry.d` file. Call after ANY mutation of that
+    /// window's entry so the three copies never drift (e.g. an `ai_session_id`
+    /// discovered after spawn via OSC 1337 / env backfill). No matching entry
+    /// in memory → only the global `save()` runs (nothing to shadow).
+    pub fn persist_session(&mut self, window_id: &str) -> std::io::Result<()> {
+        self.save()?;
+        if let Some(entry) = self.sessions.iter().find(|e| e.window_id == window_id).cloned() {
+            write_session_json(&entry);
+            if let Err(e) = write_session_file(&entry) {
+                warn!("Failed to write registry.d for window_id={}: {}", window_id, e);
+            }
+        }
+        Ok(())
     }
 
     /// Generate restore-terminals.json format for VS Code extension compatibility.
@@ -1259,8 +1384,9 @@ pub fn register_session(
         worktree: owner.worktree,
     };
 
-    // Write session.json inside the per-session log directory
-    write_session_json(&entry);
+    // Key to find the entry back after register()'s forward-merge runs.
+    let window_id = entry.window_id.clone();
+    let name = entry.name.clone();
 
     let mut registry = Registry::load();
     // Do NOT prune here — dead entries are the restore state after laptop restart.
@@ -1268,6 +1394,22 @@ pub fn register_session(
     registry.register(entry);
     if let Err(e) = registry.save() {
         error!("Failed to register session in registry: {}", e);
+    }
+
+    // Write the side files (session.json + registry.d) from the POST-merge
+    // entry, not the raw incoming one: a respawn with ai_session_id=None must
+    // carry forward the existing id (register() did that in-memory), never blank
+    // it in any of the three destinations. See the field-stripping fix.
+    if let Some(merged) = registry
+        .sessions
+        .iter()
+        .find(|e| e.name == name || (!window_id.is_empty() && e.window_id == window_id))
+        .cloned()
+    {
+        write_session_json(&merged);
+        if let Err(e) = write_session_file(&merged) {
+            warn!("Failed to write registry.d at spawn for window_id={}: {}", window_id, e);
+        }
     }
 }
 
@@ -1291,6 +1433,97 @@ pub fn write_session_json(entry: &RegistryEntry) {
             }
         }
         Err(e) => error!("Failed to serialize session.json: {}", e),
+    }
+}
+
+/// Resolve the `project_id` used to key this entry's `registry.d` file.
+/// Prefers the entry's own `owner_project_id`; falls back to reading (or
+/// creating) `project.json` under `owner_project_dir`, then `project_dir`.
+/// `None` only when no directory yields an identity (unwritable / empty).
+fn project_id_for_entry(entry: &RegistryEntry) -> Option<String> {
+    if let Some(id) = entry.owner_project_id.as_deref().filter(|s| !s.is_empty()) {
+        return Some(id.to_string());
+    }
+    let dir = entry
+        .owner_project_dir
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .or(Some(entry.project_dir.as_str()))
+        .filter(|s| !s.is_empty())?;
+    read_or_create_project(dir).map(|p| p.id)
+}
+
+/// Atomically write a session's per-session `registry.d` file:
+///   mkdir -p parent → write tmp in the SAME dir → fsync → rename over dest.
+///
+/// The file is ONE `RegistryEntry` (not a `Registry`), with the three legacy
+/// keys mirrored in — identical serde surface to a row in `registry.json`.
+///
+/// Single-writer: each `registry.d/<project_id>/<window_id>.json` is written by
+/// exactly one process for its whole lifetime — the daemon that owns that
+/// `window_id`. So no flock, no read-merge: the writer just overwrites its own
+/// previous version atomically; the tmp+fsync+rename makes every read see a
+/// whole file. This holds ONLY while `window_id` is globally unique per live
+/// daemon (it is — VS Code terminal identity, `register()` dedups on it).
+// ponytail: no lock, single-writer invariant. If two daemons ever share a
+// window_id, this needs the same flock the global registry has.
+// ponytail: dual-writes claude_* mirror per spec, but a file carrying BOTH
+// ai_session_id and claude_session_id will NOT deserialize into RegistryEntry
+// (the #[serde(alias)] derive rejects it as a duplicate field — same as the
+// global registry.json). Phase 1 only diffs registry.d as JSON, so this is
+// inert now; before Phase 2 makes it a read source, either strip the mirror on
+// read or drop the mirror here (no old process ever reads registry.d, so the
+// mirror protects nobody). See the round-trip test's strip_legacy().
+pub fn write_session_file(entry: &RegistryEntry) -> std::io::Result<()> {
+    use std::io::Write;
+    let Some(project_id) = project_id_for_entry(entry) else {
+        return Ok(()); // no project identity → global registry still has it
+    };
+    if entry.window_id.is_empty() {
+        return Ok(()); // never key a file on an empty component
+    }
+
+    let path = registry_d_path(&project_id, &entry.window_id);
+    let parent = path.parent().expect("registry_d_path always has a parent");
+    fs::create_dir_all(parent)?;
+
+    let value = dual_write_entry_legacy_keys(entry)?;
+    let json = serde_json::to_string_pretty(&value).map_err(std::io::Error::other)?;
+
+    // tmp sibling in the same dir so the rename is same-filesystem & atomic.
+    let tmp = path.with_extension("json.tmp");
+    let write = (|| {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(json.as_bytes())?;
+        f.sync_all() // durable before the rename publishes it
+    })();
+    if let Err(e) = write.and_then(|()| fs::rename(&tmp, &path)) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Remove a session's per-session `registry.d` file. Best-effort and
+/// idempotent (`ENOENT` is success). Prunes the `<project_id>/` dir if it
+/// becomes empty. A failure to delete is non-fatal in Phase 1: the global
+/// registry stays authoritative and a stale side file is inert until Phase 2.
+pub fn remove_session_file(project_id: &str, window_id: &str) {
+    if project_id.is_empty() || window_id.is_empty() {
+        return;
+    }
+    let path = registry_d_path(project_id, window_id);
+    match fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => warn!("Failed to remove registry.d file {:?}: {}", path, e),
+    }
+    // Prune the now-possibly-empty project dir.
+    let dir = registry_d_project_dir(project_id);
+    if let Ok(mut rd) = fs::read_dir(&dir)
+        && rd.next().is_none()
+    {
+        let _ = fs::remove_dir(&dir);
     }
 }
 
@@ -1384,9 +1617,19 @@ pub fn resolve_claude_uuid_via_env(window_id: &str) -> Option<String> {
 pub fn deregister_session() {
     let pid = std::process::id();
     let mut registry = Registry::load();
+    // Capture the project+window key BEFORE removing so we can delete the
+    // per-session registry.d file too (additive: failure here is non-fatal).
+    let side_key = registry
+        .sessions
+        .iter()
+        .find(|e| e.pid == pid)
+        .and_then(|e| project_id_for_entry(e).map(|pid| (pid, e.window_id.clone())));
     registry.deregister(pid);
     if let Err(e) = registry.save() {
         error!("Failed to deregister session from registry: {}", e);
+    }
+    if let Some((project_id, window_id)) = side_key {
+        remove_session_file(&project_id, &window_id);
     }
 }
 
@@ -1731,5 +1974,219 @@ mod project_identity_tests {
             old.sessions[0].claude_transcript_path.as_deref(),
             Some("/p/x.jsonl")
         );
+    }
+}
+
+#[cfg(test)]
+mod registry_d_tests {
+    use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    // $HOME is process-global (socket_dir → registry.d derives from it), so
+    // these tests serialize on it and restore it after.
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    fn with_temp_home<T>(f: impl FnOnce() -> T) -> T {
+        let _g = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let home = std::env::temp_dir().join(format!("imterm-regd-{}-{}", std::process::id(), n));
+        let _ = fs::create_dir_all(&home);
+        let prev = std::env::var_os("HOME");
+        // SAFETY: serialized by HOME_LOCK, restored below.
+        unsafe { std::env::set_var("HOME", &home) };
+        let out = f();
+        match prev {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        let _ = fs::remove_dir_all(&home);
+        out
+    }
+
+    /// A fully-populated entry — every serde field set so the round-trip test
+    /// actually exercises them, not just the always-present ones.
+    fn full_entry() -> RegistryEntry {
+        serde_json::from_value(serde_json::json!({
+            "pid": 4242,
+            "name": "immorterm-ai-abc123",
+            "window_id": "win-abc-123",
+            "display_name": "my tab",
+            "project_dir": "/tmp/proj",
+            "ai_session_id": "sess-uuid-9",
+            "title_locked": true,
+            "title": "hello",
+            "logfile": "/tmp/proj/log",
+            "shell": "/bin/zsh",
+            "created_at": 1234,
+            "session_type": "ai",
+            "ws_port": 8123,
+            "theme": "aurora-borealis",
+            "ai_transcript_path": "/home/u/.claude/projects/x.jsonl",
+            "ai_stats": {"pid": 99, "rss_kb": 512, "cpu_percent": 3.5, "model": "Claude Opus 4", "cost_usd": 0.42, "context_pct": 61.0},
+            "tool": "claude-code",
+            "tool_history": [{"tool": "claude-code", "session_id": "sess-uuid-9", "transcript_path": "/home/u/.claude/projects/x.jsonl", "ts": "2026-08-09T00:00:00Z"}],
+            "session_status": "active",
+            "shelved_at": 4200,
+            "structured_log_dir": "/tmp/proj/.immorterm/terminals/logs/win-abc-123",
+            "needs_attention": true,
+            "is_working": true,
+            "owner_project_dir": "/tmp/proj",
+            "owner_project_id": "proj-uuid-1",
+            "owner_project_name": "proj",
+            "worktree": "/tmp/proj-wt"
+        }))
+        .expect("full entry must deserialize")
+    }
+
+    /// Strip the legacy mirror keys `dual_write_entry_legacy_keys` added, so the
+    /// value collapses back to the canonical single-key form the struct parses.
+    /// A Phase-2 reader of registry.d must do the same (the `#[serde(alias)]`
+    /// derive rejects a file carrying BOTH `ai_session_id` and
+    /// `claude_session_id` — "duplicate field"). See the report note.
+    fn strip_legacy(mut v: serde_json::Value) -> serde_json::Value {
+        if let Some(obj) = v.as_object_mut() {
+            for (_, legacy) in MIRRORED {
+                obj.remove(*legacy);
+            }
+        }
+        v
+    }
+
+    /// (a) write_session_file → read the file back → every field survives,
+    /// including ai_session_id, and the legacy mirror keys are present on disk.
+    #[test]
+    fn write_session_file_round_trips_every_field() {
+        with_temp_home(|| {
+            let e = full_entry();
+            write_session_file(&e).expect("write must succeed");
+
+            let path = registry_d_path("proj-uuid-1", "win-abc-123");
+            let raw = fs::read_to_string(&path).expect("file must exist at project+window path");
+            let on_disk: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+            // Legacy mirror written to disk (dual-write contract).
+            assert_eq!(on_disk["claude_session_id"], serde_json::json!("sess-uuid-9"));
+            assert!(on_disk.get("claude_transcript_path").is_some());
+            assert!(on_disk.get("claude_stats").is_some());
+
+            // Reverse the mirror the write added, then deserialize: every field
+            // round-trips into the struct, ai_session_id included.
+            let back: RegistryEntry =
+                serde_json::from_value(strip_legacy(on_disk)).expect("read-back must parse");
+            assert_eq!(back.ai_session_id.as_deref(), Some("sess-uuid-9"));
+            assert_eq!(
+                serde_json::to_value(&e).unwrap(),
+                serde_json::to_value(&back).unwrap(),
+                "every field must round-trip through registry.d"
+            );
+        });
+    }
+
+    /// (b) The field-stripping fix: a re-register carrying ai_session_id=None
+    /// must merge-forward the existing id and never blank it in registry.d.
+    /// Mirrors register_session's flow: register() then write the MERGED entry.
+    #[test]
+    fn reregister_with_none_does_not_strip_existing_id() {
+        with_temp_home(|| {
+            let mut with_id = full_entry();
+            with_id.ai_session_id = Some("keep-me".to_string());
+
+            let mut registry = Registry { sessions: vec![], baseline: vec![] };
+            registry.register(with_id);
+
+            // A respawn: same window_id, ai_session_id stripped (env not set yet).
+            let mut respawn = full_entry();
+            respawn.pid = 5555;
+            respawn.ai_session_id = None;
+            registry.register(respawn);
+
+            let merged = registry
+                .sessions
+                .iter()
+                .find(|e| e.window_id == "win-abc-123")
+                .cloned()
+                .expect("entry present after re-register");
+            assert_eq!(merged.ai_session_id.as_deref(), Some("keep-me"), "in-memory merge-forward");
+
+            write_session_file(&merged).expect("write must succeed");
+            let path = registry_d_path("proj-uuid-1", "win-abc-123");
+            let on_disk: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            let back: RegistryEntry = serde_json::from_value(strip_legacy(on_disk)).unwrap();
+            assert_eq!(
+                back.ai_session_id.as_deref(),
+                Some("keep-me"),
+                "registry.d must not blank an existing id on a None re-register"
+            );
+        });
+    }
+
+    /// REGRESSION (critical): `save()` dual-writes BOTH `ai_session_id` and its
+    /// `claude_session_id` alias; `load()` must still parse it. Before
+    /// `parse_registry()`, `load_raw()`'s `from_str::<Registry>` failed on the
+    /// duplicate field, the backup fallback failed the same way, and `load()`
+    /// returned an EMPTY registry — a self-inflicted wipe on every reload, and
+    /// (via `save()`'s re-read-and-merge) a collapse to the writer's own session.
+    #[test]
+    fn save_then_load_survives_dual_write() {
+        with_temp_home(|| {
+            let mut reg = Registry { sessions: vec![], baseline: vec![] };
+            reg.sessions.push(full_entry());
+            reg.save().expect("save must succeed");
+
+            // The on-disk file really does carry both keys (the trap).
+            let raw = fs::read_to_string(registry_path()).unwrap();
+            assert!(
+                raw.contains("\"ai_session_id\"") && raw.contains("\"claude_session_id\""),
+                "save() must dual-write both keys for this regression to be meaningful"
+            );
+
+            // The REAL load path must recover the session + id, not wipe it.
+            let loaded = Registry::load();
+            assert_eq!(
+                loaded.sessions.len(),
+                1,
+                "load() wiped the registry — dual-write parse failure regressed"
+            );
+            assert_eq!(loaded.sessions[0].ai_session_id.as_deref(), Some("sess-uuid-9"));
+        });
+    }
+
+    /// `parse_registry` promotes a legacy-only key and collapses a dual-written
+    /// pair to the modern key without a duplicate-field error.
+    #[test]
+    fn parse_registry_normalizes_legacy_and_dual_keys() {
+        let base = |extra: &str| format!(
+            r#"{{"sessions":[{{"pid":1,"name":"n","window_id":"w","display_name":"d","project_dir":"/p","shell":"/bin/zsh","created_at":0,{extra}}}]}}"#
+        );
+        let legacy = base(r#""claude_session_id":"legacy-id""#);
+        assert_eq!(
+            parse_registry(&legacy).expect("legacy-only must parse").sessions[0]
+                .ai_session_id.as_deref(),
+            Some("legacy-id"),
+        );
+        let both = base(r#""ai_session_id":"modern-id","claude_session_id":"legacy-id""#);
+        assert_eq!(
+            parse_registry(&both).expect("dual-written must parse").sessions[0]
+                .ai_session_id.as_deref(),
+            Some("modern-id"),
+        );
+    }
+
+    /// remove_session_file deletes the file and is idempotent on a missing one.
+    #[test]
+    fn remove_session_file_is_idempotent() {
+        with_temp_home(|| {
+            let e = full_entry();
+            write_session_file(&e).unwrap();
+            let path = registry_d_path("proj-uuid-1", "win-abc-123");
+            assert!(path.exists());
+            remove_session_file("proj-uuid-1", "win-abc-123");
+            assert!(!path.exists(), "file removed");
+            // Second removal (ENOENT) must be a no-op, not a panic.
+            remove_session_file("proj-uuid-1", "win-abc-123");
+        });
     }
 }

@@ -4455,9 +4455,59 @@
     function isAiActive(session) { return utils.isAiActive(session); }
 
     // ── Background Control Mode ──
-    // When true (default), background sessions use subscribe_control (JSON only)
-    // instead of subscribe_raw (full PTY). Prevents WASM memory growth crash.
-    let backgroundControlMode = true;
+    // Background sessions can either take the full PTY stream (subscribe_raw)
+    // or metadata only (subscribe_control). Raw keeps a session's terminal LIVE
+    // so switching to it is instant; control is cheap but means the panel sits
+    // blank on switch while the daemon serializes and ships a snapshot.
+    //
+    // The original rule was "always control", to stop WASM memory growth. That
+    // was written when raw required a full live Terminal per session. It no
+    // longer does — every connected session already owns a BackgroundState
+    // (created by create_background on its first snapshot), and process_background
+    // feeds PTY bytes straight into it. Raw allocates nothing new.
+    //
+    // What raw DOES cost is scrollback: a backgrounded session producing heavy
+    // output accumulates up to Scrollback::new(50_000) lines it would otherwise
+    // have dropped. That's the real ceiling, so we bound how many sessions may
+    // stream at once rather than removing the limit outright.
+    //
+    // Modes: 'auto' (default) — the N most recently used sessions stream live,
+    // the long tail stays on control. true — always control (the old behaviour).
+    // false — every session streams live.
+    let backgroundControlMode = 'auto';
+
+    // ponytail: fixed budget, not adaptive. Six covers the ping-pong between a
+    // handful of terminals that switching actually consists of; raise it if
+    // people report a switch that still stalls, or make it memory-aware if a
+    // background session is ever seen pinning scrollback.
+    const BACKGROUND_RAW_BUDGET = 6;
+
+    /** Sessions most-recently-active first. Drives the 'auto' budget. */
+    let recentSessionOrder = [];
+
+    function noteSessionUse(sessionName) {
+      recentSessionOrder = [sessionName, ...recentSessionOrder.filter(n => n !== sessionName)];
+    }
+
+    /** Should this session receive the full PTY stream right now? */
+    function shouldStreamRaw(sessionName) {
+      if (sessionName === activeSessionName) return true;
+      if (backgroundControlMode === false) return true;   // user forced all-live
+      if (backgroundControlMode === true) return false;   // user forced old behaviour
+      return recentSessionOrder.indexOf(sessionName) < BACKGROUND_RAW_BUDGET;
+    }
+
+    /** Bring every connected session's subscription in line with the policy. */
+    function applyStreamPolicy() {
+      for (const [name, sess] of sessions) {
+        if (!sess.ws || sess.ws.readyState !== WebSocket.OPEN) continue;
+        const wantRaw = shouldStreamRaw(name);
+        if (sess.streamingRaw === wantRaw) continue;
+        sess.ws.send(JSON.stringify(wantRaw ? { type: 'subscribe_raw' } : { type: 'subscribe_control' }));
+        sess.streamingRaw = wantRaw;
+        dbg('streamPolicy: ' + name + ' → ' + (wantRaw ? 'raw' : 'control'));
+      }
+    }
 
     // ── Health Indicators ──
     let openMemoryHealthy = false;
@@ -8181,6 +8231,11 @@
         showStatus('Connecting...', 'connected');
       } else if (!session.connected) {
         showStatus('Reconnecting...', 'error');
+        // The user just asked to LOOK at this session, so don't make them wait
+        // out a backoff window that may have grown to 30s while the session sat
+        // in the background. Reset the cadence and attempt immediately — this
+        // is the difference between "instant" and "a few seconds of dead panel".
+        session.reconnectDelay = 1000;
         reconnectSession(sessionName);
       }
 
@@ -8243,15 +8298,28 @@
       // respawned (e.g. after reboot) is alive on a NEW port; the cached
       // session.wsPort points at the dead one. Without this, we'd retry the
       // dead port forever → permanent "Disconnected".
-      const freshPort = await resolveCurrentWsPort(sessionName);
-      // Session may have been closed or reconnected while we awaited.
-      if (!sessions.has(sessionName) || session.connected) return;
-      if (freshPort && freshPort !== session.wsPort) {
-        dbg('reconnectSession: ' + sessionName + ' port ' + session.wsPort + ' → ' + freshPort);
-        session.wsPort = freshPort;
+      //
+      // But that resolve is a round-trip to the extension host with a 1500ms
+      // timeout, and paying it before EVERY attempt is what the user feels as
+      // a multi-second stall when switching to a session whose socket dropped.
+      // A cached port that has connected before is almost always still valid,
+      // so try it immediately; a stale one fails in ~1ms on loopback and marks
+      // itself for a real resolve on the next attempt.
+      if (!session.wsPort || session.portStale) {
+        const freshPort = await resolveCurrentWsPort(sessionName);
+        // Session may have been closed or reconnected while we awaited.
+        if (!sessions.has(sessionName) || session.connected) return;
+        if (freshPort && freshPort !== session.wsPort) {
+          dbg('reconnectSession: ' + sessionName + ' port ' + session.wsPort + ' → ' + freshPort);
+          session.wsPort = freshPort;
+        }
+        session.portStale = false;
       }
 
       const ws = new WebSocket('ws://127.0.0.1:' + session.wsPort);
+      // A failed attempt means the cached port may be dead — force the full
+      // resolve next time round rather than retrying a dead port on backoff.
+      ws.addEventListener('error', () => { session.portStale = true; });
       ws.binaryType = 'arraybuffer';
       session.ws = ws;
 

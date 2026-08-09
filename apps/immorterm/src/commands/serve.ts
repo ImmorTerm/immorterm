@@ -22,6 +22,7 @@ import {
 	resolveArchivedSessionLogPath,
 	findRegistryEntry,
 	enrichSession,
+	readRegistry,
 } from "../lib/session-enricher.js";
 
 // ---------------------------------------------------------------------------
@@ -372,12 +373,7 @@ function createApp(): Hono {
 
 	// ── Daemon health ──────────────────────────────────────────
 	app.get("/api/health/daemons", (c) => {
-		const registryPath = path.join(IMMORTERM_GLOBAL_DIR, "registry.json");
-		if (!fs.existsSync(registryPath)) {
-			return c.json({ daemons: [] });
-		}
-
-		const registry = JSON.parse(fs.readFileSync(registryPath, "utf-8"));
+		const registry = readRegistry();
 		const now = Math.floor(Date.now() / 1000);
 
 		const daemons = (registry.sessions || []).map((entry: any) => {
@@ -487,13 +483,8 @@ function createApp(): Hono {
 		const maxLines = parseInt(c.req.query("lines") ?? "100", 10);
 
 		// Find session in registry
-		const registryPath = path.join(IMMORTERM_GLOBAL_DIR, "registry.json");
-		if (!fs.existsSync(registryPath)) {
-			return c.json({ error: "Registry not found" }, 404);
-		}
-
-		const registry = JSON.parse(fs.readFileSync(registryPath, "utf-8"));
-		const entry = (registry.sessions || []).find((e: any) => e.name === sessionId);
+		const registry = readRegistry();
+		const entry = registry.sessions.find((e) => e.name === sessionId);
 		if (!entry?.structured_log_dir) {
 			return c.json({ error: "Session not found or no log directory" }, 404);
 		}
@@ -514,13 +505,8 @@ function createApp(): Hono {
 	app.post("/api/sessions/:id/restart", async (c) => {
 		const sessionId = c.req.param("id");
 
-		const registryPath = path.join(IMMORTERM_GLOBAL_DIR, "registry.json");
-		if (!fs.existsSync(registryPath)) {
-			return c.json({ error: "Registry not found" }, 404);
-		}
-
-		const registry = JSON.parse(fs.readFileSync(registryPath, "utf-8"));
-		const entry = (registry.sessions || []).find((e: any) => e.name === sessionId);
+		const registry = readRegistry();
+		const entry = registry.sessions.find((e) => e.name === sessionId);
 		if (!entry) {
 			return c.json({ error: "Session not found" }, 404);
 		}

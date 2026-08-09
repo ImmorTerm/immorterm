@@ -1037,8 +1037,12 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
         if let Some(entry) = registry.sessions.iter_mut().find(|e| e.pid == std::process::id()) {
             entry.ws_port = Some(ws_port);
             entry.session_type = Some("ai".to_string());
+            let entry = entry.clone();
             if let Err(e) = registry.save() {
                 error!("Failed to update registry with ws_port: {}", e);
+            }
+            if let Err(e) = crate::registry::write_session_file(&entry) {
+                warn!("Failed to write registry.d with ws_port: {}", e);
             }
         }
     }
@@ -1196,7 +1200,10 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                                 }
                             }
                             registry.update_ai_stats(&state.window_id, &state.claude);
-                            let _ = registry.save();
+                            // persist_session also re-emits session.json +
+                            // registry.d so the session id / stats reach the
+                            // side files, not only the global registry.
+                            let _ = registry.persist_session(&state.window_id);
                         }
 
                         // Fire WebSocket control event
@@ -1390,6 +1397,15 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                         }
                         if let Err(e) = registry.save() {
                             error!("Failed to update registry with new title: {}", e);
+                        }
+                        if let Some(entry) = registry
+                            .sessions
+                            .iter()
+                            .find(|e| e.pid == std::process::id())
+                            .cloned()
+                            && let Err(e) = crate::registry::write_session_file(&entry)
+                        {
+                            warn!("Failed to write registry.d with new title: {}", e);
                         }
                     }
                 }
@@ -1642,13 +1658,11 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                     if !registry.update_claude_session(&state.window_id, &uuid) {
                         warn!("Backfilled resume id dropped: no registry entry for window_id={} (self-heal will re-register)", state.window_id);
                     }
-                    if let Err(e) = registry.save() {
+                    // persist_session refreshes the global registry AND both side
+                    // files (session.json for the restore resolver's Tier 2 path,
+                    // plus registry.d) so the backfilled id stays in sync.
+                    if let Err(e) = registry.persist_session(&state.window_id) {
                         warn!("Failed to persist backfilled ai_session_id: {}", e);
-                    }
-                    // Also refresh session.json inside the structured log dir so
-                    // the restore resolver's Tier 2 path stays in sync.
-                    if let Some(entry) = registry.sessions.iter().find(|e| e.window_id == state.window_id).cloned() {
-                        crate::registry::write_session_json(&entry);
                     }
                 }
 
@@ -1835,8 +1849,13 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                         }
                     }
 
-                    // Only save if something changed
-                    if (needs_heal || changed || worktree_changed) && let Err(e) = registry.save() {
+                    // Only save if something changed. persist_session also
+                    // re-emits this window's session.json + registry.d so an
+                    // ai_session_id / stats / worktree change reaches the side
+                    // files, not just the global registry.
+                    if (needs_heal || changed || worktree_changed)
+                        && let Err(e) = registry.persist_session(&state.window_id)
+                    {
                         error!("Failed to save registry: {}", e);
                     }
                 }
@@ -2144,8 +2163,12 @@ async fn handle_client_connection(
                 if let Some(entry) = registry.sessions.iter_mut().find(|e| e.pid == std::process::id()) {
                     entry.needs_attention = true;
                     entry.is_working = false;
+                    let entry = entry.clone();
                     if let Err(e) = registry.save() {
                         warn!("Failed to save attention to registry: {}", e);
+                    }
+                    if let Err(e) = crate::registry::write_session_file(&entry) {
+                        warn!("Failed to write registry.d attention: {}", e);
                     }
                 }
                 // Also broadcast idle so the breathing dot stops — attention implies not-working.
@@ -2180,8 +2203,12 @@ async fn handle_client_connection(
                     if clear_attention {
                         entry.needs_attention = false;
                     }
+                    let entry = entry.clone();
                     if let Err(e) = registry.save() {
                         warn!("Failed to save is_working to registry: {}", e);
+                    }
+                    if let Err(e) = crate::registry::write_session_file(&entry) {
+                        warn!("Failed to write registry.d is_working: {}", e);
                     }
                 }
                 send_response(&mut stream, &Response::Ok(String::new())).await;
@@ -2428,7 +2455,9 @@ async fn handle_client_connection(
                     }
                 }
                 registry.update_ai_stats(&state.window_id, &state.claude);
-                if let Err(e) = registry.save() {
+                // persist_session also re-emits session.json + registry.d so the
+                // IPC-pushed session id / stats reach the side files.
+                if let Err(e) = registry.persist_session(&state.window_id) {
                     error!("Failed to update registry with Claude stats: {}", e);
                 }
             }
@@ -4302,8 +4331,12 @@ fn handle_ws_command(cmd: crate::websocket::WsCommand, state: &mut SessionState)
                 let mut registry = crate::registry::Registry::load();
                 if let Some(entry) = registry.sessions.iter_mut().find(|e| e.pid == std::process::id()) {
                     entry.needs_attention = false;
+                    let entry = entry.clone();
                     if let Err(e) = registry.save() {
                         warn!("Failed to clear needs_attention on dismiss: {}", e);
+                    }
+                    if let Err(e) = crate::registry::write_session_file(&entry) {
+                        warn!("Failed to write registry.d on dismiss: {}", e);
                     }
                 }
             }

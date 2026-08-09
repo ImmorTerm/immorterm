@@ -134,6 +134,110 @@ fn load_registry() -> Result<Value, String> {
     Ok(root)
 }
 
+fn registry_d_dir() -> PathBuf {
+    home_dir().join(".immorterm/registry.d")
+}
+
+/// Fields the daemon owns in its per-session registry.d file. Only these are
+/// overlaid onto the matching global entry. Mirrors `DAEMON_OWNED_FIELDS` in
+/// the extension's registry-client.ts.
+const DAEMON_OWNED_FIELDS: &[&str] = &[
+    "name", "pid", "ws_port", "session_type",
+    "ai_session_id", "ai_transcript_path", "ai_stats",
+    "structured_log_dir", "owner_project_dir", "owner_project_id",
+    "owner_project_name", "worktree",
+];
+
+/// Per-entry version of `normalize_registry_keys`: drop the legacy
+/// `claude_*` key when the modern `ai_*` key is present, else rename it.
+fn normalize_entry(obj: &mut serde_json::Map<String, Value>) {
+    for (legacy, modern) in LEGACY_ENTRY_KEYS {
+        if let Some(v) = obj.remove(*legacy)
+            && !obj.contains_key(*modern)
+        {
+            obj.insert((*modern).to_string(), v);
+        }
+    }
+}
+
+/// One-level glob of `registry.d/<project_id>/<window_id>.json`.
+fn read_registry_d_files() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(top) = std::fs::read_dir(registry_d_dir()) else { return out };
+    for proj in top.flatten() {
+        let p = proj.path();
+        if !p.is_dir() { continue; }
+        let Ok(files) = std::fs::read_dir(&p) else { continue };
+        for f in files.flatten() {
+            let fp = f.path();
+            if fp.extension().and_then(|e| e.to_str()) == Some("json") {
+                out.push(fp);
+            }
+        }
+    }
+    out
+}
+
+/// Overlay the daemon's per-session `registry.d` files over the global
+/// registry sessions, in place. For a window present in both, only the
+/// daemon-owned fields are overlaid; windows present only in `registry.d`
+/// are appended. Absent-or-empty `registry.d` => no-op (behavior identical
+/// to reading `registry.json` alone).
+///
+/// READ-ONLY: never feed the result into a write path — dir-only windows
+/// would get persisted into `registry.json` and defeat the reversibility.
+pub(crate) fn union_registry_d(root: &mut Value) {
+    let mut dir_entries: HashMap<String, serde_json::Map<String, Value>> = HashMap::new();
+    for path in read_registry_d_files() {
+        let Ok(data) = std::fs::read_to_string(&path) else { continue };
+        // Skip a file caught mid-write — a partial parse is not authoritative.
+        let Ok(mut v) = serde_json::from_str::<Value>(&data) else { continue };
+        let Some(obj) = v.as_object_mut() else { continue };
+        normalize_entry(obj);
+        let Some(wid) = obj.get("window_id").and_then(|w| w.as_str()).map(String::from) else { continue };
+        dir_entries.insert(wid, std::mem::take(obj));
+    }
+    overlay_dir_entries(root, dir_entries);
+}
+
+/// Pure merge half of `union_registry_d`: overlay daemon-owned fields onto
+/// matching global entries by `window_id`, append dir-only windows. Split out
+/// so the merge is testable without touching the filesystem.
+fn overlay_dir_entries(root: &mut Value, dir_entries: HashMap<String, serde_json::Map<String, Value>>) {
+    if dir_entries.is_empty() { return; }
+
+    if !root.get("sessions").map(|s| s.is_array()).unwrap_or(false) {
+        root["sessions"] = json!([]);
+    }
+    let sessions = root.get_mut("sessions").and_then(|s| s.as_array_mut()).unwrap();
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for entry in sessions.iter_mut() {
+        let Some(obj) = entry.as_object_mut() else { continue };
+        let Some(wid) = obj.get("window_id").and_then(|w| w.as_str()).map(String::from) else { continue };
+        if let Some(dir_obj) = dir_entries.get(&wid) {
+            for f in DAEMON_OWNED_FIELDS {
+                if let Some(v) = dir_obj.get(*f) {
+                    obj.insert((*f).to_string(), v.clone());
+                }
+            }
+            seen.insert(wid);
+        }
+    }
+    for (wid, obj) in dir_entries {
+        if seen.contains(&wid) { continue; }
+        sessions.push(Value::Object(obj));
+    }
+}
+
+/// Read-only registry load with `registry.d` overlaid. NEVER feed the result
+/// into `save_registry_atomic` — see `union_registry_d`.
+fn load_registry_unioned() -> Result<Value, String> {
+    let mut root = load_registry()?;
+    union_registry_d(&mut root);
+    Ok(root)
+}
+
 // ── session-status.json helpers ─────────────────────────────────
 //
 // Single source of truth: the hub owns `~/.immorterm/session-status.json`.
@@ -172,6 +276,46 @@ fn save_session_status_atomic(root: &Value) -> Result<(), String> {
     std::fs::rename(&tmp, &path)
         .map_err(|e| format!("session-status rename: {}", e))?;
     Ok(())
+}
+
+/// flock(2) exclusive lock on `~/.immorterm/registry.lock`, released on drop
+/// (fd close, incl. process death). THE single shared registry lock: the same
+/// flock(2) advisory lock the Rust daemon takes (`nix::fcntl::Flock`,
+/// registry.rs `lock_registry`) and the VS Code extension takes (open with
+/// `O_EXLOCK`, registry-client.ts `withRegistryLock`). All three interoperate
+/// because all three are flock(2) on this one path — the same parity plans.rs
+/// documents for the Plans dir lock.
+///
+/// Held across a caller's whole read-modify-write so no other writer can slip a
+/// stale snapshot between the read and the write. Callers acquire it BEFORE
+/// their read; `save_registry_atomic` itself stays lock-free (it runs under the
+/// caller's guard — acquiring again would deadlock on a fresh fd).
+///
+/// Returns `None` if the lock can't be taken; degrading to unlocked is
+/// deliberate (mirrors the daemon) — the shrinkage guard + tmp+rename still
+/// apply, and losing the race beats refusing the write.
+/// ponytail: blocking exclusive flock, no timeout — matches the daemon's
+/// blocking `LockExclusive`; the lock is held only across one ~15KB
+/// read-merge-write, so contention is microseconds.
+struct RegistryLock(#[allow(dead_code)] std::fs::File);
+
+fn lock_registry() -> Option<RegistryLock> {
+    use std::os::unix::io::AsRawFd;
+    let path = home_dir().join(".immorterm/registry.lock");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .ok()?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        warn!("registry lock unavailable ({}) — writing unserialized", std::io::Error::last_os_error());
+        return None;
+    }
+    Some(RegistryLock(file))
 }
 
 /// Atomic write of registry.json with a shrinkage guard.
@@ -274,6 +418,8 @@ pub struct ClaudeStatsSnapshot {
 /// same inline dedup pass (one session_id, one entry, newest wins) in a
 /// single read-modify-write.
 pub fn batch_sync_claude_state(updates: &[ClaudeSyncUpdate]) -> Result<(), String> {
+    // Lock spans the load through save_registry_atomic below — see lock_registry.
+    let _lock = lock_registry();
     let mut registry = load_registry()?;
     let mut dirty = false;
     {
@@ -444,6 +590,9 @@ async fn wait_for_ws_port(session_name: &str, timeout_ms: u64) -> Option<(u16, u
 /// registry `name` field, while the Rust daemon keys everything by
 /// `window_id`; accept either so callers don't have to pre-resolve.
 fn update_registry_entry(id: &str, updater: impl Fn(&mut Value)) -> Result<(), String> {
+    // Hold the shared lock across the read AND the write so a daemon/hub write
+    // can't land between them and get clobbered by our stale snapshot.
+    let _lock = lock_registry();
     let data = std::fs::read_to_string(registry_path())
         .map_err(|e| format!("Failed to read registry: {}", e))?;
     let mut registry: Value = serde_json::from_str(&data)
@@ -595,7 +744,7 @@ pub struct RegistryQuery {
 pub async fn get_registry(
     Query(q): Query<RegistryQuery>,
 ) -> Json<Value> {
-    let registry = match load_registry() {
+    let registry = match load_registry_unioned() {
         Ok(r) => r,
         Err(e) => return Json(json!({ "error": e })),
     };
@@ -1400,6 +1549,9 @@ pub async fn session_link(Json(req): Json<SessionLinkRequest>) -> Json<Value> {
         }));
     }
 
+    // Lock spans the read through save_registry_atomic — no .await in between,
+    // so the guard stays on this thread. See lock_registry.
+    let _lock = lock_registry();
     let path = registry_path();
     let data = match std::fs::read_to_string(&path) {
         Ok(d) => d,
@@ -1529,7 +1681,7 @@ pub fn lookup_window(registry: &Value, window_id: &str) -> Result<Value, WindowL
 }
 
 pub async fn get_window(Path(window_id): Path<String>) -> (StatusCode, Json<Value>) {
-    let registry = match load_registry() {
+    let registry = match load_registry_unioned() {
         Ok(r) => r,
         Err(e) => {
             warn!("[/registry/window/{}] parse failure: {}", window_id, e);
@@ -1607,7 +1759,7 @@ pub fn lookup_by_transcript(registry: &Value, path: &str) -> Result<Value, Windo
 }
 
 pub async fn get_by_transcript(Query(q): Query<ByTranscriptQuery>) -> (StatusCode, Json<Value>) {
-    let registry = match load_registry() {
+    let registry = match load_registry_unioned() {
         Ok(r) => r,
         Err(e) => {
             warn!("[/registry/by-transcript] parse failure: {}", e);
@@ -1733,6 +1885,9 @@ pub async fn session_end(Json(req): Json<SessionEndRequest>) -> (StatusCode, Jso
         );
     }
 
+    // Lock spans the read through save_registry_atomic — no .await in between,
+    // so the guard stays on this thread. See lock_registry.
+    let _lock = lock_registry();
     let path = registry_path();
     let data = match std::fs::read_to_string(&path) {
         Ok(d) => d,
@@ -1827,6 +1982,49 @@ mod tests {
                 }
             ]
         })
+    }
+
+    #[test]
+    fn union_overlays_daemon_fields_and_appends_dir_only() {
+        let mut reg = sample_registry();
+        let mut dir: HashMap<String, serde_json::Map<String, Value>> = HashMap::new();
+        // Overlay onto an existing window: only daemon-owned fields win;
+        // non-daemon fields on the global entry (project_dir) are untouched.
+        let mut overlay = serde_json::Map::new();
+        overlay.insert("window_id".into(), json!("11111-aaaa"));
+        overlay.insert("pid".into(), json!(4242));
+        overlay.insert("ai_session_id".into(), json!("sess-xyz"));
+        overlay.insert("created_at".into(), json!(999)); // not daemon-owned → ignored
+        dir.insert("11111-aaaa".into(), overlay);
+        // Dir-only window → appended whole.
+        let mut only = serde_json::Map::new();
+        only.insert("window_id".into(), json!("33333-cccc"));
+        only.insert("ai_session_id".into(), json!("sess-new"));
+        dir.insert("33333-cccc".into(), only);
+
+        overlay_dir_entries(&mut reg, dir);
+        let sessions = reg["sessions"].as_array().unwrap();
+        assert_eq!(sessions.len(), 3, "dir-only window appended");
+        let first = &sessions[0];
+        assert_eq!(first["pid"], json!(4242), "daemon pid overlaid");
+        assert_eq!(first["ai_session_id"], json!("sess-xyz"));
+        assert_eq!(first["project_dir"], json!("/tmp/demo"), "global-only field kept");
+        assert!(first.get("created_at").is_none(), "non-daemon field not overlaid");
+    }
+
+    #[test]
+    fn normalize_entry_drops_legacy_when_modern_present() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("claude_session_id".into(), json!("legacy"));
+        obj.insert("ai_session_id".into(), json!("modern"));
+        normalize_entry(&mut obj);
+        assert_eq!(obj["ai_session_id"], json!("modern"));
+        assert!(obj.get("claude_session_id").is_none());
+        // Rename path: legacy present, modern absent.
+        let mut obj2 = serde_json::Map::new();
+        obj2.insert("claude_session_id".into(), json!("legacy"));
+        normalize_entry(&mut obj2);
+        assert_eq!(obj2["ai_session_id"], json!("legacy"));
     }
 
     #[test]
