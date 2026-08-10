@@ -6114,6 +6114,97 @@ If tasks were restored, proactively suggest: "I've restored N tasks. Want me to 
 }
 
 /**
+ * Render the recall instructions for Codex without changing Claude Code's
+ * `/immorterm:recall` command. Codex uses global skills rather than custom
+ * slash commands, and the stable ImmorTerm terminal ID is its primary recall
+ * key because a Codex conversation ID changes after compaction.
+ */
+function generateCodexRecallSkill(): string {
+  let body = generateRecallCommand();
+  const replaceLiteral = (from: string, to: string): void => {
+    const next = body.replace(from, () => to);
+    if (next === body) {
+      throw new Error('Codex recall skill template drifted; expected source block was not found');
+    }
+    body = next;
+  };
+
+  replaceLiteral(
+    '# /immorterm:recall — Resume a Previous Session',
+    '# ImmorTerm Recall — Resume a Previous Session'
+  );
+  replaceLiteral(
+    `**Usage**:
+- \`/immorterm:recall\` — list recent sessions with numbers, then ask which to resume
+- \`/immorterm:recall last\` — resume the most recent ended session
+- \`/immorterm:recall 3\` — resume session #3 from the list
+- \`/immorterm:recall f33ef4df\` — resume by session ID (short or full)
+
+**Argument**: \`$ARGUMENTS\` — session number, session ID, or "last"`,
+    `**Codex usage**:
+- \`$immorterm-recall\` — list recent sessions, then ask which to resume
+- \`$immorterm-recall last\` — resume the most recent ended session
+- \`$immorterm-recall 3\` — resume session #3 from the list
+- \`$immorterm-recall 47900-edb69974\` — resume by stable ImmorTerm terminal ID
+- \`$immorterm-recall f33ef4df\` — resume by conversation session ID
+- Natural language also works: \`Use immorterm-recall for 47900-edb69974\`
+
+Codex does not register custom slash commands. Do not tell a Codex user to type
+\`/immorterm:recall\`.
+
+**Argument**: \`$ARGUMENTS\` — session number, stable ImmorTerm ID, conversation session ID, daemon-labelled IDs, or "last"`
+  );
+  replaceLiteral(
+    `If \`$ARGUMENTS\` is a session ID (8+ hex chars):
+1. Use it directly (if 8 chars, it's the short \`sid\` — pass as-is to \`get_session_context\`)`,
+    `Build a resolved identity with two independent fields:
+
+- \`immorterm_id\`: the primary key for the terminal's full history
+- \`session_id\`: an optional secondary key for one conversation or compaction cycle
+
+Never pass an ImmorTerm ID as \`session_id\`.
+
+If \`$ARGUMENTS\` contains \`immorterm id: <value>\`:
+1. Use that value as \`immorterm_id\`
+2. Keep a labelled Claude, Codex, or session ID only as the secondary \`session_id\`
+
+If \`$ARGUMENTS\` matches \`^[0-9]{5}-[0-9a-f]{8}$\`, such as \`47900-edb69974\`:
+1. Use it as \`immorterm_id\`, never as \`session_id\`
+2. Do not call \`list_sessions\` merely to rediscover the explicit stable ID
+
+If \`$ARGUMENTS\` is a conversation UUID or an 8-character hexadecimal short ID:
+1. Use it as \`session_id\`
+
+For every later MCP example, \`<resolved_identity_args>\` means
+\`immorterm_id="<stable_id>"\` when available, plus \`session_id="<conversation_id>"\`
+only when known and supported.`
+  );
+  body = body.replaceAll(
+    'session_id="<resolved_session_id>"',
+    () => '<resolved_identity_args>'
+  );
+  replaceLiteral(
+    `**Fallback — JSONL parsing** (if \`list_tasks\` returns 0 tasks):
+
+For sessions that predate the task persistence hook, parse the JSONL transcript directly. Replay \`TaskCreate\`/\`TaskUpdate\` events to reconstruct the task list. TaskCreate assigns sequential IDs (#1, #2, ...). TaskUpdate with \`status=deleted\` removes a task.
+
+Also extract the **last 3 user messages** from the JSONL (skip system reminders and short messages < 10 chars).`,
+    `**Fallback — structured terminal log** (if any index is incomplete):
+
+An empty task, plan, code-change, or session index is missing evidence, not proof that the terminal had no work.
+
+1. Read \`~/.immorterm/registry.json\` and find the record whose stable ID equals \`immorterm_id\`
+2. Prefer the record's \`structured_log_dir/ai.jsonl\`
+3. Also check \`<project>/.immorterm/terminals/logs/<immorterm_id>/ai.jsonl\` when the project path is known
+4. Use a vendor transcript only as a final fallback; never recursively grep the user's whole home directory
+
+Recover the last 5 meaningful user requests, the last substantive assistant handoff, task events, plan updates, approvals, and mentioned branches, worktrees, commits, PRs, deploys, and tests. Skip injected system text and duplicate turns.`
+  );
+
+  return body;
+}
+
+/**
  * Generate the /immorterm:ask command for interactive session Q&A.
  */
 function generateAskCommand(): string {
@@ -7475,10 +7566,12 @@ function syncCodexMcpServers(enabled: boolean): void {
 
 /**
  * ImmorTerm skills installed into Codex, mirroring the `/immorterm:*` slash
- * commands Claude Code gets. Same SKILL.md body — only the frontmatter differs.
+ * commands Claude Code gets. Recall has a Codex-only rendering because Codex
+ * uses global skills and a stable ImmorTerm terminal ID; Claude's command stays
+ * on the shared command generator unchanged.
  */
 const CODEX_SKILLS: ReadonlyArray<{ dir: string; name: string; generator: () => string }> = [
-  { dir: 'immorterm-recall', name: 'immorterm-recall', generator: generateRecallCommand },
+  { dir: 'immorterm-recall', name: 'immorterm-recall', generator: generateCodexRecallSkill },
   { dir: 'immorterm-ask', name: 'immorterm-ask', generator: generateAskCommand },
 ];
 

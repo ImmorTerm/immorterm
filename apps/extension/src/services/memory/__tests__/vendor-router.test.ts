@@ -10,6 +10,7 @@ import {
   type ProjectConfig,
 } from '../../../utils/immorterm-config';
 import { writeAllVendorConfigs, syncCodexSkills } from '../hook-installer';
+import { installMemoryHooks as installMemoryHooksCore } from '../../../../../../libs/services/src/hook-installer';
 
 describe('Phase A T2 — vendor-router (writeAllVendorConfigs)', () => {
   let tmp: string;
@@ -389,7 +390,38 @@ describe('Phase A T2 — vendor-router (writeAllVendorConfigs)', () => {
         expect(frontmatter.match(/^description:/gm)).toHaveLength(1);
         // Vendor-neutral wording: these recall sessions from any AI tool.
         expect(body).not.toContain('previous Claude Code session');
+
+        if (name === 'immorterm-recall') {
+          expect(body).toContain('$immorterm-recall 47900-edb69974');
+          expect(body).toContain('Use it as `immorterm_id`, never as `session_id`');
+          expect(body).toContain('structured_log_dir/ai.jsonl');
+          expect(body).toContain('Do not tell a Codex user to type');
+          expect(body.match(/^description:/gm)).toHaveLength(1);
+          expect(body.match(/^# ImmorTerm Recall/gm)).toHaveLength(1);
+        }
       }
+    });
+
+    it('does not change the Claude Code recall command', () => {
+      const vendors = allVendorsEnabled();
+      vendors.codex = { enabled: false };
+
+      expect(
+        installMemoryHooksCore(tmp, 'test-proj', {
+          memoryPort: 8765,
+          vendors,
+          resourceRoots: [],
+        })
+      ).toBe(true);
+
+      const body = fs.readFileSync(
+        path.join(tmp, '.claude', 'commands', 'immorterm', 'recall.md'),
+        'utf8'
+      );
+      expect(body).toContain('# /immorterm:recall — Resume a Previous Session');
+      expect(body).toContain('/immorterm:recall f33ef4df');
+      expect(body).not.toContain('$immorterm-recall');
+      expect(body).not.toContain('Codex does not register custom slash commands');
     });
 
     it('un-ticking Codex removes them again', () => {
