@@ -311,8 +311,24 @@ fn lock_registry() -> Option<RegistryLock> {
         .write(true)
         .open(&path)
         .ok()?;
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        warn!("registry lock unavailable ({}) — writing unserialized", std::io::Error::last_os_error());
+    // Non-blocking with a short bounded retry (~100ms): the hub must NEVER block
+    // its request thread waiting on a contended lock — while daemons stream LLM
+    // output they hammer this lock, and a blocking wait here piles up. If we
+    // can't get it quickly, write unserialized: registry.d is the authoritative
+    // per-session source, so a racing global-file write can't lose daemon data.
+    let mut acquired = false;
+    for _ in 0..20 {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            acquired = true;
+            break;
+        }
+        if std::io::Error::last_os_error().raw_os_error() != Some(libc::EWOULDBLOCK) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    if !acquired {
+        warn!("registry lock contended — writing unserialized (registry.d is authoritative)");
         return None;
     }
     Some(RegistryLock(file))

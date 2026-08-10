@@ -1494,8 +1494,12 @@ pub fn write_session_file(entry: &RegistryEntry) -> std::io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     let write = (|| {
         let mut f = fs::File::create(&tmp)?;
-        f.write_all(json.as_bytes())?;
-        f.sync_all() // durable before the rename publishes it
+        f.write_all(json.as_bytes())
+        // NO fsync: this file is rewritten constantly and is backed by both the
+        // global registry.json and the memory DB, so per-write durability buys
+        // nothing. sync_all() here ran on the daemon's OSC/claude-stats hot path
+        // and stalled PTY relay (typed input not shown until the flush). The
+        // atomic tmp+rename still guarantees readers never see a partial file.
     })();
     if let Err(e) = write.and_then(|()| fs::rename(&tmp, &path)) {
         let _ = fs::remove_file(&tmp);

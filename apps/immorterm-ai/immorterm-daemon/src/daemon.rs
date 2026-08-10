@@ -1095,6 +1095,18 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
     // Skip the immediate first tick — give the shell time to start
     claude_interval.tick().await;
 
+    // Throttle registry disk-persistence on the OSC/claude-stats hot path.
+    // OSC 1337 stats events fire per stream update; doing a full load→save (fsync
+    // + flock) + per-session-file write + session.json write on EVERY one stalls
+    // this async loop, so typed input isn't relayed/rendered until the flush
+    // completes (the "type but nothing shows" lag). The live state.claude is
+    // already updated + broadcast over WS every event; only the DISK write is
+    // rate-limited here (a session-id change always persists immediately).
+    let mut last_ai_stats_persist = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(60))
+        .unwrap_or_else(std::time::Instant::now);
+    const AI_STATS_PERSIST_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+
     // Structured logging: periodic snapshot every 30 seconds
     let mut snapshot_interval = tokio::time::interval(std::time::Duration::from_secs(30));
     snapshot_interval.tick().await;
@@ -1190,10 +1202,18 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                         // Update Rust-formatted strings (used by native window via GetStatusBar)
                         state.status_bar.ai_api_stats = state.claude.format_api_stats();
 
-                        // Update registry
-                        if !state.window_id.is_empty() {
+                        // Update registry — THROTTLED. Only touch disk on a
+                        // session-id change or once every few seconds; otherwise
+                        // the per-stream fsync/flock here stalls this loop and
+                        // lags typed input. state.claude (above) + the WS event
+                        // (below) already keep the UI live every event.
+                        let session_changed = old_session.as_deref() != Some(&ai_event.session_id);
+                        if !state.window_id.is_empty()
+                            && (session_changed
+                                || last_ai_stats_persist.elapsed() >= AI_STATS_PERSIST_MIN_INTERVAL)
+                        {
                             let mut registry = crate::registry::Registry::load();
-                            if old_session.as_deref() != Some(&ai_event.session_id) {
+                            if session_changed {
                                 info!("Claude session via OSC: {}", &ai_event.session_id[..8.min(ai_event.session_id.len())]);
                                 if !registry.update_claude_session(&state.window_id, &ai_event.session_id) {
                                     warn!("Resume id from OSC dropped: no registry entry for window_id={} (self-heal will re-register)", state.window_id);
@@ -1204,6 +1224,7 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                             // registry.d so the session id / stats reach the
                             // side files, not only the global registry.
                             let _ = registry.persist_session(&state.window_id);
+                            last_ai_stats_persist = std::time::Instant::now();
                         }
 
                         // Fire WebSocket control event
