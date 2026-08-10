@@ -56,6 +56,38 @@ fn read_tail(path: &str, max_bytes: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// The trailing UUID of a Codex rollout path is its `codex resume <id>` target:
+/// `.../rollout-2026-08-05T09-37-20-019fd0a4-0e42-7731-9172-cae24c68b150.jsonl`.
+fn extract_codex_rollout_id(path: &str) -> Option<String> {
+    let stem = std::path::Path::new(path).file_stem()?.to_str()?;
+    let id = stem.get(stem.len().checked_sub(36)?..)?;
+    let shaped = id.as_bytes().iter().enumerate().all(|(i, &b)| {
+        if matches!(i, 8 | 13 | 18 | 23) {
+            b == b'-'
+        } else {
+            b.is_ascii_hexdigit()
+        }
+    });
+    shaped.then(|| id.to_string())
+}
+
+/// The Codex rollout `.jsonl` that `codex_pid` currently has open, via `lsof`.
+/// Definitive even when several Codex sessions run at once (each holds its own
+/// rollout open). Best-effort — `None` on any failure. Codex emits no OSC session
+/// id, so this is how the daemon learns the resume-id automatically, without any
+/// manual stamping and without depending on a hook-recorded transcript path.
+fn codex_open_rollout(codex_pid: u32) -> Option<String> {
+    let out = std::process::Command::new("lsof")
+        .args(["-p", &codex_pid.to_string(), "-Fn"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.strip_prefix('n'))
+        .find(|p| p.contains("/.codex/sessions/") && p.ends_with(".jsonl"))
+        .map(str::to_string)
+}
+
 /// Stats pushed by Claude Code via the statusline script.
 #[derive(Debug, Clone, Default)]
 pub struct ClaudeApiStats {
@@ -197,6 +229,20 @@ impl ClaudeTracker {
         // the bar shows model and ctx% rather than just RAM/CPU.
         if self.detected_tool == Some(AiTool::Codex) {
             self.refresh_codex_api_stats();
+            // Pin the resume-id automatically. Codex emits no OSC session id, so
+            // derive it from its rollout file — the trailing UUID in the filename
+            // IS the `codex resume <id>` target. Prefer the hook-recorded path;
+            // fall back to the rollout the live process holds open (definitive
+            // when several Codex sessions run). Set once, then cached — so on
+            // restart we `codex resume <exact-id>`, never `--last`.
+            if self.session_id.is_none() {
+                let rollout = self
+                    .codex_rollout_path()
+                    .or_else(|| self.claude_pid.and_then(codex_open_rollout));
+                if let Some(id) = rollout.as_deref().and_then(extract_codex_rollout_id) {
+                    self.session_id = Some(id);
+                }
+            }
         }
 
         self.claude_pid != old_pid || self.session_id != old_session

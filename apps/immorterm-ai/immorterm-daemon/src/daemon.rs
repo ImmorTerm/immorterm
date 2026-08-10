@@ -1687,6 +1687,30 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                     }
                 }
 
+                // ── Codex resume-id persist (non-OSC path) ──
+                // scan() derives the Codex session id from its live rollout
+                // (Codex emits no OSC 1337). Push it through to the registry +
+                // side files the first time it's known, so restart does
+                // `codex resume <exact-id>` instead of `--last`. Only writes when
+                // the id is genuinely new (guarded on `changed` + a disk compare),
+                // so it never adds churn to the hot scan.
+                if changed
+                    && !state.window_id.is_empty()
+                    && let Some(sid) = state.claude.session_id.clone()
+                {
+                    let mut registry = crate::registry::Registry::load();
+                    let already = registry
+                        .sessions
+                        .iter()
+                        .find(|e| e.window_id == state.window_id)
+                        .and_then(|e| e.ai_session_id.as_deref())
+                        == Some(sid.as_str());
+                    if !already && registry.update_claude_session(&state.window_id, &sid) {
+                        info!("Resume id via scan (codex/non-OSC): {}", &sid[..8.min(sid.len())]);
+                        let _ = registry.persist_session(&state.window_id);
+                    }
+                }
+
                 // Always update status bar when Claude is running
                 state.status_bar.ai_process_stats = state.claude.format_process_stats();
                 state.status_bar.ai_api_stats = state.claude.format_api_stats();
