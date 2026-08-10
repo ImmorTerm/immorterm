@@ -6179,10 +6179,9 @@ For every later MCP example, \`<resolved_identity_args>\` means
 \`immorterm_id="<stable_id>"\` when available, plus \`session_id="<conversation_id>"\`
 only when known and supported.`
   );
-  body = body.replaceAll(
-    'session_id="<resolved_session_id>"',
-    () => '<resolved_identity_args>'
-  );
+  body = body
+    .split('session_id="<resolved_session_id>"')
+    .join('<resolved_identity_args>');
   replaceLiteral(
     `**Fallback — JSONL parsing** (if \`list_tasks\` returns 0 tasks):
 
