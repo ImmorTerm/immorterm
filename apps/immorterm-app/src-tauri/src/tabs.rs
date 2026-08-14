@@ -54,6 +54,15 @@ pub struct Tab {
     /// session WS connections through the hub's SSH tunnel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<String>,
+    /// Set only while restoring a legacy tab whose remote field was absent
+    /// and could not be resolved safely. The webview uses this to stop before
+    /// attempting a local filesystem read and show an actionable picker hint.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remote_identity_unresolved: bool,
+    /// Candidate configured remotes that own the same project path. More than
+    /// one is deliberately never auto-selected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote_candidates: Vec<String>,
 }
 
 impl Tab {
@@ -81,6 +90,8 @@ impl Tab {
             created_at_ms: now_ms(),
             mode,
             remote,
+            remote_identity_unresolved: false,
+            remote_candidates: Vec::new(),
         }
     }
 }
@@ -105,7 +116,13 @@ struct PersistedTabs {
 }
 
 fn default_version() -> u32 {
-    2
+    1
+}
+
+const CURRENT_VERSION: u32 = 3;
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Per-window in-memory registry. Wrap in `Arc<TabRegistry>` and hand to
@@ -276,7 +293,7 @@ impl TabRegistry {
         }
         let snapshot = self.inner.lock().unwrap().clone();
         let mut store = read_store().unwrap_or_default();
-        store.version = default_version();
+        store.version = CURRENT_VERSION;
         store.windows.insert(self.window_label.clone(), snapshot);
         if let Err(e) = write_store(&store) {
             eprintln!("[tabs] persist failed: {e}");
@@ -299,8 +316,56 @@ fn store_path() -> PathBuf {
 
 fn read_store() -> std::io::Result<PersistedTabs> {
     let bytes = fs::read(store_path())?;
-    serde_json::from_slice(&bytes)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    let mut store: PersistedTabs = serde_json::from_slice(&bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    if migrate_legacy_remote_identity(&mut store) {
+        write_store(&store)?;
+    }
+    Ok(store)
+}
+
+/// Upgrade pre-v3 tabs which did not reliably retain remote identity.
+/// A path is migrated only when exactly one persisted remote tab owns it and
+/// the path does not exist locally. Multiple candidates are recorded for an
+/// actionable UI, never guessed. A missing local path with no evidence is
+/// marked unresolved so Files never leaks a raw macOS read_dir error.
+fn migrate_legacy_remote_identity(store: &mut PersistedTabs) -> bool {
+    if store.version >= CURRENT_VERSION {
+        return false;
+    }
+    let mut owners: HashMap<String, Vec<String>> = HashMap::new();
+    for state in store.windows.values() {
+        for tab in &state.tabs {
+            if let Some(remote) = tab.remote.as_deref().filter(|remote| !remote.is_empty()) {
+                let remotes = owners.entry(tab.project_dir.clone()).or_default();
+                if !remotes.iter().any(|candidate| candidate == remote) {
+                    remotes.push(remote.to_string());
+                }
+            }
+        }
+    }
+    for remotes in owners.values_mut() {
+        remotes.sort();
+    }
+
+    for state in store.windows.values_mut() {
+        for tab in &mut state.tabs {
+            if tab.remote.is_some() || std::path::Path::new(&tab.project_dir).exists() {
+                continue;
+            }
+            let candidates = owners.get(&tab.project_dir).cloned().unwrap_or_default();
+            if candidates.len() == 1 {
+                tab.remote = candidates.first().cloned();
+                tab.remote_identity_unresolved = false;
+                tab.remote_candidates.clear();
+            } else {
+                tab.remote_identity_unresolved = true;
+                tab.remote_candidates = candidates;
+            }
+        }
+    }
+    store.version = CURRENT_VERSION;
+    true
 }
 
 fn write_store(s: &PersistedTabs) -> std::io::Result<()> {
@@ -379,5 +444,102 @@ mod tests {
         let next = reg.remove(&a.id);
         assert_eq!(next, None);
         assert_eq!(reg.active_id(), None);
+    }
+
+    fn legacy_tab(id: &str, path: &str, remote: Option<&str>) -> Tab {
+        Tab {
+            id: id.into(),
+            project_dir: path.into(),
+            project_name: "Landing".into(),
+            created_at_ms: 1,
+            mode: TabMode::Project,
+            remote: remote.map(str::to_string),
+            remote_identity_unresolved: false,
+            remote_candidates: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn legacy_restore_recovers_one_unambiguous_remote_and_persists_v3() {
+        let path = "/definitely-not-local/landing-remote-migration";
+        let mut store = PersistedTabs {
+            version: 2,
+            windows: HashMap::from([
+                (
+                    "main".into(),
+                    WindowState {
+                        tabs: vec![legacy_tab("remote", path, Some("docker"))],
+                        active_id: None,
+                    },
+                ),
+                (
+                    "window-4".into(),
+                    WindowState {
+                        tabs: vec![legacy_tab("legacy", path, None)],
+                        active_id: None,
+                    },
+                ),
+            ]),
+        };
+        assert!(migrate_legacy_remote_identity(&mut store));
+        let restored = &store.windows["window-4"].tabs[0];
+        assert_eq!(restored.remote.as_deref(), Some("docker"));
+        assert!(!restored.remote_identity_unresolved);
+        assert_eq!(store.version, CURRENT_VERSION);
+        assert!(
+            !migrate_legacy_remote_identity(&mut store),
+            "migration is one-shot"
+        );
+    }
+
+    #[test]
+    fn legacy_restore_never_guesses_between_multiple_remotes() {
+        let path = "/definitely-not-local/shared-remote-path";
+        let mut store = PersistedTabs {
+            version: 2,
+            windows: HashMap::from([
+                (
+                    "main".into(),
+                    WindowState {
+                        tabs: vec![
+                            legacy_tab("docker", path, Some("docker")),
+                            legacy_tab("prod", path, Some("prod")),
+                        ],
+                        active_id: None,
+                    },
+                ),
+                (
+                    "window-4".into(),
+                    WindowState {
+                        tabs: vec![legacy_tab("legacy", path, None)],
+                        active_id: None,
+                    },
+                ),
+            ]),
+        };
+        migrate_legacy_remote_identity(&mut store);
+        let restored = &store.windows["window-4"].tabs[0];
+        assert_eq!(restored.remote, None);
+        assert!(restored.remote_identity_unresolved);
+        assert_eq!(restored.remote_candidates, vec!["docker", "prod"]);
+    }
+
+    #[test]
+    fn remote_identity_survives_store_round_trip() {
+        let tab = legacy_tab("remote", "/root/projects/landing", Some("docker"));
+        let store = PersistedTabs {
+            version: CURRENT_VERSION,
+            windows: HashMap::from([(
+                "main".into(),
+                WindowState {
+                    tabs: vec![tab],
+                    active_id: Some("remote".into()),
+                },
+            )]),
+        };
+
+        let encoded = serde_json::to_vec(&store).unwrap();
+        let restored: PersistedTabs = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(restored.windows["main"].tabs[0].remote.as_deref(), Some("docker"));
     }
 }
