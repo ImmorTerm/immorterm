@@ -1477,6 +1477,9 @@
     // it. Keeping it adapter-scoped used to silently fail in VS Code
     // mode and throw ReferenceError in WKWebView.
     const _remoteName = (new URLSearchParams(location.search).get('remote') || '').trim();
+    const _remoteRestoreState = (new URLSearchParams(location.search).get('remote_restore') || '').trim();
+    const _remoteCandidates = (new URLSearchParams(location.search).get('remote_candidates') || '')
+      .split(',').map((name) => name.trim()).filter(Boolean);
 
     // Snapshot reconciler — single source of truth is registry.json on
     // the hub. Whenever a fresh snapshot arrives we:
@@ -12392,9 +12395,7 @@
     // reach the hub; the VS Code webview's CSP allows 127.0.0.1:*). Keeping
     // it off the extension path avoids maintaining a second listing impl.
     function hubListDir(dir) {
-      const url = _remoteName
-        ? HUB_BASE_URL + '/api/v1/remotes/' + encodeURIComponent(_remoteName) + '/ls?path=' + encodeURIComponent(dir)
-        : HUB_BASE_URL + '/api/ls?path=' + encodeURIComponent(dir);
+      const url = filesModule.fileBrowserListUrl(HUB_BASE_URL, _remoteName, dir);
       return fetch(url).then(r => r.json()).catch(err => ({ error: String(err), entries: [] }));
     }
 
@@ -15998,6 +15999,8 @@
                   return (s && s.cwd) ? String(s.cwd) : '';
                 },
                 remoteName: _remoteName,
+                remoteRestoreState: _remoteRestoreState,
+                remoteCandidates: _remoteCandidates,
                 hubBaseUrl: HUB_BASE_URL,
                 // Hub-only listing — the browser is a hub-first feature; no
                 // VS Code extension-host listing path to maintain.
