@@ -404,6 +404,27 @@ transcript normalization (`immorterm-adapter`), a neutral digest prompt,
 
 How to use: pick your vendor in the wizard's vendor step (auto-detected).
 
+### Shared Longstory coding memory
+
+The same digest daemon can send a due coding session to Longstory. ImmorTerm
+still watches the transcript and decides when work is ready. Longstory creates
+the shared rolling summary and private pending lessons, then keeps an
+idempotent checkpoint so unchanged sessions do not run the model again.
+
+Set `LONGSTORY_CODING_DIGEST_BINARY` to the installed
+`longstory-coding-digest` executable. Configure its Longstory Core URL, tenant,
+project, agent subject, and credential in the daemon environment. If the
+variable is absent, ImmorTerm behaves exactly as before. A Longstory failure is
+logged and does not interrupt the terminal or the existing local digest.
+
+The default `LONGSTORY_CODING_DIGEST_MODE=mirror` keeps the old local digest
+during migration. Set it to `replace` only after the agent reads from the same
+Longstory project. Replace mode runs one summarizer, not two.
+
+Remote coding hosts without ImmorTerm can run Longstory's own manifest worker
+instead. Both paths use the same transcript adapters, policy, Core checkpoint,
+and candidate governance.
+
 ---
 
 ## Sharing
