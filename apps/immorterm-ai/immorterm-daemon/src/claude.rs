@@ -35,7 +35,6 @@ use tracing::{info, warn};
 /// list is exactly how a dropped variant silently mis-attributes sessions.
 pub use structured_logs::ai_extractor::AiTool;
 
-
 /// How much of a Codex rollout to read when deriving stats. Rollouts grow to
 /// megabytes over a long session and we only need the most recent
 /// `token_count`, so read a window from the end rather than the whole file.
@@ -125,6 +124,12 @@ pub struct ClaudeTracker {
     /// "had-AI-now-exited" (reconnect makes sense) from "bare-shell"
     /// (don't summon Claude out of nothing).
     pub had_ai_session: bool,
+    /// Set by `refresh_codex_state` when the PULLED codex stats (ctx%/model/cost)
+    /// changed on this scan. Codex has no OSC push, so these are read from the
+    /// rollout on the loop — but the event loop must NOT persist them (a flock'd
+    /// write blocks keystroke relay). The 10s-tick reads this flag and hands the
+    /// stats to the background persist worker instead, then clears it.
+    pub stats_dirty: bool,
     /// This terminal's WINDOW_ID — used to match context files
     window_id: String,
     /// Persistent process sampler, reused across scans. Kept alive so per-process
@@ -145,6 +150,7 @@ impl ClaudeTracker {
             api_stats: ClaudeApiStats::default(),
             permission_mode: None,
             had_ai_session: false,
+            stats_dirty: false,
             window_id: window_id.to_string(),
             sys: System::new(),
         }
@@ -169,6 +175,14 @@ impl ClaudeTracker {
             self.detected_tool = Some(tool);
             self.rss_kb = rss;
             self.cpu_percent = cpu;
+            // Codex id/stats must be retried on the fast path too: this branch
+            // returns on the vast majority of ticks, so if we only refreshed on
+            // the discovery path the resume-id would be attempted at most once
+            // (and lost forever if the rollout wasn't open yet on that tick).
+            // Codex stats are refreshed here but persisted OFF the loop (the
+            // tick reads `stats_dirty`), so they must NOT force `changed` — that
+            // would fire the synchronous flock'd persist and stall keystrokes.
+            self.refresh_codex_state();
             return self.claude_pid != old_pid || self.session_id != old_session;
         }
 
@@ -225,27 +239,67 @@ impl ClaudeTracker {
             }
         }
 
-        // Codex has no statusline feed — derive its stats from the rollout so
-        // the bar shows model and ctx% rather than just RAM/CPU.
-        if self.detected_tool == Some(AiTool::Codex) {
-            self.refresh_codex_api_stats();
-            // Pin the resume-id automatically. Codex emits no OSC session id, so
-            // derive it from its rollout file — the trailing UUID in the filename
-            // IS the `codex resume <id>` target. Prefer the hook-recorded path;
-            // fall back to the rollout the live process holds open (definitive
-            // when several Codex sessions run). Set once, then cached — so on
-            // restart we `codex resume <exact-id>`, never `--last`.
-            if self.session_id.is_none() {
-                let rollout = self
-                    .codex_rollout_path()
-                    .or_else(|| self.claude_pid.and_then(codex_open_rollout));
-                if let Some(id) = rollout.as_deref().and_then(extract_codex_rollout_id) {
-                    self.session_id = Some(id);
-                }
-            }
-        }
+        self.refresh_codex_state();
 
         self.claude_pid != old_pid || self.session_id != old_session
+    }
+
+    /// Refresh Codex-only state on every scan tick: stats (no statusline feed)
+    /// and the resume-id (no OSC session id). No-op for non-Codex tools.
+    ///
+    /// Sets `self.stats_dirty` when it CHANGED the pulled api-stats
+    /// (model / ctx% / cost). Codex stats are pulled from the rollout here rather
+    /// than pushed via OSC like Claude; the 10s-tick reads `stats_dirty` and
+    /// hands the new stats to the BACKGROUND persist worker, so the ctx% reaches
+    /// the registry/status bar WITHOUT the loop ever doing a flock'd write (which
+    /// would stall keystroke relay — the reason this isn't folded into `changed`).
+    ///
+    /// Called from BOTH the fast path and the discovery path so the resume-id is
+    /// re-attempted every tick until the rollout exists — Codex may be detected
+    /// before it has opened its rollout `.jsonl`, and the fast path returns early
+    /// on later ticks, so a one-shot derivation would permanently lose the id.
+    fn refresh_codex_state(&mut self) {
+        if self.detected_tool != Some(AiTool::Codex) {
+            return;
+        }
+        let old_ctx = self.api_stats.context_pct;
+        let old_model = self.api_stats.model.clone();
+        let old_cost = self.api_stats.cost_usd;
+        // Resolve the rollout ONCE and reuse it for BOTH stats and the id.
+        // Prefer the hook-announced path; fall back to the rollout the live
+        // process holds open (lsof) — the latter is what saves a manually
+        // `codex resume`-d session whose ai_transcript_path was never recorded.
+        let rollout = self
+            .codex_rollout_path()
+            .or_else(|| self.claude_pid.and_then(codex_open_rollout));
+        // Cache the discovered path so refresh_codex_api_stats() (and later
+        // ticks) can read the rollout for model + ctx% even when the hook never
+        // announced ai_transcript_path. Without this the status bar is stuck on
+        // "Codex CTX: 0%" for the life of the session.
+        if self.api_stats.transcript_path.is_empty()
+            && let Some(ref p) = rollout
+        {
+            self.api_stats.transcript_path = p.clone();
+        }
+        // Stats (model + ctx%) from the rollout tail.
+        self.refresh_codex_api_stats();
+        // Pin the resume-id automatically. Codex emits no OSC session id, so
+        // derive it from the rollout filename's trailing UUID — the
+        // `codex resume <id>` target. Set once, then cached — so on restart we
+        // `codex resume <exact-id>`, never `--last`.
+        if self.session_id.is_none()
+            && let Some(id) = rollout.as_deref().and_then(extract_codex_rollout_id)
+        {
+            self.session_id = Some(id);
+        }
+        // Flag a pulled-stats change so the 10s-tick sends the new ctx%/model/cost
+        // to the background persist worker (never a flock'd write on this loop).
+        if self.api_stats.context_pct != old_ctx
+            || self.api_stats.model != old_model
+            || self.api_stats.cost_usd != old_cost
+        {
+            self.stats_dirty = true;
+        }
     }
 
     /// Fill `api_stats` for a Codex session by reading its rollout transcript.
@@ -353,10 +407,7 @@ impl ClaudeTracker {
             format!("{}K", self.rss_kb)
         };
 
-        let runtime = self
-            .start_time
-            .map(|t| t.elapsed().as_secs())
-            .unwrap_or(0);
+        let runtime = self.start_time.map(|t| t.elapsed().as_secs()).unwrap_or(0);
 
         let time = if runtime >= 3600 {
             format!("{}h{}m", runtime / 3600, (runtime % 3600) / 60)
@@ -366,10 +417,7 @@ impl ClaudeTracker {
             format!("{}s", runtime)
         };
 
-        let vendor = self
-            .detected_tool
-            .map(|t| t.display_name())
-            .unwrap_or("AI");
+        let vendor = self.detected_tool.map(|t| t.display_name()).unwrap_or("AI");
         format!("{} {} {:.0}% {}", vendor, mem, self.cpu_percent, time)
     }
 
@@ -406,9 +454,7 @@ impl ClaudeTracker {
 
     /// Runtime in seconds since Claude was first detected.
     pub fn runtime_secs(&self) -> u64 {
-        self.start_time
-            .map(|t| t.elapsed().as_secs())
-            .unwrap_or(0)
+        self.start_time.map(|t| t.elapsed().as_secs()).unwrap_or(0)
     }
 
     /// Probe a single known pid in-process: refresh just that process and return
@@ -618,10 +664,7 @@ fn find_session_by_window_id(window_id: &str) -> Option<ContextFileMatch> {
         // Build API stats
         let api_stats = ClaudeApiStats {
             model: vars.get("MODEL").cloned().unwrap_or_default(),
-            cost_usd: vars
-                .get("COST")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0.0),
+            cost_usd: vars.get("COST").and_then(|v| v.parse().ok()).unwrap_or(0.0),
             context_pct: vars
                 .get("CTX_PCT")
                 .and_then(|v| v.parse().ok())
@@ -672,8 +715,14 @@ mod tests {
 
     #[test]
     fn classify_matches_known_tools() {
-        assert_eq!(classify_ai_process("claude", "claude"), Some(AiTool::Claude));
-        assert_eq!(classify_ai_process("gh", "gh copilot suggest"), Some(AiTool::Copilot));
+        assert_eq!(
+            classify_ai_process("claude", "claude"),
+            Some(AiTool::Claude)
+        );
+        assert_eq!(
+            classify_ai_process("gh", "gh copilot suggest"),
+            Some(AiTool::Copilot)
+        );
         assert_eq!(classify_ai_process("gh", "gh pr list"), None);
         assert_eq!(classify_ai_process("zsh", "/bin/zsh"), None);
     }
@@ -716,7 +765,10 @@ mod tests {
 
         // After the child is reaped, probing its pid must report it gone.
         let mut tracker2 = ClaudeTracker::new("test-win");
-        assert!(tracker2.probe_pid(pid).is_none(), "dead pid must probe as None");
+        assert!(
+            tracker2.probe_pid(pid).is_none(),
+            "dead pid must probe as None"
+        );
     }
 
     /// Verify CPU% is real, not stuck at 0. sysinfo computes CPU as a delta
@@ -754,7 +806,10 @@ mod tests {
         let _ = handle.kill();
         let _ = handle.wait();
 
-        assert!(rss_seen > 0, "busy process should report RSS, got {rss_seen}");
+        assert!(
+            rss_seen > 0,
+            "busy process should report RSS, got {rss_seen}"
+        );
         assert!(
             readings.iter().any(|&c| c > 0.0),
             "busy process should report CPU% > 0 within 5 probes, got {readings:?}"
@@ -769,16 +824,18 @@ mod codex_stats_tests {
     /// Real record shapes from a live 0.145 rollout. Codex has no statusline
     /// feed, so these two records are the entire basis for its status bar.
     const ROLLOUT: &str = concat!(
-        r#"{"type":"turn_context","payload":{"turn_id":"t1","cwd":"/x","model":"gpt-5.6-sol"}}"#, "\n",
-        r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":31819},"model_context_window":258400}}}"#, "\n",
-        r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":129200},"model_context_window":258400}}}"#, "\n",
+        r#"{"type":"turn_context","payload":{"turn_id":"t1","cwd":"/x","model":"gpt-5.6-sol"}}"#,
+        "\n",
+        r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":31819},"model_context_window":258400}}}"#,
+        "\n",
+        r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":129200},"model_context_window":258400}}}"#,
+        "\n",
     );
 
     /// `label` keeps each test's fixture in its own directory — these run in
     /// parallel in one process, so a shared path leaks state between them.
     fn stats_from(label: &str, text: &str) -> ClaudeApiStats {
-        let dir = std::env::temp_dir()
-            .join(format!("imcodexstats-{}-{label}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("imcodexstats-{}-{label}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("rollout.jsonl");
         std::fs::write(&path, text).unwrap();
@@ -809,7 +866,10 @@ mod codex_stats_tests {
 
     #[test]
     fn no_token_count_leaves_context_untouched() {
-        let s = stats_from("nocount", r#"{"type":"turn_context","payload":{"model":"gpt-5.6-sol"}}"#);
+        let s = stats_from(
+            "nocount",
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.6-sol"}}"#,
+        );
         assert_eq!(s.model, "gpt-5.6-sol");
         assert_eq!(s.context_pct, 0.0);
     }

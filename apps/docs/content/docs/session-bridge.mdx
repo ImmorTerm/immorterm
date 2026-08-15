@@ -1,0 +1,219 @@
+---
+title: Session Bridge
+description: Authenticated, project-scoped discovery and correlated messaging for ImmorTerm sessions.
+---
+
+The Session Bridge is the ImmorTerm Hub's channel-neutral API for discovering
+AI sessions and delivering correlated messages without selecting a shell or
+injecting arbitrary terminal keystrokes. It covers local sessions and sessions
+aggregated from configured remote ImmorTerm Hubs.
+
+ImmorTerm owns stable session identity, presence, durable delivery, explicit
+agent acknowledgement, replies, and remote routing. Integrations own tenant
+authentication, human allowlists, UI, audit, and notification policy.
+
+## Network topology
+
+Desktop ImmorTerm binds its Hub to loopback; discover its port in
+`~/.immorterm/hub.state.json`. A remotely deployed terminal runs the same Hub
+behind TLS and private networking, with `IMMORTERM_HUB_HOST=0.0.0.0` and an
+environment-managed `IMMORTERM_BRIDGE_TOKEN`.
+
+A served remote Hub is supported. The current SDK does not make a desktop
+loopback Hub reachable from k3s or another SaaS control plane. That direction
+requires a private tunnel or the outbound connector/reverse relay. Do not poll
+or use PTY targeting as a substitute.
+
+## Credentials and authority
+
+`IMMORTERM_BRIDGE_TOKEN` (or the local mode-`0600`
+`~/.immorterm/bridge-token`) is the deployment administrator credential. It is
+used only to provision, rotate, and revoke installation credentials. Normal
+directory, message, and event calls use a short-lived installation credential.
+
+### Provision an installation credential
+
+`POST /api/v1/bridge/installations/credentials`
+
+```json
+{
+  "installation_id": "flam-production",
+  "project_id": "794e3fa2-f27d-41b6-9c67-ec1ef7b06301",
+  "audience": "flam-team-runtime",
+  "operations": ["directory:read", "message:send", "events:subscribe"],
+  "ttl_seconds": 3600
+}
+```
+
+The `201` response contains `token`, `token_id`, installation/project/audience,
+operations, and `expires_at`. The plaintext token is returned once; only its
+SHA-256 digest is stored by the Hub. TTL is 60 seconds to 24 hours.
+
+Revoke with
+`DELETE /api/v1/bridge/installations/{installation_id}/credentials/{token_id}`
+using the administrator credential.
+
+Installation credentials are bound server-side to their project. Omitting
+`project_id` derives it from the credential. Supplying the same ID is an
+assertion; supplying another ID returns `403 project_scope_mismatch`.
+
+Host credentials may read the directory, send/cancel their own messages, and
+subscribe to events. They cannot acknowledge or reply for an agent. Agent
+acknowledgement and reply require an opaque per-message receipt installed only
+in the exact receiving daemon over local Unix IPC. Neither deployment nor
+installation credentials authorize those routes, and the Hub derives project,
+target, destination, and correlation from the receipt instead of request JSON.
+
+### Verify an installation credential
+
+`GET /api/v1/bridge/identity` returns the authenticated credential's non-secret
+installation, project, token ID, audience, operation, expiry, and protocol
+claims. Call `bridge.assertIdentity(...)` before starting a consumer so an
+administrator token, wrong installation, wrong project, wrong audience, or
+missing operation fails closed.
+
+## Directory
+
+`GET /api/v1/bridge/directory` returns:
+
+```json
+{
+  "project_id": "794e3fa2-f27d-41b6-9c67-ec1ef7b06301",
+  "revision": "d7aa9f19b8a8d2bc19fcd701",
+  "generated_at": "2026-08-14T15:00:00Z",
+  "sessions": [{
+    "window_id": "41103-66e4a36b",
+    "project_id": "794e3fa2-f27d-41b6-9c67-ec1ef7b06301",
+    "session_name": "flam-ai-41103-66e4a36b",
+    "display_name": "Team",
+    "tool": "codex",
+    "location": { "kind": "local" },
+    "status": "active",
+    "connected_at": "2026-08-14T12:00:00Z",
+    "last_seen_at": "2026-08-14T14:59:59Z",
+    "last_active_at": "2026-08-14T14:59:58Z",
+    "is_working": true,
+    "needs_attention": false,
+    "capabilities": ["external_messages.v1", "agent_ack.v1", "agent_reply.v1"],
+    "protocol_version": 1
+  }]
+}
+```
+
+Remote entries use `{"kind":"remote","name":"docker"}`. `last_active_at`
+comes from the same persisted activity value shown as `Last:` in the terminal.
+Target only a stable `window_id` returned by this authenticated directory.
+
+## Send, idempotency, and limits
+
+`POST /api/v1/bridge/messages`
+
+```json
+{
+  "target_window_id": "41103-66e4a36b",
+  "message_id": "factory-review-27",
+  "correlation_id": "slack-thread-C123-171234.567",
+  "message": "Review event text",
+  "expires_at": "2026-08-14T16:00:00Z"
+}
+```
+
+IDs contain ASCII letters, digits, `.`, `_`, or `-`, up to 128 characters.
+Messages are plain text up to 64 KiB. Non-empty `attachments` currently return
+`422 attachments_not_supported`; the capability is gated until ImmorTerm has an
+immutable hash-verified resolver. Image bytes, signed/temporary URLs, secrets,
+and arbitrary shell targeting are outside the contract. Expiry defaults to one
+hour and cannot be more than 24 hours away.
+
+The Hub limits each installation to 60 sends/minute, 100 pending messages, and
+20 pending messages per target. `429` responses include `Retry-After` and
+`retry_after_seconds`.
+
+A SaaS consumer may enforce one pending job per agent as its own workflow
+policy. That is not a Session Bridge protocol invariant and must not be assumed
+by other consumers.
+
+`message_id` is the idempotency key. Identical means the canonical project,
+target, correlation, content, attachments, expiry, and trace metadata all
+match. An identical retry returns the existing record; conflicting reuse is
+`409 Conflict`.
+
+Cancel a non-terminal message with
+`POST /api/v1/bridge/messages/{message_id}/cancel`. An installation may cancel
+only a message it created.
+
+## Delivery states
+
+Every transition includes `changed_at`, `attempt`, and—on failure—a stable
+`error_code` and `retryable` flag.
+
+1. `queued` — durably stored by the Hub.
+2. `routing` — a delivery attempt began; `attempt` increments.
+3. `accepted_by_daemon` — the exact target daemon accepted the envelope.
+4. `presented_to_agent_input` — ImmorTerm presented it to the agent input channel.
+5. `acknowledged_by_agent` — the receiving agent explicitly accepted the work.
+6. `replied` — a correlated agent response was durably recorded.
+7. `failed`, `expired`, or `cancelled` — terminal outcomes.
+
+PTY or IPC write success is never agent acknowledgement.
+
+## Event stream
+
+Connect with an installation bearer credential:
+
+```text
+WS /api/v1/bridge/events?cursor=v1:42
+Authorization: Bearer <installation credential>
+```
+
+Every event has this envelope:
+
+```ts
+type BridgeEvent = {
+  version: 1;
+  eventId: string;
+  type: "snapshot" | "directory_snapshot" | "message_state_changed" | "agent_reply" | "cursor_expired";
+  projectId: string;
+  sequence: number;
+  cursor: string;
+  occurredAt: string;
+  messageId?: string;
+  correlationId?: string;
+  causationId?: string;
+  payload: unknown;
+};
+```
+
+Ordering and cursors are project-scoped. Delivery is at-least-once; consumers
+deduplicate by `eventId` and persist the cursor after processing. Reconnect with
+that cursor to replay retained events. An unavailable/invalid cursor produces
+`cursor_expired` followed by a fresh snapshot. Do not persist the gap marker's
+cursor; reconcile the snapshot and persist the snapshot cursor. Both SDK event
+APIs deliver the marker and repair snapshot without terminating. The retained ledger holds the
+latest 10,000 events. This is event-driven; polling is not part of the contract.
+
+## TypeScript SDK
+
+Use `@immorterm/session-bridge` instead of copying wire types. The package
+provides branded IDs, runtime validation, discriminated events, typed auth,
+authorization, conflict, rate-limit, cursor, and delivery errors, AbortSignal
+support, an AsyncIterable event API, and a callback subscription wrapper.
+
+See the package README for provisioning and host examples. There is deliberately
+no host-side `acknowledge` or `reply` method.
+
+## Settings and readiness
+
+Settings → Session Bridge shows enabled state, contract version, authentication
+source, and configured remotes without rendering secrets. It can enable/disable
+the bridge, rotate a file-managed administrator credential, and manage remotes.
+
+`GET /api/v1/bridge/status` is non-secret UI status. Authenticated
+`GET /api/v1/bridge/contract` reports protocol version, routes, states, limits,
+and capabilities.
+
+Local discovery/delivery, credential scoping, migration, idempotency, content
+validation, state transitions, and SDK transport are covered by focused tests.
+Configured remote forwarding is implemented but still requires remote
+end-to-end acknowledgement proof. The outbound desktop-to-k3s connector/reverse
+relay is not yet implemented.

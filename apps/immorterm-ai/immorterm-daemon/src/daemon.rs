@@ -178,6 +178,12 @@ pub struct SessionState {
     /// ponytail: unbounded Vec, drained every pump tick (~15fps); cap if a
     /// wedged pump ever lets it grow.
     pub browser_input_queue: Vec<crate::ipc::BrowserInputEvent>,
+    /// Correlated external messages accepted by this daemon but not yet
+    /// presented to the agent input. Bounded by the accept handler.
+    pub pending_external_messages: std::collections::HashMap<String, (String, String, String)>,
+    /// Opaque Hub receipts for external messages already presented by this
+    /// exact daemon. They are deliberately available only over its Unix IPC.
+    pub external_message_receipts: std::collections::HashMap<String, String>,
 }
 
 impl SessionState {
@@ -251,21 +257,26 @@ impl SessionState {
     /// rows in one observed session, with `ls -la` repeating 4 times).
     pub fn process_deferred_restore(&mut self, cols: u16, rows: u16) {
         if let Some(ansi) = self.pending_restore_ansi.take() {
-            info!("Processing deferred restore ({} bytes) at {}x{}", ansi.len(), cols, rows);
+            info!(
+                "Processing deferred restore ({} bytes) at {}x{}",
+                ansi.len(),
+                cols,
+                rows
+            );
 
             // 1. Inject scrollback rows DIRECTLY (no emulator scrolling).
             if let Some(dump) = self.pending_restore_scrollback.take() {
                 let injected = dump.lines.len();
                 let target_cols = self.terminal.cols();
                 for line in dump.lines {
-                    let row = immorterm_core::log::runs_to_row(
-                        &line.runs,
-                        target_cols,
-                        line.wrapped,
-                    );
+                    let row =
+                        immorterm_core::log::runs_to_row(&line.runs, target_cols, line.wrapped);
                     self.terminal.scrollback.push(row);
                 }
-                info!("Injected {} scrollback rows directly (no emulator pass)", injected);
+                info!(
+                    "Injected {} scrollback rows directly (no emulator pass)",
+                    injected
+                );
             }
 
             // 2. Clear screen + replay grid (viewport only).
@@ -281,8 +292,10 @@ impl SessionState {
             // Signal that the next subscribe_raw should send full scrollback
             // so the WASM client receives the restored session history.
             self.pending_full_snapshot = true;
-            info!("Flagged pending_full_snapshot for next subscribe_raw ({} scrollback rows)",
-                  self.terminal.scrollback.len());
+            info!(
+                "Flagged pending_full_snapshot for next subscribe_raw ({} scrollback rows)",
+                self.terminal.scrollback.len()
+            );
 
             // Auto-resume via the vendor-neutral `immorterm recall` CLI.
             // ALWAYS stuff recall after a deferred restore — even when no
@@ -314,7 +327,9 @@ impl SessionState {
                 .is_some_and(|v| v == "1");
 
             if no_auto_resume {
-                info!("IMMORTERM_NO_AUTO_RESUME=1 — skipping recall stuffing and viewport scroll-out");
+                info!(
+                    "IMMORTERM_NO_AUTO_RESUME=1 — skipping recall stuffing and viewport scroll-out"
+                );
                 self.pending_claude_resume.take();
             } else {
                 let claude_id = self.pending_claude_resume.take();
@@ -342,7 +357,10 @@ impl SessionState {
                     .and_then(|p| p.into_os_string().into_string().ok())
                     .unwrap_or_else(|| "immorterm-ai".to_string());
                 if let Some(ref id) = claude_id {
-                    info!("Auto-resuming via immorterm recall (claude session: {})", id);
+                    info!(
+                        "Auto-resuming via immorterm recall (claude session: {})",
+                        id
+                    );
                 } else {
                     info!("Stuffing immorterm recall with no UUID (tier 3/4 cascade)");
                 }
@@ -479,10 +497,16 @@ pub async fn scratch_open() -> (Option<u16>, bool) {
         if let Ok(entries) = fs::read_dir(socket_dir()) {
             for entry in entries.flatten() {
                 let fname = entry.file_name();
-                let Some(pid_str) = fname.to_string_lossy().strip_suffix(&suffix).map(str::to_owned) else {
+                let Some(pid_str) = fname
+                    .to_string_lossy()
+                    .strip_suffix(&suffix)
+                    .map(str::to_owned)
+                else {
                     continue;
                 };
-                let Ok(pid) = pid_str.parse::<u32>() else { continue };
+                let Ok(pid) = pid_str.parse::<u32>() else {
+                    continue;
+                };
                 // A crashed earlier scratch can leave a stale port file —
                 // only trust one whose pid is alive.
                 if signal::kill(Pid::from_raw(pid as i32), None).is_err() {
@@ -512,7 +536,9 @@ pub async fn scratch_open() -> (Option<u16>, bool) {
 /// kill just fails and we still clear state). Called from scratch_kill WS
 /// handling and from every graceful daemon exit path.
 pub async fn scratch_kill() {
-    let Some(info) = SCRATCH.lock().await.take() else { return };
+    let Some(info) = SCRATCH.lock().await.take() else {
+        return;
+    };
     let _ = signal::kill(Pid::from_raw(info.pid as i32), signal::Signal::SIGTERM);
     // The scratch's own SIGTERM handler removes this too; covering the
     // already-dead case here keeps the sockets dir clean.
@@ -582,7 +608,9 @@ fn run_daemon(
     }
 
     // Capture (name, shell) for scratch sibling spawns (WS scratch_open).
-    SCRATCH_SPAWN_ARGS.set((name.to_string(), shell.to_string())).ok();
+    SCRATCH_SPAWN_ARGS
+        .set((name.to_string(), shell.to_string()))
+        .ok();
 
     // Set environment variables for the PTY child process.
     // These are inherited by PtySession::spawn() which copies all env vars.
@@ -624,8 +652,7 @@ fn run_daemon(
     let rows = 24;
 
     // Spawn PTY with shell
-    let pty = PtySession::spawn(shell, cols, rows)
-        .context("Failed to spawn PTY")?;
+    let pty = PtySession::spawn(shell, cols, rows).context("Failed to spawn PTY")?;
 
     // Set up logging
     let log_writer = if log_enabled {
@@ -679,11 +706,7 @@ fn run_daemon(
             .unwrap_or_default()
     };
     if !skip_registry {
-        crate::registry::register_session(
-            name,
-            shell,
-            logfile.as_deref(),
-        );
+        crate::registry::register_session(name, shell, logfile.as_deref());
     }
 
     // Memory-wiring bootstrap (last onboarding gap): a project opened via the
@@ -706,9 +729,7 @@ fn run_daemon(
             .join("terminals")
             .join("logs")
     } else {
-        crate::dirs_home()
-            .join(".immorterm")
-            .join("logs")
+        crate::dirs_home().join(".immorterm").join("logs")
     };
 
     // Per-session directory: {base_log_dir}/{date}_{window_id}/
@@ -733,10 +754,9 @@ fn run_daemon(
     // spawn-side signature stays uniform, but drop the sender — no events get
     // queued because we install neither file logger nor event sink below. The
     // push task observes the closed receiver and exits.
-    let (push_tx, push_rx) =
-        tokio::sync::mpsc::channel::<crate::openmemory_push::TerminalLogEvent>(
-            crate::openmemory_push::CHANNEL_CAPACITY,
-        );
+    let (push_tx, push_rx) = tokio::sync::mpsc::channel::<crate::openmemory_push::TerminalLogEvent>(
+        crate::openmemory_push::CHANNEL_CAPACITY,
+    );
 
     // Ephemeral wrapper sessions (immorterm-p): no terminal log file, no events
     // pushed to memory service. The transcript is captured by the wrapper-
@@ -762,7 +782,8 @@ fn run_daemon(
     // Seed had_ai_session from the boot-time UUID env var so restored
     // sessions know they had AI before, even before the periodic scan
     // re-detects a (newly-launched) Claude process tree.
-    let restored_claude_uuid = std::env::var("IMMORTERM_CLAUDE_SESSION_ID").ok()
+    let restored_claude_uuid = std::env::var("IMMORTERM_CLAUDE_SESSION_ID")
+        .ok()
         .filter(|s| !s.is_empty());
     let mut claude_tracker = crate::claude::ClaudeTracker::new(&window_id);
     if restored_claude_uuid.is_some() {
@@ -808,6 +829,8 @@ fn run_daemon(
         workshops: std::collections::HashMap::new(),
         pending_memory_banner,
         browser_input_queue: Vec::new(),
+        pending_external_messages: std::collections::HashMap::new(),
+        external_message_receipts: std::collections::HashMap::new(),
     };
 
     // Record daemon start time for uptime tracking in death events
@@ -849,8 +872,7 @@ fn run_daemon(
     }
 
     // Run the tokio runtime
-    let rt = tokio::runtime::Runtime::new()
-        .context("Failed to create tokio runtime")?;
+    let rt = tokio::runtime::Runtime::new().context("Failed to create tokio runtime")?;
 
     // Derive user_id for OpenMemory from project directory name (matches extension convention)
     let push_user_id = if !project_dir_full.is_empty() {
@@ -871,15 +893,177 @@ fn run_daemon(
     })
 }
 
+/// A field-delta persisted off the event loop by the background worker.
+///
+/// The event-loop arms that used to do a synchronous `Registry::load()` +
+/// `save()` + side-file write (which stalls keystroke relay while the flock +
+/// fs write completes) now build one of these and hand it off with a
+/// non-blocking `send`. Coalescing merges a burst by FIELD, so a session-id
+/// change is never dropped: `ai_session_id`'s newest `Some` always survives the
+/// merge and the worker always applies it.
+#[derive(Default)]
+struct PersistDelta {
+    /// This daemon's window id — constant across every delta. Empty → skip.
+    window_id: String,
+    /// New AI session/resume id. Newest `Some` wins the merge; never dropped.
+    ai_session_id: Option<String>,
+    /// Prebuilt stats snapshot (flattened off the tracker on the loop).
+    ai_stats: Option<crate::registry::AiStatsEntry>,
+    /// Title path: set `display_name` (only when the entry isn't title-locked).
+    display_name: Option<String>,
+    /// Title path: raw terminal title (always applied).
+    title: Option<String>,
+    needs_attention: Option<bool>,
+    is_working: Option<bool>,
+    last_activity_at: Option<u64>,
+    heartbeat_at: Option<u64>,
+    /// Shutdown flush handshake: worker acks after draining, so the caller can
+    /// block until every queued write has hit disk before `process::exit`.
+    flush: Option<std::sync::mpsc::Sender<()>>,
+}
+
+impl PersistDelta {
+    /// Merge a later delta on top of this one, field by field. Any `Some`
+    /// overwrites; `window_id` is constant so it just carries through.
+    fn merge(&mut self, next: PersistDelta) {
+        if !next.window_id.is_empty() {
+            self.window_id = next.window_id;
+        }
+        if next.ai_session_id.is_some() {
+            self.ai_session_id = next.ai_session_id;
+        }
+        if next.ai_stats.is_some() {
+            self.ai_stats = next.ai_stats;
+        }
+        if next.display_name.is_some() {
+            self.display_name = next.display_name;
+        }
+        if next.title.is_some() {
+            self.title = next.title;
+        }
+        if next.needs_attention.is_some() {
+            self.needs_attention = next.needs_attention;
+        }
+        if next.is_working.is_some() {
+            self.is_working = next.is_working;
+        }
+        if next.last_activity_at.is_some() {
+            self.last_activity_at = next.last_activity_at;
+        }
+        if next.heartbeat_at.is_some() {
+            self.heartbeat_at = next.heartbeat_at;
+        }
+        if next.flush.is_some() {
+            self.flush = next.flush;
+        }
+    }
+
+    fn has_data(&self) -> bool {
+        self.ai_session_id.is_some()
+            || self.ai_stats.is_some()
+            || self.display_name.is_some()
+            || self.title.is_some()
+            || self.needs_attention.is_some()
+            || self.is_working.is_some()
+            || self.last_activity_at.is_some()
+            || self.heartbeat_at.is_some()
+    }
+}
+
+/// Spawn the background persistence worker. Owns ALL registry disk I/O that used
+/// to run on the event loop's hot arms. Blocks on `recv`, drains + coalesces
+/// each burst into a single `Registry::load()`/mutate/`persist_session()`, so
+/// the loop never touches the flock or fs and typed input is never stalled.
+fn spawn_persist_worker() -> std::sync::mpsc::Sender<PersistDelta> {
+    let (tx, rx) = std::sync::mpsc::channel::<PersistDelta>();
+    std::thread::Builder::new()
+        .name("registry-persist".into())
+        .spawn(move || {
+            // Blocks until work; `Err` means all senders dropped → exit.
+            while let Ok(first) = rx.recv() {
+                let mut m = first;
+                // Drain the rest of the burst and coalesce field-by-field.
+                while let Ok(next) = rx.try_recv() {
+                    m.merge(next);
+                }
+                if !m.window_id.is_empty() && m.has_data() {
+                    let mut reg = crate::registry::Registry::load();
+                    if let Some(entry) =
+                        reg.sessions.iter_mut().find(|e| e.window_id == m.window_id)
+                    {
+                        if let Some(sid) = &m.ai_session_id {
+                            entry.ai_session_id = Some(sid.clone());
+                        }
+                        if let Some(s) = m.ai_stats.take() {
+                            entry.ai_stats = Some(s);
+                        }
+                        if let Some(dn) = &m.display_name
+                            && !entry.title_locked
+                        {
+                            entry.display_name = dn.clone();
+                        }
+                        if let Some(t) = &m.title {
+                            entry.title = t.clone();
+                        }
+                        if let Some(a) = m.needs_attention {
+                            entry.needs_attention = a;
+                        }
+                        if let Some(w) = m.is_working {
+                            entry.is_working = w;
+                        }
+                        if let Some(ts) = m.last_activity_at {
+                            entry.last_activity_at = Some(ts);
+                        }
+                        if let Some(ts) = m.heartbeat_at {
+                            entry.heartbeat_at = Some(ts);
+                        }
+                    } else if m.ai_session_id.is_some() {
+                        warn!(
+                            "persist worker: no registry entry for window_id={} — resume id not persisted (self-heal will re-register)",
+                            m.window_id
+                        );
+                    }
+                    if let Err(e) = reg.persist_session(&m.window_id) {
+                        warn!("persist worker: failed to persist window_id={}: {}", m.window_id, e);
+                    }
+                }
+                // Shutdown handshake: ack after this batch is on disk.
+                if let Some(done) = m.flush.take() {
+                    let _ = done.send(());
+                }
+            }
+        })
+        .expect("spawn registry-persist worker");
+    tx
+}
+
+/// Block until the persist worker has drained everything queued so far. Used at
+/// shutdown, before `process::exit` kills the worker thread.
+fn flush_persist_worker(tx: &std::sync::mpsc::Sender<PersistDelta>) {
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    if tx
+        .send(PersistDelta {
+            flush: Some(done_tx),
+            ..Default::default()
+        })
+        .is_ok()
+    {
+        // Bounded wait — never hang shutdown if the worker already died.
+        let _ = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+    }
+}
+
 /// Main event loop: handles PTY output, client connections, and commands.
 async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result<()> {
-    let listener = UnixListener::bind(&socket_path)
-        .context("Failed to bind Unix socket")?;
+    let listener = UnixListener::bind(&socket_path).context("Failed to bind Unix socket")?;
 
     // Set socket permissions: 0600 = detached, 0700 = attached
     set_socket_permissions(&socket_path, false);
 
-    info!("Daemon started for session '{}' at {:?}", state.name, socket_path);
+    info!(
+        "Daemon started for session '{}' at {:?}",
+        state.name, socket_path
+    );
 
     // Restore previous terminal state from grid snapshot (respawn after reboot/crash).
     // The structured_log_dir reuses the existing session dir via find_existing_session_dir(),
@@ -887,13 +1071,21 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
     // NOTE: We defer processing until the first client resize so the ANSI reflows
     // at the actual viewport dimensions. Processing at the snapshot's old dimensions
     // (e.g. 67x24) causes content to stay narrow even after resize.
-    if let Some(restore) = structured_logs::restore::restore_session(
-        &state.structured_log_dir,
-        &state.name,
-    ) {
-        let sb_lines = restore.scrollback_dump.as_ref().map(|d| d.lines.len()).unwrap_or(0);
-        info!("Deferring restore of {} grid-bytes + {} scrollback rows ({}x{}) until first client resize",
-            restore.grid_ansi.len(), sb_lines, restore.cols, restore.rows);
+    if let Some(restore) =
+        structured_logs::restore::restore_session(&state.structured_log_dir, &state.name)
+    {
+        let sb_lines = restore
+            .scrollback_dump
+            .as_ref()
+            .map(|d| d.lines.len())
+            .unwrap_or(0);
+        info!(
+            "Deferring restore of {} grid-bytes + {} scrollback rows ({}x{}) until first client resize",
+            restore.grid_ansi.len(),
+            sb_lines,
+            restore.cols,
+            restore.rows
+        );
         // Grid-only ANSI: scrollback is restored separately via direct row
         // injection (avoids the compounding bug where ANSI-replayed scrollback
         // re-enters the emulator's scroll pipeline and doubles every cycle).
@@ -915,7 +1107,9 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
     let (pty_filtered_tx, _) = broadcast::channel::<Vec<u8>>(256);
 
     // Get the PTY reader
-    let mut pty_reader = state.pty.take_reader()
+    let mut pty_reader = state
+        .pty
+        .take_reader()
         .context("Failed to get PTY reader")?;
 
     let pty_tx_clone = pty_tx.clone();
@@ -1034,7 +1228,11 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
 
         // Update registry with ws_port + session_type now that WS is running
         let mut registry = crate::registry::Registry::load();
-        if let Some(entry) = registry.sessions.iter_mut().find(|e| e.pid == std::process::id()) {
+        if let Some(entry) = registry
+            .sessions
+            .iter_mut()
+            .find(|e| e.pid == std::process::id())
+        {
             entry.ws_port = Some(ws_port);
             entry.session_type = Some("ai".to_string());
             let entry = entry.clone();
@@ -1064,6 +1262,9 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
     // sets state.terminal.title. We compare each frame to detect the change,
     // sync it to state.title, and broadcast to WebSocket clients.
     let mut last_terminal_title = state.terminal.title.clone();
+    let mut last_activity_persist = std::time::Instant::now()
+        .checked_sub(Duration::from_secs(5))
+        .unwrap_or_else(std::time::Instant::now);
     // ─── End WebSocket setup ─────────────────────────────────────────
 
     // ─── Team auto-launch setup ─────────────────────────────────────
@@ -1073,7 +1274,10 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
     let mut team_rx = match &team_watcher_result {
         Ok((_shared, tx)) => Some(tx.subscribe()),
         Err(e) => {
-            warn!("Team watcher failed to start (teams auto-launch disabled): {}", e);
+            warn!(
+                "Team watcher failed to start (teams auto-launch disabled): {}",
+                e
+            );
             None
         }
     };
@@ -1085,7 +1289,10 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
             auto_launched_teams.insert(name.clone());
         }
         if !auto_launched_teams.is_empty() {
-            debug!("Team watcher: {} pre-existing teams (won't auto-launch)", auto_launched_teams.len());
+            debug!(
+                "Team watcher: {} pre-existing teams (won't auto-launch)",
+                auto_launched_teams.len()
+            );
         }
     }
     // ─── End team auto-launch setup ──────────────────────────────────
@@ -1095,17 +1302,14 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
     // Skip the immediate first tick — give the shell time to start
     claude_interval.tick().await;
 
-    // Throttle registry disk-persistence on the OSC/claude-stats hot path.
-    // OSC 1337 stats events fire per stream update; doing a full load→save (fsync
-    // + flock) + per-session-file write + session.json write on EVERY one stalls
-    // this async loop, so typed input isn't relayed/rendered until the flush
-    // completes (the "type but nothing shows" lag). The live state.claude is
-    // already updated + broadcast over WS every event; only the DISK write is
-    // rate-limited here (a session-id change always persists immediately).
-    let mut last_ai_stats_persist = std::time::Instant::now()
-        .checked_sub(std::time::Duration::from_secs(60))
-        .unwrap_or_else(std::time::Instant::now);
-    const AI_STATS_PERSIST_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+    // Background persistence worker. EVERY per-event registry write below (OSC
+    // stats, IPC statusline push, title, attention/working, dismiss) hands a
+    // PersistDelta to this worker instead of doing load→save+flock inline. The
+    // loop does a non-blocking `send` and moves on, so typed input is never
+    // stalled behind disk I/O (the "type but nothing shows" lag). The worker
+    // coalesces bursts and never drops a session-id change. Cloned into the IPC
+    // (handle_client_connection) and WS (handle_ws_command) handlers too.
+    let persist_tx = spawn_persist_worker();
 
     // Structured logging: periodic snapshot every 30 seconds
     let mut snapshot_interval = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -1113,7 +1317,9 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
 
     // Channel state: sender to the registered channel server WS client + inbox watcher
     let mut channel_tx: Option<tokio::sync::mpsc::Sender<String>> = None;
-    let mut channel_inbox_rx: Option<tokio::sync::mpsc::Receiver<crate::channel_registry::ChannelMessage>> = None;
+    let mut channel_inbox_rx: Option<
+        tokio::sync::mpsc::Receiver<crate::channel_registry::ChannelMessage>,
+    > = None;
     let mut chat_overlay: Option<crate::chat_overlay::ChatOverlay> = None;
     let mut channel_partner_id: Option<String> = None;
 
@@ -1150,6 +1356,7 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                             &workshop_tx,
                             &channel_partner_id,
                             &mut chat_overlay,
+                            &persist_tx,
                         ).await;
                     }
                     Err(e) => {
@@ -1164,6 +1371,24 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                     state.ingest_pty(&data);
                     // Track last activity
                     state.status_bar.last_activity = std::time::Instant::now();
+                    // Persist at most once per five seconds. Registry writes on
+                    // every PTY chunk would stall disks during token streaming,
+                    // while a five-second heartbeat keeps external presence
+                    // accurate and matches the human granularity of `Last:`.
+                    if last_activity_persist.elapsed() >= Duration::from_secs(5)
+                        && !state.window_id.is_empty()
+                    {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        let _ = persist_tx.send(PersistDelta {
+                            window_id: state.window_id.clone(),
+                            last_activity_at: Some(now),
+                            ..Default::default()
+                        });
+                        last_activity_persist = std::time::Instant::now();
+                    }
 
                     // Structured logging: feed parsed output + drain prompt events
                     if let Some(ref mut slog) = state.structured_log {
@@ -1202,29 +1427,21 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                         // Update Rust-formatted strings (used by native window via GetStatusBar)
                         state.status_bar.ai_api_stats = state.claude.format_api_stats();
 
-                        // Update registry — THROTTLED. Only touch disk on a
-                        // session-id change or once every few seconds; otherwise
-                        // the per-stream fsync/flock here stalls this loop and
-                        // lags typed input. state.claude (above) + the WS event
-                        // (below) already keep the UI live every event.
+                        // Persist OFF the loop: hand a delta to the background
+                        // worker (non-blocking). The disk write no longer stalls
+                        // keystroke relay. state.claude (above) + the WS event
+                        // (below) keep the UI live every event regardless.
                         let session_changed = old_session.as_deref() != Some(&ai_event.session_id);
-                        if !state.window_id.is_empty()
-                            && (session_changed
-                                || last_ai_stats_persist.elapsed() >= AI_STATS_PERSIST_MIN_INTERVAL)
-                        {
-                            let mut registry = crate::registry::Registry::load();
+                        if !state.window_id.is_empty() {
                             if session_changed {
                                 info!("Claude session via OSC: {}", &ai_event.session_id[..8.min(ai_event.session_id.len())]);
-                                if !registry.update_claude_session(&state.window_id, &ai_event.session_id) {
-                                    warn!("Resume id from OSC dropped: no registry entry for window_id={} (self-heal will re-register)", state.window_id);
-                                }
                             }
-                            registry.update_ai_stats(&state.window_id, &state.claude);
-                            // persist_session also re-emits session.json +
-                            // registry.d so the session id / stats reach the
-                            // side files, not only the global registry.
-                            let _ = registry.persist_session(&state.window_id);
-                            last_ai_stats_persist = std::time::Instant::now();
+                            let _ = persist_tx.send(PersistDelta {
+                                window_id: state.window_id.clone(),
+                                ai_session_id: session_changed.then(|| ai_event.session_id.clone()),
+                                ai_stats: Some(crate::registry::Registry::build_ai_stats_entry(&state.claude)),
+                                ..Default::default()
+                            });
                         }
 
                         // Fire WebSocket control event
@@ -1407,26 +1624,16 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                             let _ = control_tx.send(json);
                         }
 
-                        // Update registry display_name so it persists across restarts
-                        let mut registry = crate::registry::Registry::load();
-                        if let Some(entry) = registry.sessions.iter_mut().find(|e| e.pid == std::process::id()) {
-                            // Only update if the title is NOT locked by the user
-                            if !entry.title_locked {
-                                entry.display_name = new_title.clone();
-                            }
-                            entry.title = new_title;
-                        }
-                        if let Err(e) = registry.save() {
-                            error!("Failed to update registry with new title: {}", e);
-                        }
-                        if let Some(entry) = registry
-                            .sessions
-                            .iter()
-                            .find(|e| e.pid == std::process::id())
-                            .cloned()
-                            && let Err(e) = crate::registry::write_session_file(&entry)
-                        {
-                            warn!("Failed to write registry.d with new title: {}", e);
+                        // Persist display_name/title OFF the loop. The worker
+                        // gates display_name on title_locked (same as before);
+                        // title is always applied.
+                        if !state.window_id.is_empty() {
+                            let _ = persist_tx.send(PersistDelta {
+                                window_id: state.window_id.clone(),
+                                display_name: Some(new_title.clone()),
+                                title: Some(new_title),
+                                ..Default::default()
+                            });
                         }
                     }
                 }
@@ -1587,8 +1794,9 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                         overlay.remove(&mut state.terminal.ai_layer);
                     }
                     chat_overlay = None;
+                    channel_partner_id = None;
                 } else {
-                    handle_ws_command(cmd, &mut state);
+                    handle_ws_command(cmd, &mut state, &persist_tx);
                 }
             }
             // Channel inbox: forward incoming messages to registered channel server
@@ -1612,10 +1820,10 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                                 });
                                 let _ = tx.try_send(paired.to_string());
                             }
-                            // Create chat overlay for the receiving side
-                            let mut overlay = crate::chat_overlay::ChatOverlay::new(partner_name);
-                            overlay.render(&mut state.terminal.ai_layer);
-                            chat_overlay = Some(overlay);
+                            if let Some(ref mut overlay) = chat_overlay {
+                                overlay.remove(&mut state.terminal.ai_layer);
+                            }
+                            chat_overlay = None;
                             channel_partner_id = Some(partner_id.to_string());
                         }
                     } else if msg.message == "__unpair__" {
@@ -1657,6 +1865,17 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
             }
             // Claude process scan (every 10 seconds)
             _ = claude_interval.tick() => {
+                if !state.window_id.is_empty() {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    let _ = persist_tx.send(PersistDelta {
+                        window_id: state.window_id.clone(),
+                        heartbeat_at: Some(now),
+                        ..Default::default()
+                    });
+                }
                 let shell_pid = state.pty.child_pid();
                 let changed = state.claude.scan(shell_pid);
 
@@ -1840,6 +2059,18 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                                     ),
                                     needs_attention: false,
                                     is_working: false,
+                                    last_activity_at: Some(
+                                        std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_millis() as u64,
+                                    ),
+                                    heartbeat_at: Some(
+                                        std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_millis() as u64,
+                                    ),
                                     owner_project_dir: if owner.owner_dir.is_empty() { None } else { Some(owner.owner_dir) },
                                     owner_project_id,
                                     owner_project_name,
@@ -1858,6 +2089,15 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                             warn!("Resume id dropped on stats tick: no registry entry for window_id={}", state.window_id);
                         }
                         registry.update_ai_stats(&state.window_id, &state.claude);
+                        // Stamp the detected vendor so registry.d-only readers
+                        // (extension + CLI) label codex/claude-code correctly
+                        // before any hub session-link reaches the global file.
+                        // Guarded on Some so a None detection never blanks a
+                        // hub-set value; persist_session below flushes it to
+                        // registry.d.
+                        if let Some(tool) = state.claude.detected_tool {
+                            registry.update_tool(&state.window_id, tool.name());
+                        }
                     }
 
                     // ── Worktree tracking: react to OSC-7 cwd changes ──
@@ -1902,6 +2142,23 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                         && let Err(e) = registry.persist_session(&state.window_id)
                     {
                         error!("Failed to save registry: {}", e);
+                    }
+
+                    // Codex stats (ctx%/model) are PULLED from the rollout on
+                    // this loop, but must be PERSISTED off it — a flock'd write
+                    // here stalls keystroke relay (typing = top priority). Hand
+                    // them to the background worker whenever they changed; the
+                    // synchronous persist above never fires for codex-stats-only.
+                    if state.claude.stats_dirty {
+                        let _ = persist_tx.send(PersistDelta {
+                            window_id: state.window_id.clone(),
+                            ai_stats: Some(crate::registry::Registry::build_ai_stats_entry(
+                                &state.claude,
+                            )),
+                            ai_session_id: state.claude.session_id.clone(),
+                            ..Default::default()
+                        });
+                        state.claude.stats_dirty = false;
                     }
                 }
 
@@ -2046,6 +2303,10 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                     fs::remove_file(&socket_path).ok();
                     let ws_file = socket_dir().join(format!("{}.{}.ws", std::process::id(), session_name));
                     fs::remove_file(&ws_file).ok();
+                    // Flush the persist worker BEFORE exit — process::exit kills
+                    // its thread, so a just-pushed ai_session_id would be lost
+                    // otherwise. Block on the ack; the entry is the restore state.
+                    flush_persist_worker(&persist_tx);
                     // Take the scratch sibling down with us (exact pid).
                     scratch_kill().await;
                     std::process::exit(0);
@@ -2067,6 +2328,10 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                 let exit_event = crate::websocket::build_control_event("session_closing", &state.claude);
                 let _ = control_tx.send(Arc::new(exit_event));
 
+                // Flush the persist worker before deregister/exit so a
+                // just-pushed resume id lands (moot once deregistered, but
+                // harmless — responsiveness only matters while live).
+                flush_persist_worker(&persist_tx);
                 // Deregister from session registry
                 crate::registry::deregister_session();
                 // Clean up socket and WebSocket port file
@@ -2089,7 +2354,9 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
 /// Safely serialize and send a response. Never panics.
 async fn send_response(stream: &mut tokio::net::UnixStream, resp: &Response) {
     match serde_json::to_string(resp) {
-        Ok(json) => { let _ = stream.write_all(json.as_bytes()).await; }
+        Ok(json) => {
+            let _ = stream.write_all(json.as_bytes()).await;
+        }
         Err(e) => {
             error!("Failed to serialize response: {}", e);
             let fallback = format!(r#"{{"type":"Error","data":"Serialization error: {}"}}"#, e);
@@ -2133,6 +2400,7 @@ async fn handle_client_connection(
     workshop_tx: &broadcast::Sender<Arc<String>>,
     channel_partner_id: &Option<String>,
     chat_overlay: &mut Option<crate::chat_overlay::ChatOverlay>,
+    persist_tx: &std::sync::mpsc::Sender<PersistDelta>,
 ) {
     // Read the request. A single request is one complete JSON value, but it can
     // exceed one read (BrowserFrame carries a full-viewport base64 PNG — often
@@ -2149,7 +2417,10 @@ async fn handle_client_connection(
                 if acc.is_empty() {
                     return;
                 }
-                error!("Invalid request: connection closed with {} partial bytes", acc.len());
+                error!(
+                    "Invalid request: connection closed with {} partial bytes",
+                    acc.len()
+                );
                 return;
             }
             Ok(n) => n,
@@ -2200,31 +2471,32 @@ async fn handle_client_connection(
                 let ctrl = serde_json::json!({
                     "type": "control_event",
                     "event": "attention",
-                }).to_string();
+                })
+                .to_string();
                 let _ = control_tx.send(Arc::new(ctrl));
                 state.needs_attention = true;
                 state.is_working = false;
-                let mut registry = crate::registry::Registry::load();
-                if let Some(entry) = registry.sessions.iter_mut().find(|e| e.pid == std::process::id()) {
-                    entry.needs_attention = true;
-                    entry.is_working = false;
-                    let entry = entry.clone();
-                    if let Err(e) = registry.save() {
-                        warn!("Failed to save attention to registry: {}", e);
-                    }
-                    if let Err(e) = crate::registry::write_session_file(&entry) {
-                        warn!("Failed to write registry.d attention: {}", e);
-                    }
+                if !state.window_id.is_empty() {
+                    let _ = persist_tx.send(PersistDelta {
+                        window_id: state.window_id.clone(),
+                        needs_attention: Some(true),
+                        is_working: Some(false),
+                        ..Default::default()
+                    });
                 }
                 // Also broadcast idle so the breathing dot stops — attention implies not-working.
                 let idle_ctrl = serde_json::json!({
                     "type": "control_event",
                     "event": "idle",
-                }).to_string();
+                })
+                .to_string();
                 let _ = control_tx.send(Arc::new(idle_ctrl));
                 send_response(&mut stream, &Response::Ok(String::new())).await;
             } else if command == "notify"
-                && matches!(args.first().map(|s| s.as_str()), Some("working") | Some("idle"))
+                && matches!(
+                    args.first().map(|s| s.as_str()),
+                    Some("working") | Some("idle")
+                )
             {
                 let working = args.first().map(|s| s.as_str()) == Some("working");
                 let event_name = if working { "working" } else { "idle" };
@@ -2233,7 +2505,8 @@ async fn handle_client_connection(
                 let ctrl = serde_json::json!({
                     "type": "control_event",
                     "event": event_name,
-                }).to_string();
+                })
+                .to_string();
                 let _ = control_tx.send(Arc::new(ctrl));
 
                 // working clears stale attention — Claude is back at work
@@ -2242,19 +2515,13 @@ async fn handle_client_connection(
                     state.needs_attention = false;
                 }
 
-                let mut registry = crate::registry::Registry::load();
-                if let Some(entry) = registry.sessions.iter_mut().find(|e| e.pid == std::process::id()) {
-                    entry.is_working = working;
-                    if clear_attention {
-                        entry.needs_attention = false;
-                    }
-                    let entry = entry.clone();
-                    if let Err(e) = registry.save() {
-                        warn!("Failed to save is_working to registry: {}", e);
-                    }
-                    if let Err(e) = crate::registry::write_session_file(&entry) {
-                        warn!("Failed to write registry.d is_working: {}", e);
-                    }
+                if !state.window_id.is_empty() {
+                    let _ = persist_tx.send(PersistDelta {
+                        window_id: state.window_id.clone(),
+                        is_working: Some(working),
+                        needs_attention: clear_attention.then_some(false),
+                        ..Default::default()
+                    });
                 }
                 send_response(&mut stream, &Response::Ok(String::new())).await;
             } else {
@@ -2368,11 +2635,7 @@ async fn handle_client_connection(
             crate::registry::deregister_session();
             // Clean up socket and WebSocket port file
             fs::remove_file(socket_path).ok();
-            let ws_file = socket_dir().join(format!(
-                "{}.{}.ws",
-                std::process::id(),
-                state.name,
-            ));
+            let ws_file = socket_dir().join(format!("{}.{}.ws", std::process::id(), state.name,));
             fs::remove_file(&ws_file).ok();
             // Take the scratch sibling down with us (exact pid).
             scratch_kill().await;
@@ -2452,11 +2715,28 @@ async fn handle_client_connection(
                 rss_kb: state.claude.rss_kb,
                 cpu_percent: state.claude.cpu_percent,
                 runtime_secs: state.claude.runtime_secs(),
-                active: state.claude.claude_pid.is_some() || !state.claude.api_stats.model.is_empty(),
-                model: if api.model.is_empty() { None } else { Some(api.model.clone()) },
-                cost_usd: if api.cost_usd > 0.0 { Some(api.cost_usd) } else { None },
-                context_pct: if api.context_pct > 0.0 { Some(api.context_pct) } else { None },
-                transcript_path: if api.transcript_path.is_empty() { None } else { Some(api.transcript_path.clone()) },
+                active: state.claude.claude_pid.is_some()
+                    || !state.claude.api_stats.model.is_empty(),
+                model: if api.model.is_empty() {
+                    None
+                } else {
+                    Some(api.model.clone())
+                },
+                cost_usd: if api.cost_usd > 0.0 {
+                    Some(api.cost_usd)
+                } else {
+                    None
+                },
+                context_pct: if api.context_pct > 0.0 {
+                    Some(api.context_pct)
+                } else {
+                    None
+                },
+                transcript_path: if api.transcript_path.is_empty() {
+                    None
+                } else {
+                    Some(api.transcript_path.clone())
+                },
                 permission_mode: state.claude.permission_mode.clone(),
                 tool: state.claude.detected_tool.map(|t| t.name().to_string()),
             };
@@ -2490,21 +2770,25 @@ async fn handle_client_connection(
             // Update status bar immediately
             state.status_bar.ai_api_stats = state.claude.format_api_stats();
 
-            // Update registry with session + stats
+            // Persist session + stats OFF the loop (this is the hottest write
+            // path — statusline.sh pushes per stream update). Non-blocking send;
+            // the worker coalesces bursts and never drops the session-id change.
             if !state.window_id.is_empty() {
-                let mut registry = crate::registry::Registry::load();
-                if old_session.as_deref() != Some(&session_id) {
-                    info!("Claude session pushed via IPC: {}", &session_id[..8.min(session_id.len())]);
-                    if !registry.update_claude_session(&state.window_id, &session_id) {
-                        warn!("Resume id pushed via IPC dropped: no registry entry for window_id={}", state.window_id);
-                    }
+                let session_changed = old_session.as_deref() != Some(&session_id);
+                if session_changed {
+                    info!(
+                        "Claude session pushed via IPC: {}",
+                        &session_id[..8.min(session_id.len())]
+                    );
                 }
-                registry.update_ai_stats(&state.window_id, &state.claude);
-                // persist_session also re-emits session.json + registry.d so the
-                // IPC-pushed session id / stats reach the side files.
-                if let Err(e) = registry.persist_session(&state.window_id) {
-                    error!("Failed to update registry with Claude stats: {}", e);
-                }
+                let _ = persist_tx.send(PersistDelta {
+                    window_id: state.window_id.clone(),
+                    ai_session_id: session_changed.then(|| session_id.clone()),
+                    ai_stats: Some(crate::registry::Registry::build_ai_stats_entry(
+                        &state.claude,
+                    )),
+                    ..Default::default()
+                });
             }
 
             // Fire control event for WebSocket subscribers
@@ -2515,48 +2799,146 @@ async fn handle_client_connection(
             send_response(&mut stream, &resp).await;
         }
         // ─── AI Canvas Layer handlers ─────────────────────────────
-        Request::DrawRect { x, y, width, height, color, border_color, border_width, anchor, anchor_to, name } => {
+        Request::DrawRect {
+            x,
+            y,
+            width,
+            height,
+            color,
+            border_color,
+            border_width,
+            anchor,
+            anchor_to,
+            name,
+        } => {
             let anchor_mode = parse_anchor_mode(&anchor, &anchor_to, &state.terminal);
-            let id = state.terminal.ai_layer.add_rect(immorterm_core::ai_layer::AiRect {
-                x, y, width, height, color,
-                border_color,
-                border_width: border_width.unwrap_or(0.0),
-            }, anchor_mode, name);
+            let id = state.terminal.ai_layer.add_rect(
+                immorterm_core::ai_layer::AiRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    border_color,
+                    border_width: border_width.unwrap_or(0.0),
+                },
+                anchor_mode,
+                name,
+            );
             let resp = Response::PrimitiveId { id };
             send_response(&mut stream, &resp).await;
         }
-        Request::DrawText { text, x, y, color, font_size_scale, anchor, anchor_to, name } => {
+        Request::DrawText {
+            text,
+            x,
+            y,
+            color,
+            font_size_scale,
+            anchor,
+            anchor_to,
+            name,
+        } => {
             let anchor_mode = parse_anchor_mode(&anchor, &anchor_to, &state.terminal);
-            let id = state.terminal.ai_layer.add_text(immorterm_core::ai_layer::AiText {
-                text, x, y, color,
-                font_size_scale: font_size_scale.unwrap_or(1.0),
-            }, anchor_mode, name);
+            let id = state.terminal.ai_layer.add_text(
+                immorterm_core::ai_layer::AiText {
+                    text,
+                    x,
+                    y,
+                    color,
+                    font_size_scale: font_size_scale.unwrap_or(1.0),
+                },
+                anchor_mode,
+                name,
+            );
             let resp = Response::PrimitiveId { id };
             send_response(&mut stream, &resp).await;
         }
-        Request::DrawButton { text, x, y, width, height, bg_color, text_color, anchor, anchor_to, name } => {
+        Request::DrawButton {
+            text,
+            x,
+            y,
+            width,
+            height,
+            bg_color,
+            text_color,
+            anchor,
+            anchor_to,
+            name,
+        } => {
             let anchor_mode = parse_anchor_mode(&anchor, &anchor_to, &state.terminal);
-            let id = state.terminal.ai_layer.add_button(immorterm_core::ai_layer::AiButton {
-                text, x, y, width, height, bg_color, text_color,
-                hovered: false,
-            }, anchor_mode, name);
+            let id = state.terminal.ai_layer.add_button(
+                immorterm_core::ai_layer::AiButton {
+                    text,
+                    x,
+                    y,
+                    width,
+                    height,
+                    bg_color,
+                    text_color,
+                    hovered: false,
+                },
+                anchor_mode,
+                name,
+            );
             let resp = Response::PrimitiveId { id };
             send_response(&mut stream, &resp).await;
         }
-        Request::DrawLine { x1, y1, x2, y2, color, thickness, anchor, anchor_to, name } => {
+        Request::DrawLine {
+            x1,
+            y1,
+            x2,
+            y2,
+            color,
+            thickness,
+            anchor,
+            anchor_to,
+            name,
+        } => {
             let anchor_mode = parse_anchor_mode(&anchor, &anchor_to, &state.terminal);
-            let id = state.terminal.ai_layer.add_line(immorterm_core::ai_layer::AiLine {
-                x1, y1, x2, y2, color,
-                thickness: thickness.unwrap_or(2.0),
-            }, anchor_mode, name);
+            let id = state.terminal.ai_layer.add_line(
+                immorterm_core::ai_layer::AiLine {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    color,
+                    thickness: thickness.unwrap_or(2.0),
+                },
+                anchor_mode,
+                name,
+            );
             let resp = Response::PrimitiveId { id };
             send_response(&mut stream, &resp).await;
         }
-        Request::DrawHtml { html, css, x, y, width, height, anchor, anchor_to, name, on_click_prompt, on_click_inject_context } => {
+        Request::DrawHtml {
+            html,
+            css,
+            x,
+            y,
+            width,
+            height,
+            anchor,
+            anchor_to,
+            name,
+            on_click_prompt,
+            on_click_inject_context,
+        } => {
             let anchor_mode = parse_anchor_mode(&anchor, &anchor_to, &state.terminal);
-            let id = state.terminal.ai_layer.add_html(immorterm_core::ai_layer::AiHtml {
-                html, css, x, y, width, height, anchor_row: None, on_click_prompt, on_click_inject_context,
-            }, anchor_mode, name);
+            let id = state.terminal.ai_layer.add_html(
+                immorterm_core::ai_layer::AiHtml {
+                    html,
+                    css,
+                    x,
+                    y,
+                    width,
+                    height,
+                    anchor_row: None,
+                    on_click_prompt,
+                    on_click_inject_context,
+                },
+                anchor_mode,
+                name,
+            );
             let resp = Response::PrimitiveId { id };
             send_response(&mut stream, &resp).await;
         }
@@ -2573,7 +2955,12 @@ async fn handle_client_connection(
         // Relay the panel messages straight over control_tx; the raw-mode WS
         // loop forwards them and the browser panel's handleServerMessage
         // already dispatches on these `type`s. Fire-and-forget.
-        Request::BrowserFrame { png_base64, title, url, seq } => {
+        Request::BrowserFrame {
+            png_base64,
+            title,
+            url,
+            seq,
+        } => {
             let env = serde_json::json!({
                 "type": "browser_frame",
                 "png_base64": png_base64,
@@ -2593,7 +2980,10 @@ async fn handle_client_connection(
             }
             send_response(&mut stream, &Response::Ok("state".into())).await;
         }
-        Request::BrowserHumanRequest { reason, instructions } => {
+        Request::BrowserHumanRequest {
+            reason,
+            instructions,
+        } => {
             let env = serde_json::json!({
                 "type": "browser_human_request",
                 "reason": reason,
@@ -2636,7 +3026,12 @@ async fn handle_client_connection(
         }
         Request::EvalInPrimitive { id, js } => {
             // Verify the primitive exists so we can fail fast on bad ids.
-            let exists = state.terminal.ai_layer.primitives.iter().any(|p| p.id == id);
+            let exists = state
+                .terminal
+                .ai_layer
+                .primitives
+                .iter()
+                .any(|p| p.id == id);
             if !exists {
                 let resp = Response::Error(format!("No AI primitive with id {}", id));
                 send_response(&mut stream, &resp).await;
@@ -2662,46 +3057,114 @@ async fn handle_client_connection(
         Request::ListAiPrimitives => {
             let primitives = serialize_ai_primitives(&state.terminal.ai_layer.primitives);
             let json = serde_json::to_string_pretty(&primitives).unwrap_or_else(|_| "[]".into());
-            let resp = Response::AiPrimitiveList { primitives_json: json };
+            let resp = Response::AiPrimitiveList {
+                primitives_json: json,
+            };
             send_response(&mut stream, &resp).await;
         }
-        Request::UpdateAiPrimitive { id, x, y, width, height, color, text, visible, alpha } => {
-            if let Some(prim) = state.terminal.ai_layer.primitives.iter_mut().find(|p| p.id == id) {
-                if let Some(v) = visible { prim.visible = v; }
-                if let Some(a) = alpha { prim.alpha = a; }
+        Request::UpdateAiPrimitive {
+            id,
+            x,
+            y,
+            width,
+            height,
+            color,
+            text,
+            visible,
+            alpha,
+        } => {
+            if let Some(prim) = state
+                .terminal
+                .ai_layer
+                .primitives
+                .iter_mut()
+                .find(|p| p.id == id)
+            {
+                if let Some(v) = visible {
+                    prim.visible = v;
+                }
+                if let Some(a) = alpha {
+                    prim.alpha = a;
+                }
                 match &mut prim.kind {
                     immorterm_core::ai_layer::AiPrimitiveKind::Rect(r) => {
-                        if let Some(v) = x { r.x = v; }
-                        if let Some(v) = y { r.y = v; }
-                        if let Some(v) = width { r.width = v; }
-                        if let Some(v) = height { r.height = v; }
-                        if let Some(c) = color { r.color = c; }
+                        if let Some(v) = x {
+                            r.x = v;
+                        }
+                        if let Some(v) = y {
+                            r.y = v;
+                        }
+                        if let Some(v) = width {
+                            r.width = v;
+                        }
+                        if let Some(v) = height {
+                            r.height = v;
+                        }
+                        if let Some(c) = color {
+                            r.color = c;
+                        }
                     }
                     immorterm_core::ai_layer::AiPrimitiveKind::Text(t) => {
-                        if let Some(v) = x { t.x = v; }
-                        if let Some(v) = y { t.y = v; }
-                        if let Some(c) = color { t.color = c; }
-                        if let Some(s) = text { t.text = s; }
+                        if let Some(v) = x {
+                            t.x = v;
+                        }
+                        if let Some(v) = y {
+                            t.y = v;
+                        }
+                        if let Some(c) = color {
+                            t.color = c;
+                        }
+                        if let Some(s) = text {
+                            t.text = s;
+                        }
                     }
                     immorterm_core::ai_layer::AiPrimitiveKind::Button(b) => {
-                        if let Some(v) = x { b.x = v; }
-                        if let Some(v) = y { b.y = v; }
-                        if let Some(v) = width { b.width = v; }
-                        if let Some(v) = height { b.height = v; }
-                        if let Some(c) = color { b.bg_color = c; }
-                        if let Some(s) = text { b.text = s; }
+                        if let Some(v) = x {
+                            b.x = v;
+                        }
+                        if let Some(v) = y {
+                            b.y = v;
+                        }
+                        if let Some(v) = width {
+                            b.width = v;
+                        }
+                        if let Some(v) = height {
+                            b.height = v;
+                        }
+                        if let Some(c) = color {
+                            b.bg_color = c;
+                        }
+                        if let Some(s) = text {
+                            b.text = s;
+                        }
                     }
                     immorterm_core::ai_layer::AiPrimitiveKind::Line(l) => {
-                        if let Some(v) = x { l.x1 = v; }
-                        if let Some(v) = y { l.y1 = v; }
-                        if let Some(c) = color { l.color = c; }
+                        if let Some(v) = x {
+                            l.x1 = v;
+                        }
+                        if let Some(v) = y {
+                            l.y1 = v;
+                        }
+                        if let Some(c) = color {
+                            l.color = c;
+                        }
                     }
                     immorterm_core::ai_layer::AiPrimitiveKind::Html(h) => {
-                        if let Some(v) = x { h.x = v; }
-                        if let Some(v) = y { h.y = v; }
-                        if let Some(v) = width { h.width = v; }
-                        if let Some(v) = height { h.height = v; }
-                        if let Some(s) = text { h.html = s; }
+                        if let Some(v) = x {
+                            h.x = v;
+                        }
+                        if let Some(v) = y {
+                            h.y = v;
+                        }
+                        if let Some(v) = width {
+                            h.width = v;
+                        }
+                        if let Some(v) = height {
+                            h.height = v;
+                        }
+                        if let Some(s) = text {
+                            h.html = s;
+                        }
                     }
                 }
                 state.terminal.ai_layer.dirty = true;
@@ -2712,7 +3175,14 @@ async fn handle_client_connection(
                 send_response(&mut stream, &resp).await;
             }
         }
-        Request::AnimatePrimitive { primitive_id, property, from, to, duration_ms, easing } => {
+        Request::AnimatePrimitive {
+            primitive_id,
+            property,
+            from,
+            to,
+            duration_ms,
+            easing,
+        } => {
             let prop = match property.as_str() {
                 "x" => Some(immorterm_core::ai_layer::AnimProperty::X),
                 "y" => Some(immorterm_core::ai_layer::AnimProperty::Y),
@@ -2729,13 +3199,17 @@ async fn handle_client_connection(
             };
             match prop {
                 Some(p) => {
-                    state.terminal.ai_layer.animate(primitive_id, p, from, to, duration_ms, ease);
+                    state
+                        .terminal
+                        .ai_layer
+                        .animate(primitive_id, p, from, to, duration_ms, ease);
                     let resp = Response::Ok("animating".into());
                     send_response(&mut stream, &resp).await;
                 }
                 None => {
                     let resp = Response::Error(format!(
-                        "Unknown property '{}'. Use: x, y, width, height, alpha", property
+                        "Unknown property '{}'. Use: x, y, width, height, alpha",
+                        property
                     ));
                     send_response(&mut stream, &resp).await;
                 }
@@ -2764,10 +3238,17 @@ async fn handle_client_connection(
             let resp = Response::AiEvents { events };
             send_response(&mut stream, &resp).await;
         }
-        Request::WaitForAiEvent { event_type, primitive_id, name, timeout_ms } => {
+        Request::WaitForAiEvent {
+            event_type,
+            primitive_id,
+            name,
+            timeout_ms,
+        } => {
             // 1. Check if a matching event is already queued
             if let Some(ev) = state.terminal.ai_layer.take_matching_mcp_event(
-                event_type.as_deref(), primitive_id, name.as_deref(),
+                event_type.as_deref(),
+                primitive_id,
+                name.as_deref(),
             ) {
                 let resp = Response::AiEventOccurred { event: ev };
                 send_response(&mut stream, &resp).await;
@@ -2801,8 +3282,8 @@ async fn handle_client_connection(
             let primitives_snapshot = state.terminal.ai_layer.primitives.clone();
             tokio::spawn(async move {
                 let mut ai_rx = ai_rx;
-                let deadline = tokio::time::Instant::now()
-                    + tokio::time::Duration::from_millis(timeout_ms);
+                let deadline =
+                    tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
 
                 let found = loop {
                     tokio::select! {
@@ -2827,7 +3308,8 @@ async fn handle_client_connection(
                 let resp = match found {
                     Some(ev) => Response::AiEventOccurred { event: ev },
                     None => Response::Error(format!(
-                        "Timeout after {}ms waiting for AI event", timeout_ms
+                        "Timeout after {}ms waiting for AI event",
+                        timeout_ms
                     )),
                 };
                 send_response(&mut stream, &resp).await;
@@ -2845,7 +3327,6 @@ async fn handle_client_connection(
             send_response(&mut stream, &resp).await;
         }
         // ─── End AI Canvas Layer ─────────────────────────────────
-
         Request::Screenshot { .. } => {
             // GPU rendering can't work in daemon processes (no MTLCompilerService
             // access after double-fork). Use DumpState + client-side rendering.
@@ -2867,12 +3348,19 @@ async fn handle_client_connection(
                     send_response(&mut stream, &resp).await;
                 }
                 Err(e) => {
-                    let resp = Response::Error(format!("Failed to serialize terminal state: {}", e));
+                    let resp =
+                        Response::Error(format!("Failed to serialize terminal state: {}", e));
                     send_response(&mut stream, &resp).await;
                 }
             }
         }
-        Request::ShowImage { png_data, col, row, width, height } => {
+        Request::ShowImage {
+            png_data,
+            col,
+            row,
+            width,
+            height,
+        } => {
             use base64::Engine;
             // Decode base64 PNG and insert as an image placement
             match base64::engine::general_purpose::STANDARD.decode(&png_data) {
@@ -2887,18 +3375,20 @@ async fn handle_client_connection(
                             let cell_h = height.unwrap_or((ih as usize / 16).max(1));
                             let abs_row = state.terminal.scrollback.len() + rw;
                             let id = state.terminal.graphics.alloc_id();
-                            state.terminal.graphics.insert(immorterm_core::graphics::ImagePlacement {
-                                id,
-                                data: rgba.into_raw(),
-                                width: iw,
-                                height: ih,
-                                placement: immorterm_core::graphics::PlacementMode::Inline,
-                                z_index: 10,
-                                row: abs_row,
-                                col: cw,
-                                cell_width: cell_w,
-                                cell_height: cell_h,
-                            });
+                            state.terminal.graphics.insert(
+                                immorterm_core::graphics::ImagePlacement {
+                                    id,
+                                    data: rgba.into_raw(),
+                                    width: iw,
+                                    height: ih,
+                                    placement: immorterm_core::graphics::PlacementMode::Inline,
+                                    z_index: 10,
+                                    row: abs_row,
+                                    col: cw,
+                                    cell_width: cell_w,
+                                    cell_height: cell_h,
+                                },
+                            );
                             let resp = Response::Ok(format!("image_displayed:{}", id));
                             send_response(&mut stream, &resp).await;
                         }
@@ -2914,14 +3404,32 @@ async fn handle_client_connection(
                 }
             }
         }
-        Request::AddAnnotation { col, row, width, height, color, label } => {
+        Request::AddAnnotation {
+            col,
+            row,
+            width,
+            height,
+            color,
+            label,
+        } => {
             let abs_row = state.terminal.scrollback.len() + row;
             let color = color.unwrap_or([1.0, 0.9, 0.2, 1.0]); // default yellow
-            let id = state.terminal.overlays.add_annotation(col, abs_row, width, height, color, label);
+            let id = state
+                .terminal
+                .overlays
+                .add_annotation(col, abs_row, width, height, color, label);
             let resp = Response::Ok(id.to_string());
             send_response(&mut stream, &resp).await;
         }
-        Request::ShowChart { col, row, width, height, values, chart_type, color } => {
+        Request::ShowChart {
+            col,
+            row,
+            width,
+            height,
+            values,
+            chart_type,
+            color,
+        } => {
             let abs_row = state.terminal.scrollback.len() + row;
             let color = color.unwrap_or([0.0, 0.9, 0.9, 1.0]); // default cyan
             let ct = match chart_type.to_lowercase().as_str() {
@@ -2935,7 +3443,10 @@ async fn handle_client_connection(
             } else {
                 values
             };
-            let id = state.terminal.overlays.add_chart(col, abs_row, width, height, normalized, color, ct);
+            let id = state
+                .terminal
+                .overlays
+                .add_chart(col, abs_row, width, height, normalized, color, ct);
             let resp = Response::Ok(id.to_string());
             send_response(&mut stream, &resp).await;
         }
@@ -2984,9 +3495,15 @@ async fn handle_client_connection(
                     match rx.recv().await {
                         Ok(data) => {
                             let len = (data.len() as u32).to_be_bytes();
-                            if stream.write_all(&len).await.is_err() { break; }
-                            if stream.write_all(&data).await.is_err() { break; }
-                            if stream.flush().await.is_err() { break; }
+                            if stream.write_all(&len).await.is_err() {
+                                break;
+                            }
+                            if stream.write_all(&data).await.is_err() {
+                                break;
+                            }
+                            if stream.flush().await.is_err() {
+                                break;
+                            }
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                         Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -3018,7 +3535,9 @@ async fn handle_client_connection(
                             if let Some(ref w) = pty_writer {
                                 use std::io::Write;
                                 let mut w = w.lock().unwrap();
-                                if w.write_all(&buf[..n]).is_err() { break; }
+                                if w.write_all(&buf[..n]).is_err() {
+                                    break;
+                                }
                                 let _ = w.flush();
                             }
                         }
@@ -3026,6 +3545,89 @@ async fn handle_client_connection(
                 }
             });
             // Handler returns immediately — relay runs independently
+        }
+        Request::AcceptExternalMessage {
+            message_id,
+            correlation_id,
+            input,
+            agent_receipt,
+        } => {
+            let resp = if message_id.is_empty()
+                || correlation_id.is_empty()
+                || agent_receipt.len() < 32
+            {
+                Response::Error(
+                    "message_id, correlation_id, and a valid agent_receipt are required".into(),
+                )
+            } else if input.is_empty() || input.len() > 64 * 1024 {
+                Response::Error("external message must be 1..65536 bytes".into())
+            } else if state.pending_external_messages.len() >= 100
+                && !state.pending_external_messages.contains_key(&message_id)
+            {
+                Response::Error("daemon external-message queue is full".into())
+            } else {
+                state
+                    .pending_external_messages
+                    .insert(message_id.clone(), (correlation_id, input, agent_receipt));
+                Response::Ok(format!("accepted:{message_id}"))
+            };
+            send_response(&mut stream, &resp).await;
+        }
+        Request::PresentExternalMessage { message_id } => {
+            let resp = if let Some((_correlation_id, input, agent_receipt)) =
+                state.pending_external_messages.remove(&message_id)
+            {
+                // Same anti-paste-heuristic sequence used by Plan artifact
+                // submissions: bracketed paste, then a discrete Enter.
+                let framed = format!("\x1b[200~{}\x1b[201~", input);
+                match state.pty.write_all(framed.as_bytes()) {
+                    Ok(()) => {
+                        tokio::time::sleep(Duration::from_millis(120)).await;
+                        match state.pty.write_all(b"\r") {
+                            Ok(()) => {
+                                if state.external_message_receipts.len() >= 100
+                                    && !state.external_message_receipts.contains_key(&message_id)
+                                {
+                                    if let Some(oldest) = state
+                                        .external_message_receipts
+                                        .keys()
+                                        .next()
+                                        .cloned()
+                                    {
+                                        state.external_message_receipts.remove(&oldest);
+                                    }
+                                }
+                                state
+                                    .external_message_receipts
+                                    .insert(message_id.clone(), agent_receipt);
+                                Response::Ok(format!("presented:{message_id}"))
+                            }
+                            Err(error) => Response::Error(format!(
+                                "failed to submit external message: {error}"
+                            )),
+                        }
+                    }
+                    Err(error) => {
+                        Response::Error(format!("failed to present external message: {error}"))
+                    }
+                }
+            } else {
+                Response::Error(format!("external message not accepted: {message_id}"))
+            };
+            send_response(&mut stream, &resp).await;
+        }
+        Request::GetExternalMessageReceipt { message_id } => {
+            let resp = state
+                .external_message_receipts
+                .get(&message_id)
+                .cloned()
+                .map(Response::Ok)
+                .unwrap_or_else(|| {
+                    Response::Error(format!(
+                        "no presented external-message receipt for {message_id}"
+                    ))
+                });
+            send_response(&mut stream, &resp).await;
         }
         Request::SubscribeAiLayer => {
             // Send initial state: current AI primitives
@@ -3052,9 +3654,15 @@ async fn handle_client_connection(
                     match rx.recv().await {
                         Ok(data) => {
                             let len = (data.len() as u32).to_be_bytes();
-                            if stream.write_all(&len).await.is_err() { break; }
-                            if stream.write_all(&data).await.is_err() { break; }
-                            if stream.flush().await.is_err() { break; }
+                            if stream.write_all(&len).await.is_err() {
+                                break;
+                            }
+                            if stream.write_all(&data).await.is_err() {
+                                break;
+                            }
+                            if stream.flush().await.is_err() {
+                                break;
+                            }
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                         Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -3082,7 +3690,10 @@ async fn handle_client_connection(
             };
             send_response(&mut stream, &resp).await;
         }
-        Request::WaitFor { pattern, timeout_ms } => {
+        Request::WaitFor {
+            pattern,
+            timeout_ms,
+        } => {
             // First check if pattern already exists in current screen
             let screen_text = grid_to_text(&state.terminal).join("\n");
             if screen_text.to_lowercase().contains(&pattern.to_lowercase()) {
@@ -3093,8 +3704,8 @@ async fn handle_client_connection(
 
             // Not found yet — subscribe to PTY output and watch
             let mut pty_rx = pty_tx.subscribe();
-            let deadline = tokio::time::Instant::now()
-                + tokio::time::Duration::from_millis(timeout_ms);
+            let deadline =
+                tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
             let pat_lower = pattern.to_lowercase();
 
             let found = loop {
@@ -3192,7 +3803,8 @@ async fn handle_client_connection(
             state.claude.permission_mode = Some(mode);
 
             // Fire control event for WebSocket subscribers
-            let ctrl_event = crate::websocket::build_control_event("permission_mode_changed", &state.claude);
+            let ctrl_event =
+                crate::websocket::build_control_event("permission_mode_changed", &state.claude);
             let _ = control_tx.send(Arc::new(ctrl_event));
 
             let resp = Response::Ok("updated".into());
@@ -3216,14 +3828,15 @@ async fn handle_client_connection(
             for name in team_names {
                 let config_path = immorterm_core::team::team_config_path(&home, &name);
                 if let Ok(json) = std::fs::read_to_string(&config_path)
-                    && let Ok(config) = immorterm_core::team::parse_team_config(&json) {
-                        teams.push(ipc::TeamSummary {
-                            name: config.name.clone(),
-                            description: config.description.clone(),
-                            member_count: config.members.len(),
-                            task_counts: (0, 0, 0), // Quick summary, no full parse
-                        });
-                    }
+                    && let Ok(config) = immorterm_core::team::parse_team_config(&json)
+                {
+                    teams.push(ipc::TeamSummary {
+                        name: config.name.clone(),
+                        description: config.description.clone(),
+                        member_count: config.members.len(),
+                        task_counts: (0, 0, 0), // Quick summary, no full parse
+                    });
+                }
             }
             let resp = Response::TeamList { teams };
             send_response(&mut stream, &resp).await;
@@ -3249,19 +3862,30 @@ async fn handle_client_connection(
             };
             send_response(&mut stream, &resp).await;
         }
-        Request::SendTeamMessage { team_name, recipient, content } => {
+        Request::SendTeamMessage {
+            team_name,
+            recipient,
+            content,
+        } => {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            let resp = match team_watcher::send_team_message(&home, &team_name, &recipient, &content) {
-                Ok(()) => Response::Ok("Message sent".into()),
-                Err(e) => Response::Error(format!("Failed to send message: {}", e)),
-            };
+            let resp =
+                match team_watcher::send_team_message(&home, &team_name, &recipient, &content) {
+                    Ok(()) => Response::Ok("Message sent".into()),
+                    Err(e) => Response::Error(format!("Failed to send message: {}", e)),
+                };
             send_response(&mut stream, &resp).await;
         }
 
         // ─── AI Expression Protocol ──────────────────────────────────
         Request::SetExpression {
-            confidence, danger, mood, animation, celebrate,
-            intensity, color, reset,
+            confidence,
+            danger,
+            mood,
+            animation,
+            celebrate,
+            intensity,
+            color,
+            reset,
         } => {
             if reset {
                 state.terminal.reset_expression();
@@ -3318,7 +3942,10 @@ async fn handle_client_connection(
         }
 
         // ─── BiDi / Alignment ────────────────────────────────────────
-        Request::SetAlignment { alignment, direction } => {
+        Request::SetAlignment {
+            alignment,
+            direction,
+        } => {
             let mut parts = Vec::new();
             if let Some(ref a) = alignment {
                 parts.push(format!("alignment={}", a));
@@ -3344,7 +3971,9 @@ async fn handle_client_connection(
         Request::PlaySound { sound, path } => {
             // Daemon is double-forked and may not have audio access.
             // Return Ok but note that MCP-side playback is preferred.
-            let resp = Response::Ok("audio playback not available in daemon process (use MCP tool)".into());
+            let resp = Response::Ok(
+                "audio playback not available in daemon process (use MCP tool)".into(),
+            );
             let _ = (sound, path); // suppress unused warnings
             send_response(&mut stream, &resp).await;
         }
@@ -3360,8 +3989,9 @@ async fn handle_client_connection(
             let resp = if let Some(partner_id) = channel_partner_id.as_deref() {
                 // Write message to partner's inbox
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-                let inbox_dir =
-                    std::path::PathBuf::from(&home).join(".immorterm").join("channel-inbox");
+                let inbox_dir = std::path::PathBuf::from(&home)
+                    .join(".immorterm")
+                    .join("channel-inbox");
                 let channel_msg = crate::channel_registry::ChannelMessage {
                     from_immorterm_id: state.window_id.clone(),
                     from_name: state.name.clone(),
@@ -3371,11 +4001,8 @@ async fn handle_client_connection(
                         .unwrap_or_default()
                         .as_millis() as u64,
                 };
-                match crate::channel_registry::write_to_inbox(
-                    &inbox_dir,
-                    partner_id,
-                    &channel_msg,
-                ) {
+                match crate::channel_registry::write_to_inbox(&inbox_dir, partner_id, &channel_msg)
+                {
                     Ok(()) => {
                         // Update local chat overlay with outgoing message
                         if let Some(overlay) = chat_overlay {
@@ -3400,7 +4027,13 @@ async fn handle_client_connection(
             };
             send_response(&mut stream, &resp).await;
         }
-        Request::OpenWorkshop { name, html, css, on_click_prompt, on_click_inject_context } => {
+        Request::OpenWorkshop {
+            name,
+            html,
+            css,
+            on_click_prompt,
+            on_click_inject_context,
+        } => {
             let resp = match validate_workshop_name(&name) {
                 Ok(()) => {
                     let workshop = Workshop {
@@ -3417,7 +4050,8 @@ async fn handle_client_connection(
                         "name": name,
                         "html": html,
                         "css": css,
-                    }).to_string();
+                    })
+                    .to_string();
                     let _ = workshop_tx.send(Arc::new(envelope));
                     state.workshops.insert(name.clone(), workshop);
                     Response::Ok(format!("workshop opened: {}", name))
@@ -3438,7 +4072,8 @@ async fn handle_client_connection(
                         "name": name,
                         "html": html,
                         "css": css,
-                    }).to_string();
+                    })
+                    .to_string();
                     let _ = workshop_tx.send(Arc::new(envelope));
                     Response::Ok(format!("workshop updated: {}", name))
                 }
@@ -3452,7 +4087,8 @@ async fn handle_client_connection(
                     "event": "eval",
                     "name": name,
                     "js": js,
-                }).to_string();
+                })
+                .to_string();
                 let _ = workshop_tx.send(Arc::new(envelope));
                 Response::Ok(format!("eval dispatched: {}", name))
             } else {
@@ -3467,25 +4103,37 @@ async fn handle_client_connection(
             let envelope = serde_json::json!({
                 "event": "close",
                 "name": name,
-            }).to_string();
+            })
+            .to_string();
             let _ = workshop_tx.send(Arc::new(envelope));
             let resp = Response::Ok(format!("workshop closed: {}", name));
             send_response(&mut stream, &resp).await;
         }
         Request::ListWorkshops => {
-            let entries: Vec<_> = state.workshops.values().map(|w| {
-                let modified_ms = w.modified
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                serde_json::json!({
-                    "name": w.name,
-                    "html_size": w.html.len(),
-                    "modified_unix_ms": modified_ms,
+            let entries: Vec<_> = state
+                .workshops
+                .values()
+                .map(|w| {
+                    let modified_ms = w
+                        .modified
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    serde_json::json!({
+                        "name": w.name,
+                        "html_size": w.html.len(),
+                        "modified_unix_ms": modified_ms,
+                    })
                 })
-            }).collect();
+                .collect();
             let json = serde_json::to_string(&entries).unwrap_or_else(|_| "[]".into());
-            send_response(&mut stream, &Response::WorkshopList { workshops_json: json }).await;
+            send_response(
+                &mut stream,
+                &Response::WorkshopList {
+                    workshops_json: json,
+                },
+            )
+            .await;
         }
         Request::ReadWorkshop { name } => {
             let resp = match state.workshops.get(&name) {
@@ -3506,7 +4154,14 @@ async fn handle_client_connection(
             };
             send_response(&mut stream, &resp).await;
         }
-        Request::NotifyPlanChanged { project, id, status, title, summary, unresolved_decisions } => {
+        Request::NotifyPlanChanged {
+            project,
+            id,
+            status,
+            title,
+            summary,
+            unresolved_decisions,
+        } => {
             // Plans live on disk (~/.immorterm/plans/<project>/<id>/) — the
             // daemon holds no plan state, it only fans the change event out
             // over the existing workshop broadcast channel for the S4 Plans
@@ -3520,9 +4175,14 @@ async fn handle_client_connection(
                 "title": title,
                 "summary": summary,
                 "unresolved_decisions": unresolved_decisions,
-            }).to_string();
+            })
+            .to_string();
             let _ = workshop_tx.send(Arc::new(envelope));
-            send_response(&mut stream, &Response::Ok(format!("plan event broadcast: {}", id))).await;
+            send_response(
+                &mut stream,
+                &Response::Ok(format!("plan event broadcast: {}", id)),
+            )
+            .await;
         }
     }
 }
@@ -3538,10 +4198,18 @@ fn validate_workshop_name(name: &str) -> Result<(), String> {
     if name.len() > 64 {
         return Err("Workshop name too long (max 64 chars)".into());
     }
-    if name.contains('/') || name.contains('\\') || name == "." || name == ".." || name.contains("..") {
+    if name.contains('/')
+        || name.contains('\\')
+        || name == "."
+        || name == ".."
+        || name.contains("..")
+    {
         return Err("Workshop name must not contain path separators or '..'".into());
     }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
         return Err("Workshop name may only contain [a-zA-Z0-9_.-]".into());
     }
     Ok(())
@@ -3640,7 +4308,12 @@ fn resolve_hook_inject(
             Some((formatted, payload, format!("workshop '{}'", name)))
         }
         AiEvent::ButtonClicked { id, data_click } => {
-            let prim = state.terminal.ai_layer.primitives.iter().find(|p| p.id == *id)?;
+            let prim = state
+                .terminal
+                .ai_layer
+                .primitives
+                .iter()
+                .find(|p| p.id == *id)?;
             let html_str = match &prim.kind {
                 AiPrimitiveKind::Html(h) => &h.html,
                 _ => return None,
@@ -3650,7 +4323,9 @@ fn resolve_hook_inject(
                 _ => return None,
             };
             let dc = data_click.as_deref().unwrap_or("");
-            let formatted = tpl.replace("{data_click}", dc).replace("{id}", &id.to_string());
+            let formatted = tpl
+                .replace("{data_click}", dc)
+                .replace("{id}", &id.to_string());
             let payload = serde_json::json!({
                 "source": "primitive",
                 "primitive_id": id,
@@ -3701,10 +4376,7 @@ fn write_pending_click_marker(session_name: &str, payload: &serde_json::Value) {
 /// - `{data_click}` — the clicked element's `data-click` attribute value
 /// - `{name}` — workshop name (when source is a workshop)
 /// - `{id}` — primitive numeric id (when source is a draw_html primitive)
-fn inject_on_click_prompt(
-    state: &mut SessionState,
-    event: &immorterm_core::ai_layer::AiEvent,
-) {
+fn inject_on_click_prompt(state: &mut SessionState, event: &immorterm_core::ai_layer::AiEvent) {
     use immorterm_core::ai_layer::{AiEvent, AiPrimitiveKind};
 
     // Diagnostic log so we can see in daemon.log whether the click event
@@ -3718,21 +4390,36 @@ fn inject_on_click_prompt(
                 data_click,
                 ws.is_some(),
                 ws.map(|w| w.on_click_prompt.is_some()).unwrap_or(false),
-                ws.map(|w| w.on_click_inject_context.is_some()).unwrap_or(false),
+                ws.map(|w| w.on_click_inject_context.is_some())
+                    .unwrap_or(false),
             );
         }
         AiEvent::ButtonClicked { id, data_click } => {
-            let prim = state.terminal.ai_layer.primitives.iter().find(|p| p.id == *id);
+            let prim = state
+                .terminal
+                .ai_layer
+                .primitives
+                .iter()
+                .find(|p| p.id == *id);
             let (is_html, has_p, has_ctx) = match prim {
                 Some(p) => match &p.kind {
-                    AiPrimitiveKind::Html(h) => (true, h.on_click_prompt.is_some(), h.on_click_inject_context.is_some()),
+                    AiPrimitiveKind::Html(h) => (
+                        true,
+                        h.on_click_prompt.is_some(),
+                        h.on_click_inject_context.is_some(),
+                    ),
                     _ => (false, false, false),
                 },
                 None => (false, false, false),
             };
             warn!(
                 "inject_on_click_prompt: ButtonClicked id={} data_click={:?} prim_found={} is_html={} has_on_click_prompt={} has_on_click_inject_context={}",
-                id, data_click, prim.is_some(), is_html, has_p, has_ctx,
+                id,
+                data_click,
+                prim.is_some(),
+                is_html,
+                has_p,
+                has_ctx,
             );
         }
         _ => {}
@@ -3742,9 +4429,7 @@ fn inject_on_click_prompt(
     // on the entity, write a marker file for the UserPromptSubmit hook and
     // type a tiny trigger to fire it. Hook supplies the rich context as
     // `additionalContext` so the terminal stays clean.
-    if let Some((ctx_template, marker_payload, source_label)) =
-        resolve_hook_inject(state, event)
-    {
+    if let Some((ctx_template, marker_payload, source_label)) = resolve_hook_inject(state, event) {
         write_pending_click_marker(&state.name, &marker_payload);
         // Type the smallest possible visible trigger. Claude Code's TUI rejects
         // truly empty submissions; "." is one byte, easy to filter out of
@@ -3772,12 +4457,20 @@ fn inject_on_click_prompt(
     // prompt as if the user typed it).
     let (template, dc, source_label) = match event {
         AiEvent::WorkshopClicked { name, data_click } => {
-            let Some(ws) = state.workshops.get(name) else { return };
-            let Some(t) = ws.on_click_prompt.clone() else { return };
+            let Some(ws) = state.workshops.get(name) else {
+                return;
+            };
+            let Some(t) = ws.on_click_prompt.clone() else {
+                return;
+            };
             let formatted = t
                 .replace("{data_click}", data_click.as_deref().unwrap_or(""))
                 .replace("{name}", name);
-            (formatted, data_click.clone(), format!("workshop '{}'", name))
+            (
+                formatted,
+                data_click.clone(),
+                format!("workshop '{}'", name),
+            )
         }
         AiEvent::ButtonClicked { id, data_click } => {
             // Look up the primitive; only HTML primitives carry on_click_prompt.
@@ -3787,11 +4480,15 @@ fn inject_on_click_prompt(
                 .primitives
                 .iter()
                 .find(|p| p.id == *id)
-            else { return };
+            else {
+                return;
+            };
             let Some(template) = (match &prim.kind {
                 AiPrimitiveKind::Html(h) => h.on_click_prompt.clone(),
                 _ => None,
-            }) else { return };
+            }) else {
+                return;
+            };
             let formatted = template
                 .replace("{data_click}", data_click.as_deref().unwrap_or(""))
                 .replace("{id}", &id.to_string());
@@ -3811,7 +4508,10 @@ fn inject_on_click_prompt(
     // prompt without sending it. Splitting in time fixes the heuristic.
     let text_bytes = template.into_bytes();
     if let Err(e) = state.pty.write_all(&text_bytes) {
-        warn!("{}: on_click_prompt text PTY write failed: {}", source_label, e);
+        warn!(
+            "{}: on_click_prompt text PTY write failed: {}",
+            source_label, e
+        );
         return;
     }
     // Defer the CR via the cloneable writer Arc — no blocking the select loop,
@@ -3841,10 +4541,11 @@ fn inject_on_click_prompt(
 fn persist_workshop(session_name: &str, workshop: &Workshop) {
     let path = workshop_html_path(session_name, &workshop.name);
     if let Some(parent) = path.parent()
-        && let Err(e) = std::fs::create_dir_all(parent) {
-            tracing::warn!("workshop persist: mkdir {:?} failed: {}", parent, e);
-            return;
-        }
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        tracing::warn!("workshop persist: mkdir {:?} failed: {}", parent, e);
+        return;
+    }
     // Wrap the body in a minimal HTML document so file:// pop-out renders.
     // CSS goes in <style>; HTML goes in <body>. Same Shadow-DOM rules apply
     // when the in-app webview re-renders, but the standalone file works in
@@ -3861,11 +4562,7 @@ fn persist_workshop(session_name: &str, workshop: &Workshop) {
 }
 
 /// Execute a command in the session (from -X).
-fn execute_command(
-    state: &mut SessionState,
-    command: &str,
-    args: &[String],
-) -> Result<String> {
+fn execute_command(state: &mut SessionState, command: &str, args: &[String]) -> Result<String> {
     match command {
         "stuff" => {
             // Send text to the shell as if typed.
@@ -3928,9 +4625,10 @@ fn execute_command(
                 Some("on") => {
                     state.logging = true;
                     if state.log_writer.is_none()
-                        && let Some(ref path) = state.log_file {
-                            state.log_writer = fs::File::create(path).ok();
-                        }
+                        && let Some(ref path) = state.log_file
+                    {
+                        state.log_writer = fs::File::create(path).ok();
+                    }
                 }
                 Some("off") => {
                     state.logging = false;
@@ -3989,9 +4687,7 @@ fn execute_command(
             // Screen compatibility — accept but ignore
             Ok(String::new())
         }
-        _ => {
-            Ok(format!("Unknown command: {}", command))
-        }
+        _ => Ok(format!("Unknown command: {}", command)),
     }
 }
 
@@ -4044,12 +4740,13 @@ fn compute_viewport_diff(
     let mut dirty_rows = Vec::new();
     for i in 0..terminal.rows() {
         if let Some(row) = terminal.grid.row(i)
-            && row.dirty {
-                dirty_rows.push(crate::websocket::ViewportRow {
-                    idx: i,
-                    text: row_to_text(row),
-                });
-            }
+            && row.dirty
+        {
+            dirty_rows.push(crate::websocket::ViewportRow {
+                idx: i,
+                text: row_to_text(row),
+            });
+        }
     }
 
     let ai_primitives = if ai_dirty {
@@ -4151,9 +4848,10 @@ fn matches_ai_event(
             return false;
         }
         if let Some(filter) = name
-            && filter != ws_name {
-                return false;
-            }
+            && filter != ws_name
+        {
+            return false;
+        }
         return true;
     }
 
@@ -4169,7 +4867,8 @@ fn matches_ai_event(
         return false;
     }
     if let Some(name_filter) = name {
-        let prim_name = primitives.iter()
+        let prim_name = primitives
+            .iter()
             .find(|p| p.id == ev_id)
             .and_then(|p| p.name.as_deref());
         if prim_name != Some(name_filter) {
@@ -4189,9 +4888,14 @@ fn parse_anchor_mode(
 ) -> immorterm_core::ai_layer::AnchorMode {
     // anchor_to takes precedence: copy the referenced primitive's anchor mode
     if let Some(ref_id) = anchor_to
-        && let Some(prim) = terminal.ai_layer.primitives.iter().find(|p| p.id == *ref_id) {
-            return prim.anchor.clone();
-        }
+        && let Some(prim) = terminal
+            .ai_layer
+            .primitives
+            .iter()
+            .find(|p| p.id == *ref_id)
+    {
+        return prim.anchor.clone();
+    }
     match anchor.as_deref() {
         Some("scroll") => immorterm_core::ai_layer::AnchorMode::Scroll {
             scrollback_at_creation: terminal.scrollback.len(),
@@ -4219,7 +4923,9 @@ fn parse_hex_color(hex: &str) -> Option<[f32; 4]> {
     }
 }
 
-fn serialize_ai_primitives(primitives: &[immorterm_core::ai_layer::AiPrimitive]) -> Vec<serde_json::Value> {
+fn serialize_ai_primitives(
+    primitives: &[immorterm_core::ai_layer::AiPrimitive],
+) -> Vec<serde_json::Value> {
     primitives
         .iter()
         .filter_map(|p| serde_json::to_value(p).ok())
@@ -4227,7 +4933,11 @@ fn serialize_ai_primitives(primitives: &[immorterm_core::ai_layer::AiPrimitive])
 }
 
 /// Handle a WebSocket command dispatched from a client handler.
-fn handle_ws_command(cmd: crate::websocket::WsCommand, state: &mut SessionState) {
+fn handle_ws_command(
+    cmd: crate::websocket::WsCommand,
+    state: &mut SessionState,
+    persist_tx: &std::sync::mpsc::Sender<PersistDelta>,
+) {
     use crate::websocket::{WsCommand, WsDrawReply};
 
     match cmd {
@@ -4238,28 +4948,71 @@ fn handle_ws_command(cmd: crate::websocket::WsCommand, state: &mut SessionState)
             state.browser_input_queue.push(event);
         }
         WsCommand::DrawRect {
-            x, y, width, height, color, border_color, border_width, anchor, reply,
+            x,
+            y,
+            width,
+            height,
+            color,
+            border_color,
+            border_width,
+            anchor,
+            reply,
         } => {
             let anchor_mode = parse_anchor_mode(&anchor, &None, &state.terminal);
-            let id = state.terminal.ai_layer.add_rect(immorterm_core::ai_layer::AiRect {
-                x, y, width, height, color,
-                border_color,
-                border_width: border_width.unwrap_or(0.0),
-            }, anchor_mode, None);
-            let _ = reply.send(WsDrawReply { id, ptype: "rect".into() });
+            let id = state.terminal.ai_layer.add_rect(
+                immorterm_core::ai_layer::AiRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    border_color,
+                    border_width: border_width.unwrap_or(0.0),
+                },
+                anchor_mode,
+                None,
+            );
+            let _ = reply.send(WsDrawReply {
+                id,
+                ptype: "rect".into(),
+            });
         }
         WsCommand::DrawText {
-            text, x, y, color, font_size_scale, anchor, reply,
+            text,
+            x,
+            y,
+            color,
+            font_size_scale,
+            anchor,
+            reply,
         } => {
             let anchor_mode = parse_anchor_mode(&anchor, &None, &state.terminal);
-            let id = state.terminal.ai_layer.add_text(immorterm_core::ai_layer::AiText {
-                text, x, y, color,
-                font_size_scale: font_size_scale.unwrap_or(1.0),
-            }, anchor_mode, None);
-            let _ = reply.send(WsDrawReply { id, ptype: "text".into() });
+            let id = state.terminal.ai_layer.add_text(
+                immorterm_core::ai_layer::AiText {
+                    text,
+                    x,
+                    y,
+                    color,
+                    font_size_scale: font_size_scale.unwrap_or(1.0),
+                },
+                anchor_mode,
+                None,
+            );
+            let _ = reply.send(WsDrawReply {
+                id,
+                ptype: "text".into(),
+            });
         }
         WsCommand::DrawButton {
-            text, x, y, width, height, bg_color, text_color, anchor, reply,
+            text,
+            x,
+            y,
+            width,
+            height,
+            bg_color,
+            text_color,
+            anchor,
+            reply,
         } => {
             // Intercept "__click__:{id}" or "__click__:{id}:{data-click}" — the HTML overlay sends this when a button is clicked
             if let Some(id_str) = text.strip_prefix("__click__:") {
@@ -4268,29 +5021,69 @@ fn handle_ws_command(cmd: crate::websocket::WsCommand, state: &mut SessionState)
                     None => (id_str, None),
                 };
                 if let Ok(btn_id) = id_part.parse::<u32>() {
-                    state.terminal.ai_layer.push_button_click(btn_id, data_click);
-                    let _ = reply.send(WsDrawReply { id: btn_id, ptype: "button_click".into() });
+                    state
+                        .terminal
+                        .ai_layer
+                        .push_button_click(btn_id, data_click);
+                    let _ = reply.send(WsDrawReply {
+                        id: btn_id,
+                        ptype: "button_click".into(),
+                    });
                 } else {
-                    let _ = reply.send(WsDrawReply { id: 0, ptype: "error".into() });
+                    let _ = reply.send(WsDrawReply {
+                        id: 0,
+                        ptype: "error".into(),
+                    });
                 }
             } else {
                 let anchor_mode = parse_anchor_mode(&anchor, &None, &state.terminal);
-                let id = state.terminal.ai_layer.add_button(immorterm_core::ai_layer::AiButton {
-                    text, x, y, width, height, bg_color, text_color,
-                    hovered: false,
-                }, anchor_mode, None);
-                let _ = reply.send(WsDrawReply { id, ptype: "button".into() });
+                let id = state.terminal.ai_layer.add_button(
+                    immorterm_core::ai_layer::AiButton {
+                        text,
+                        x,
+                        y,
+                        width,
+                        height,
+                        bg_color,
+                        text_color,
+                        hovered: false,
+                    },
+                    anchor_mode,
+                    None,
+                );
+                let _ = reply.send(WsDrawReply {
+                    id,
+                    ptype: "button".into(),
+                });
             }
         }
         WsCommand::DrawLine {
-            x1, y1, x2, y2, color, thickness, anchor, reply,
+            x1,
+            y1,
+            x2,
+            y2,
+            color,
+            thickness,
+            anchor,
+            reply,
         } => {
             let anchor_mode = parse_anchor_mode(&anchor, &None, &state.terminal);
-            let id = state.terminal.ai_layer.add_line(immorterm_core::ai_layer::AiLine {
-                x1, y1, x2, y2, color,
-                thickness: thickness.unwrap_or(2.0),
-            }, anchor_mode, None);
-            let _ = reply.send(WsDrawReply { id, ptype: "line".into() });
+            let id = state.terminal.ai_layer.add_line(
+                immorterm_core::ai_layer::AiLine {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    color,
+                    thickness: thickness.unwrap_or(2.0),
+                },
+                anchor_mode,
+                None,
+            );
+            let _ = reply.send(WsDrawReply {
+                id,
+                ptype: "line".into(),
+            });
         }
         WsCommand::RemovePrimitive { id, reply } => {
             if state.terminal.ai_layer.remove(id) {
@@ -4303,7 +5096,13 @@ fn handle_ws_command(cmd: crate::websocket::WsCommand, state: &mut SessionState)
             state.terminal.ai_layer.clear();
         }
         WsCommand::Animate {
-            primitive_id, property, from, to, duration_ms, easing, reply,
+            primitive_id,
+            property,
+            from,
+            to,
+            duration_ms,
+            easing,
+            reply,
         } => {
             let prop = match property.as_str() {
                 "x" => Some(immorterm_core::ai_layer::AnimProperty::X),
@@ -4321,7 +5120,10 @@ fn handle_ws_command(cmd: crate::websocket::WsCommand, state: &mut SessionState)
             };
             match prop {
                 Some(p) => {
-                    state.terminal.ai_layer.animate(primitive_id, p, from, to, duration_ms, ease);
+                    state
+                        .terminal
+                        .ai_layer
+                        .animate(primitive_id, p, from, to, duration_ms, ease);
                     let _ = reply.send(Ok(()));
                 }
                 None => {
@@ -4373,16 +5175,12 @@ fn handle_ws_command(cmd: crate::websocket::WsCommand, state: &mut SessionState)
             // bring the bell back. No broadcast — frontend already updated its view.
             if state.needs_attention {
                 state.needs_attention = false;
-                let mut registry = crate::registry::Registry::load();
-                if let Some(entry) = registry.sessions.iter_mut().find(|e| e.pid == std::process::id()) {
-                    entry.needs_attention = false;
-                    let entry = entry.clone();
-                    if let Err(e) = registry.save() {
-                        warn!("Failed to clear needs_attention on dismiss: {}", e);
-                    }
-                    if let Err(e) = crate::registry::write_session_file(&entry) {
-                        warn!("Failed to write registry.d on dismiss: {}", e);
-                    }
+                if !state.window_id.is_empty() {
+                    let _ = persist_tx.send(PersistDelta {
+                        window_id: state.window_id.clone(),
+                        needs_attention: Some(false),
+                        ..Default::default()
+                    });
                 }
             }
         }
@@ -4460,17 +5258,24 @@ fn handle_ws_command(cmd: crate::websocket::WsCommand, state: &mut SessionState)
             // would spawn a fresh Claude on bare-shell sessions — surprising
             // behavior when the user expected reconnect-to-existing.
             if claude_pid.is_none() && !has_history {
-                info!("ReconnectAi: no AI in this session (no current pid, no recorded session_id) — skipping");
+                info!(
+                    "ReconnectAi: no AI in this session (no current pid, no recorded session_id) — skipping"
+                );
                 return;
             }
 
             match claude_pid {
                 None => {
-                    info!("ReconnectAi: AI not running but session_id known, stuffing recall (will reattach via cascade)");
+                    info!(
+                        "ReconnectAi: AI not running but session_id known, stuffing recall (will reattach via cascade)"
+                    );
                     pty_try_write(&writer, &recall_bytes);
                 }
                 Some(pid) => {
-                    info!("ReconnectAi: force-quitting AI pid {} then stuffing recall", pid);
+                    info!(
+                        "ReconnectAi: force-quitting AI pid {} then stuffing recall",
+                        pid
+                    );
                     tokio::spawn(async move {
                         let target = nix::unistd::Pid::from_raw(pid as i32);
                         const MAX_ATTEMPTS: u32 = 2;
@@ -4479,7 +5284,8 @@ fn handle_ws_command(cmd: crate::websocket::WsCommand, state: &mut SessionState)
                             if attempt > 1 {
                                 warn!(
                                     "ReconnectAi: pid {} did not exit on attempt {}, retrying",
-                                    pid, attempt - 1
+                                    pid,
+                                    attempt - 1
                                 );
                             }
                             if attempt_claude_exit(&writer, target).await {
@@ -4516,11 +5322,63 @@ fn handle_ws_command(cmd: crate::websocket::WsCommand, state: &mut SessionState)
             // Handled inline in the event loop's select! — unreachable here
             let _ = reply;
         }
-        WsCommand::RegisterChannel { .. } | WsCommand::PairSessions { .. } | WsCommand::UnpairSessions => {
+        WsCommand::RegisterChannel { .. }
+        | WsCommand::PairSessions { .. }
+        | WsCommand::UnpairSessions => {
             // Handled inline in the event loop's select! — unreachable here
         }
         WsCommand::CloseWorkshop { .. } => {
             // Handled inline in the event loop's select! — unreachable here
         }
+    }
+}
+
+#[cfg(test)]
+mod persist_delta_tests {
+    use super::PersistDelta;
+
+    // The coalescing crux: a session-id change must survive a burst even when
+    // later deltas in the same burst carry only stats (no id). And a newer id
+    // must win over an older one.
+    #[test]
+    fn merge_never_drops_session_id_and_newest_id_wins() {
+        let mut m = PersistDelta {
+            window_id: "w1".into(),
+            ai_session_id: Some("id-A".into()),
+            ..Default::default()
+        };
+        // stats-only delta (what statusline pushes per stream update)
+        m.merge(PersistDelta {
+            window_id: "w1".into(),
+            needs_attention: Some(true),
+            ..Default::default()
+        });
+        assert_eq!(
+            m.ai_session_id.as_deref(),
+            Some("id-A"),
+            "id lost to a stats-only delta"
+        );
+        // a genuinely new id overwrites
+        m.merge(PersistDelta {
+            window_id: "w1".into(),
+            ai_session_id: Some("id-B".into()),
+            ..Default::default()
+        });
+        assert_eq!(m.ai_session_id.as_deref(), Some("id-B"));
+        assert_eq!(m.needs_attention, Some(true));
+        assert!(m.has_data());
+    }
+
+    #[test]
+    fn flush_only_delta_has_no_data() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let m = PersistDelta {
+            flush: Some(tx),
+            ..Default::default()
+        };
+        assert!(
+            !m.has_data(),
+            "a flush handshake must not trigger a write on its own"
+        );
     }
 }
