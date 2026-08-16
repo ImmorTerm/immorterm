@@ -36,6 +36,15 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       typescript: ${{ steps.filter.outputs.typescript }}
+      # Per-crate flags let the fast gate lint ONLY the engine crate a change
+      # can reach, instead of always paying for the full core+render+daemon
+      # set. rust_broad is the safe fallback: a lockfile / root-manifest /
+      # workflow edit can change any crate's build, so it forces the whole set.
+      rust_broad: ${{ steps.filter.outputs.rust_broad }}
+      crate_core: ${{ steps.filter.outputs.crate_core }}
+      crate_render: ${{ steps.filter.outputs.crate_render }}
+      crate_daemon: ${{ steps.filter.outputs.crate_daemon }}
+      crate_wasm: ${{ steps.filter.outputs.crate_wasm }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -48,6 +57,22 @@ jobs:
               - 'Cargo.lock'
               - 'rust-toolchain*'
               - '.github/workflows/**'
+            rust_broad:
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain*'
+              - '.github/workflows/**'
+            crate_core:
+              - 'apps/immorterm-ai/immorterm-core/**'
+            crate_render:
+              - 'apps/immorterm-ai/immorterm-render/**'
+            crate_daemon:
+              - 'apps/immorterm-ai/immorterm-daemon/**'
+              # structured-logs is a workspace dep of the daemon and nothing
+              # else in the fast set — a change to it recompiles the daemon.
+              - 'libs/structured-logs/**'
+            crate_wasm:
+              - 'apps/immorterm-ai/immorterm-wasm/**'
             typescript:
               - 'apps/extension/**'
               - 'apps/immorterm/**'
@@ -151,6 +176,11 @@ jobs:
     timeout-minutes: 10
     env:
       CI_CACHE_ROOT: ${{ vars.FAST_RUNNER_LABEL && '/ci-cache' || '' }}
+      # mold is pre-baked into the warm runner image (Dockerfile.ci-runner) and
+      # cuts the link step on `cargo test` / release builds. Empty on hosted
+      # runners, which have no mold — so the flag only ever applies where the
+      # binary exists. clippy is a check (no link), so this is inert for it.
+      RUSTFLAGS: ${{ vars.FAST_RUNNER_LABEL && '-C link-arg=-fuse-ld=mold' || '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -190,11 +220,58 @@ jobs:
         if: vars.FAST_RUNNER_LABEL == ''
         uses: Swatinem/rust-cache@v2
 
+      # Narrow the fast gate to the engine crate a change can actually reach,
+      # plus its reverse-deps inside the fast set (core -> render -> daemon;
+      # wasm depends on core+render). rust_broad (lockfile / root manifest /
+      # workflow) forces the whole set. The FULL workspace clippy+test still
+      # runs in release-proof.yml — this narrows only the COMMIT gate, never
+      # the release authority. When a change touches only hub/digest/etc, no
+      # fast-set crate is affected, every step below skips, and release-proof
+      # remains the proof for those crates.
+      - name: Resolve affected engine crates
+        env:
+          BROAD: ${{ needs.changes.outputs.rust_broad }}
+          CORE: ${{ needs.changes.outputs.crate_core }}
+          RENDER: ${{ needs.changes.outputs.crate_render }}
+          DAEMON: ${{ needs.changes.outputs.crate_daemon }}
+          WASM: ${{ needs.changes.outputs.crate_wasm }}
+        run: |
+          set -euo pipefail
+          core=0; render=0; daemon=0; wasm=0
+          [ "$BROAD"  = "true" ] && { core=1; render=1; daemon=1; wasm=1; }
+          [ "$CORE"   = "true" ] && { core=1; render=1; daemon=1; wasm=1; }
+          [ "$RENDER" = "true" ] && { render=1; daemon=1; wasm=1; }
+          [ "$DAEMON" = "true" ] && daemon=1
+          [ "$WASM"   = "true" ] && wasm=1
+          clippy=""; test=""
+          [ "$core"   = 1 ] && { clippy="$clippy -p immorterm-core";   test="$test -p immorterm-core"; }
+          [ "$render" = 1 ] && { clippy="$clippy -p immorterm-render"; test="$test -p immorterm-render"; }
+          [ "$daemon" = 1 ] && clippy="$clippy -p immorterm-daemon"
+          {
+            echo "NATIVE_CLIPPY_ARGS=$clippy"
+            echo "NATIVE_TEST_ARGS=$test"
+            echo "WASM_AFFECTED=$wasm"
+          } >> "$GITHUB_ENV"
+          if [ -z "$clippy" ] && [ "$wasm" = 0 ]; then
+            echo "No fast-set engine crate affected — release-proof.yml owns the full-workspace proof for the changed crate(s)."
+          else
+            echo "affected: native-clippy='$clippy' native-test='$test' wasm=$wasm"
+          fi
+
       - name: Check + clippy (native crates)
-        run: cargo clippy -p immorterm-core -p immorterm-render -p immorterm-daemon -- -D warnings
+        if: env.NATIVE_CLIPPY_ARGS != ''
+        run: |
+          # word-splitting the -p flags is deliberate — the args are a fixed
+          # allowlist ("-p immorterm-core …"), never user input.
+          # shellcheck disable=SC2086
+          cargo clippy $NATIVE_CLIPPY_ARGS -- -D warnings
 
       - name: Clippy (wasm crate)
+        if: env.WASM_AFFECTED == '1'
         run: cargo clippy -p immorterm-wasm --target wasm32-unknown-unknown -- -D warnings
 
       - name: Test (core + render)
-        run: cargo test -p immorterm-core -p immorterm-render
+        if: env.NATIVE_TEST_ARGS != ''
+        run: |
+          # shellcheck disable=SC2086
+          cargo test $NATIVE_TEST_ARGS

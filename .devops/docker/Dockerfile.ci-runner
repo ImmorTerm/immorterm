@@ -20,9 +20,13 @@ FROM ghcr.io/actions/actions-runner:2.336.0
 USER root
 # libasound2-dev: the Rust engine links ALSA (same package ci.yml installs on
 # hosted runners). The rest are rustup/cargo needs the slim runner image lacks.
+# mold: fast linker. ci.yml sets RUSTFLAGS=-C link-arg=-fuse-ld=mold on the
+# warm path so cargo test / release links go through it. -fuse-ld=mold needs
+# gcc >= 12.1 (this base is Ubuntu 24.04 / gcc 13 — satisfied); if a future
+# base regresses gcc, the link step is where it will fail.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        libasound2-dev build-essential pkg-config curl ca-certificates \
+        libasound2-dev build-essential pkg-config curl ca-certificates mold \
     && rm -rf /var/lib/apt/lists/*
 
 USER runner

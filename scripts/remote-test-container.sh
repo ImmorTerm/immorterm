@@ -60,6 +60,11 @@ container_running(){ docker ps    --format '{{.Names}}' | grep -qx "$CONTAINER";
 build_image() {
   log "building $IMG from $DOCKERFILE (this takes a while — Rust release build)…"
   ( cd "$REPO_ROOT" && docker build --platform linux/amd64 -f "$DOCKERFILE" -t "$IMG" . )
+  # Measure the image we just built against the 300 MB production ceiling.
+  # The sandbox is exempt by name (see scripts/check-image-size.ts) — this
+  # prints its size and would FAIL only a gated image over the ceiling.
+  ( cd "$REPO_ROOT" && bun scripts/check-image-size.ts "$IMG" ) || \
+    die "image size gate failed for $IMG"
 }
 
 # ── Run ───────────────────────────────────────────────────────────────────────
