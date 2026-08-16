@@ -1,4 +1,15 @@
 # CI — build + test the public ImmorTerm components on every push / PR.
+#
+# This is the commit gate, not the release rehearsal. It answers one question
+# quickly: did this change break the code it can affect? The deep proof —
+# biome ratchet, full Rust workspace tests, docs build, extension packaging —
+# runs in release-proof.yml before anything publishes.
+#
+# It runs on GitHub-hosted runners out of the box. Set the repository variable
+# FAST_RUNNER_LABEL to a warm self-hosted pool (.devops/k8s/README.md) and the
+# same jobs keep their checkout, node_modules, cargo registry and target/
+# between runs — the difference between ~90s and seconds. Unset the variable
+# during a cluster incident and CI falls straight back to ubuntu-latest.
 name: CI
 
 on:
@@ -11,20 +22,107 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
-  typescript:
-    name: TypeScript (build + test)
+  # A docs-only change must not pay for a 5-minute cold cargo build, and a
+  # Rust-only change must not rebuild the extension. One cheap filter job
+  # gates both. Workflow files trigger both sides, because a workflow edit
+  # can break either.
+  changes:
     runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      typescript: ${{ steps.filter.outputs.typescript }}
     steps:
       - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain*'
+              - '.github/workflows/**'
+            typescript:
+              - 'apps/extension/**'
+              - 'apps/immorterm/**'
+              - 'libs/**'
+              - 'packages/**'
+              - 'package.json'
+              - 'bun.lock'
+              - '.bun-version'
+              - 'biome.json'
+              - 'tsconfig*.json'
+              - '.github/workflows/**'
+
+  typescript:
+    name: TypeScript (build + test)
+    needs: changes
+    if: needs.changes.outputs.typescript == 'true'
+    runs-on: ${{ vars.FAST_RUNNER_LABEL || 'ubuntu-latest' }}
+    # 10, generously above the worst honest run (~45s TS job; the whole CI's
+    # worst recorded wall is 5m20s on a cold cargo cache). The ceiling exists
+    # to bound a HUNG job, not to race a legitimate build — without it a
+    # wedged job holds the concurrency slot until GitHub's 6-hour kill.
+    timeout-minutes: 10
+    env:
+      # The warm runner mounts a node-local hostPath here
+      # (.devops/k8s/immorterm-runner-values.yaml). Empty on hosted runners,
+      # which turns every warm-path shortcut off entirely.
+      CI_CACHE_ROOT: ${{ vars.FAST_RUNNER_LABEL && '/ci-cache' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # On the warm runner the checkout directory survives between jobs.
+          # Only tracked source may differ between runs: reset it, then clean
+          # everything EXCEPT node_modules (expensive to rebuild) and target/
+          # (the whole point of a warm runner for the Rust job sharing this
+          # workdir). Harmless on hosted runners, where the dir starts empty.
+          clean: false
+      - name: Clean source, keep warm dependencies
+        run: |
+          git reset --hard HEAD
+          git clean -ffdx -e node_modules/ -e target/
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
 
-      - name: Install dependencies
-        run: bun install
+      - name: Install dependencies (skipped when the lockfile hasn't moved)
+        run: |
+          set -euo pipefail
+          if [ -n "${CI_CACHE_ROOT:-}" ]; then
+            export BUN_INSTALL_CACHE_DIR="$CI_CACHE_ROOT/bun"
+            mkdir -p "$BUN_INSTALL_CACHE_DIR"
+          fi
+          fingerprint="$(bun --version; cksum bun.lock)"
+          if [ -f node_modules/.ci-install ] && [ "$(cat node_modules/.ci-install)" = "$fingerprint" ]; then
+            echo "dependencies already match bun.lock and Bun — skipping install"
+          else
+            # SELF-HEALING, AND IT IS NOT DEFENSIVE PROGRAMMING. A killed
+            # install leaves a half-written node_modules that breaks Bun's
+            # linker with "failed to link package (copyfile) ENOENT" on every
+            # LATER install — the tree itself is the damage. Without this, one
+            # interrupted job wedges a warm runner permanently and every
+            # following job fails identically. One wipe-and-retry turns that
+            # outage into a merely slow job.
+            if ! bun install; then
+              echo "install failed — wiping node_modules and retrying once"
+              find . -name node_modules -type d -prune -exec rm -rf {} +
+              bun install
+            fi
+            # The marker keys on the lockfile AS CHECKED OUT (captured above,
+            # before bun install could rewrite it) — checkout resets bun.lock
+            # every run, so a rewritten lock would never match and the skip
+            # would never fire.
+            printf '%s\n' "$fingerprint" > node_modules/.ci-install
+          fi
 
       - name: Build shared libs (dist consumers need them)
         run: |
@@ -45,20 +143,51 @@ jobs:
 
   rust:
     name: Rust engine (check + clippy + test)
-    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ${{ vars.FAST_RUNNER_LABEL || 'ubuntu-latest' }}
+    # 10, generously above the worst honest run (5m09s on a cold Swatinem
+    # cache, run 31383898463). Bounds a hung job, does not race a real build.
+    timeout-minutes: 10
+    env:
+      CI_CACHE_ROOT: ${{ vars.FAST_RUNNER_LABEL && '/ci-cache' || '' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          clean: false
+      - name: Clean source, keep warm target/
+        run: |
+          git reset --hard HEAD
+          git clean -ffdx -e node_modules/ -e target/
+      - name: Point cargo at the persistent registry (warm runner only)
+        # On the warm runner the cargo registry lives on the hostPath cache
+        # and survives the pod; on hosted runners CARGO_HOME stays default
+        # (~/.cargo), which Swatinem restores. Never export an EMPTY
+        # CARGO_HOME — cargo treats a set-but-empty value as a real path.
+        run: |
+          if [ -n "${CI_CACHE_ROOT:-}" ]; then
+            mkdir -p "$CI_CACHE_ROOT/cargo"
+            echo "CARGO_HOME=$CI_CACHE_ROOT/cargo" >> "$GITHUB_ENV"
+          fi
 
+      # The three setup steps below only run on hosted runners. The warm
+      # runner image (.devops/docker/Dockerfile.ci-runner) pre-bakes
+      # libasound2-dev and the pinned Rust toolchain, and its persistent
+      # target/ + CARGO_HOME make the restore/save cost of Swatinem's cache
+      # pure overhead.
       - name: Install system dependencies
+        if: vars.FAST_RUNNER_LABEL == ''
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
       - name: Setup Rust toolchain
+        if: vars.FAST_RUNNER_LABEL == ''
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
           targets: wasm32-unknown-unknown
 
       - name: Cache Cargo
+        if: vars.FAST_RUNNER_LABEL == ''
         uses: Swatinem/rust-cache@v2
 
       - name: Check + clippy (native crates)
