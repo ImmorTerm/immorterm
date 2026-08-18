@@ -1,13 +1,13 @@
 # ImmorTerm Session Bridge v1 — continuation handoff
 
-**Prepared:** 2026-08-15 (Asia/Jerusalem)  
-**Outgoing ImmorTerm ID:** `57921-8ffb4aa1`  
-**Outgoing Codex session UUID:** `019ff6c0-ada7-7b42-bd28-c4bde4a91689`  
-**Repository:** `/Users/shaisnir/Development/immorterm-org/immorterm`  
-**Working branch at handoff:** `feat/task-grouping`  
-**Consumer baselines:** Longstory PR #70 at `2a89b678`; FLAM PR #85 at `9ddcb514`  
-**Canonical external blocker:** `task-1786740703871`  
-**Completed local hardening task:** `task-1786740833707`  
+**Prepared:** 2026-08-15 (Asia/Jerusalem)
+**Outgoing ImmorTerm ID:** `57921-8ffb4aa1`
+**Outgoing Codex session UUID:** `019ff6c0-ada7-7b42-bd28-c4bde4a91689`
+**Repository:** `/Users/shaisnir/Development/immorterm-org/immorterm`
+**Working branch at handoff:** `feat/task-grouping`
+**Consumer baselines:** Longstory PR #70 at `2a89b678`; FLAM PR #85 at `9ddcb514`
+**Canonical external blocker:** `task-1786740703871`
+**Completed local hardening task:** `task-1786740833707`
 
 ## Read this first
 
@@ -405,4 +405,3 @@ The next agent is done only when:
   recorded;
 - docs/API/changelog match the exact deployed contract;
 - no one claims completion based only on PTY write success or local unit tests.
-

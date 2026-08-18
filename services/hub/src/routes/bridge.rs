@@ -2,15 +2,15 @@
 //! delivery ledger. This is channel-neutral ImmorTerm infrastructure: callers
 //! address a stable project UUID + window_id, never a shell/session name.
 
-use axum::Json;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::Json;
 use futures_util::StreamExt;
 use notify::{RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
@@ -82,7 +82,37 @@ fn ensure_local_event_source() {
     *guard = Some(watcher);
 }
 
-fn mirror_remote_message(project_id: &str, record: &Value) {
+fn remote_record_matches_source(local: &Value, remote: &Value, remote_name: &str) -> bool {
+    local["location"]["kind"] == "remote"
+        && local["location"]["name"] == remote_name
+        && local["message_id"] == remote["message_id"]
+        && local["correlation_id"] == remote["correlation_id"]
+        && local["target_window_id"] == remote["target_window_id"]
+        && local["idempotency_hash"] == remote["idempotency_hash"]
+}
+
+fn remote_source_owns_message(project_id: &str, message_id: &str, remote_name: &str) -> bool {
+    let _guard = lock();
+    load_store(project_id)["messages"]
+        .as_array()
+        .and_then(|messages| {
+            messages
+                .iter()
+                .find(|message| message["message_id"] == message_id)
+        })
+        .is_some_and(|message| {
+            message["location"]["kind"] == "remote" && message["location"]["name"] == remote_name
+        })
+}
+
+fn reply_matches_message_authority(record: &Value, message_id: &str, reply: &Value) -> bool {
+    reply["message_id"] == message_id
+        && reply["correlation_id"] == record["correlation_id"]
+        && reply["session_window_id"] == record["target_window_id"]
+        && reply["message"].as_str().is_some_and(valid_plain_text)
+}
+
+fn mirror_remote_message(project_id: &str, remote_name: &str, record: &Value) {
     let Some(message_id) = record["message_id"].as_str() else {
         return;
     };
@@ -92,29 +122,16 @@ fn mirror_remote_message(project_id: &str, record: &Value) {
     if !store["messages"].is_array() {
         store["messages"] = json!([]);
     }
-    let existing_state = store["messages"]
+    let Some(existing) = store["messages"]
         .as_array()
         .and_then(|messages| messages.iter().find(|m| m["message_id"] == message_id))
-        .and_then(|message| message["state"].as_str())
-        .map(str::to_string);
-    if existing_state.is_none() {
-        store["messages"]
-            .as_array_mut()
-            .unwrap()
-            .push(record.clone());
-        if save_store(project_id, &store).is_ok() {
-            drop(_guard);
-            let _ = record_event(
-                project_id,
-                "message_state_changed",
-                json!({"message":record}),
-                Some(message_id),
-                record["correlation_id"].as_str(),
-                None,
-            );
-        }
+    else {
+        return;
+    };
+    if !remote_record_matches_source(existing, record, remote_name) {
         return;
     }
+    let existing_state = existing["state"].as_str().map(str::to_string);
     drop(_guard);
     if existing_state.as_deref() != Some(state) {
         let history = record["history"].as_array().cloned().unwrap_or_default();
@@ -147,10 +164,16 @@ fn append_reply(project_id: &str, message_id: &str, reply: &Value) -> Result<Val
     if record["state"] != "acknowledged_by_agent" && record["state"] != "replied" {
         return Err("message must be acknowledged before an agent can reply".into());
     }
+    if !reply_matches_message_authority(record, message_id, reply) {
+        return Err("reply does not match the original message authority".into());
+    }
     if !record["replies"].is_array() {
         record["replies"] = json!([]);
     }
-    let reply_id = reply["reply_id"].as_str().ok_or("reply_id is required")?;
+    let reply_id = reply["reply_id"]
+        .as_str()
+        .filter(|reply_id| valid_id(reply_id))
+        .ok_or("a valid reply_id is required")?;
     if record["replies"]
         .as_array()
         .unwrap()
@@ -236,6 +259,7 @@ async fn ensure_remote_event_sources(project_id: &str) {
             }
         });
         let project_id = project_id.to_string();
+        let event_remote_name = remote.name.clone();
         tokio::spawn(async move {
             loop {
                 let connection = async {
@@ -248,8 +272,9 @@ async fn ensure_remote_event_sources(project_id: &str) {
                     .await?;
                     // Credential travels in the Authorization header, never the
                     // URL — request lines end up in proxy/access logs.
-                    let url =
-                        format!("ws://127.0.0.1:{port}/api/v1/bridge/events?project_id={project_id}");
+                    let url = format!(
+                        "ws://127.0.0.1:{port}/api/v1/bridge/events?project_id={project_id}"
+                    );
                     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
                     let mut request = url.into_client_request().map_err(|e| e.to_string())?;
                     request.headers_mut().insert(
@@ -262,7 +287,8 @@ async fn ensure_remote_event_sources(project_id: &str) {
                         .await
                         .map_err(|e| e.to_string())?;
                     Ok::<_, String>(stream)
-                }.await;
+                }
+                .await;
                 if let Ok(mut stream) = connection {
                     while let Some(Ok(message)) = stream.next().await {
                         let Ok(text) = message.to_text() else {
@@ -277,11 +303,22 @@ async fn ensure_remote_event_sources(project_id: &str) {
                             &event
                         };
                         if event["type"] == "message_state_changed" {
-                            mirror_remote_message(&project_id, &payload["message"]);
+                            mirror_remote_message(
+                                &project_id,
+                                &event_remote_name,
+                                &payload["message"],
+                            );
                         } else if event["type"] == "agent_reply" {
                             if let Some(message_id) = event["messageId"]
                                 .as_str()
                                 .or_else(|| event["message_id"].as_str())
+                                .filter(|message_id| {
+                                    remote_source_owns_message(
+                                        &project_id,
+                                        message_id,
+                                        &event_remote_name,
+                                    )
+                                })
                             {
                                 let _ = append_reply(&project_id, message_id, &payload["reply"]);
                             }
@@ -289,7 +326,7 @@ async fn ensure_remote_event_sources(project_id: &str) {
                             for record in
                                 payload["messages"].as_array().cloned().unwrap_or_default()
                             {
-                                mirror_remote_message(&project_id, &record);
+                                mirror_remote_message(&project_id, &event_remote_name, &record);
                             }
                             let _ =
                                 events().send(json!({"type":"directory_changed","project_id":"*"}));
@@ -1617,10 +1654,7 @@ pub async fn send(headers: HeaderMap, Json(request): Json<Value>) -> Response {
         match generate_token() {
             Ok(token) => Some(format!("imsr_{token}")),
             Err(error) => {
-                return bridge_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    json!({"error":error}),
-                );
+                return bridge_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error":error}));
             }
         }
     } else {
@@ -2268,6 +2302,70 @@ mod tests {
             &store,
             "message-1",
             &token_hash("deployment-administrator-token")
+        ));
+    }
+
+    #[test]
+    fn remote_events_are_bound_to_the_configured_source() {
+        let local = json!({
+            "message_id":"message-1",
+            "correlation_id":"factory-27",
+            "target_window_id":"window-1",
+            "idempotency_hash":"envelope-1",
+            "location":{"kind":"remote","name":"nanoclaw-a"}
+        });
+        let remote = json!({
+            "message_id":"message-1",
+            "correlation_id":"factory-27",
+            "target_window_id":"window-1",
+            "idempotency_hash":"envelope-1"
+        });
+        assert!(remote_record_matches_source(&local, &remote, "nanoclaw-a"));
+        assert!(!remote_record_matches_source(&local, &remote, "nanoclaw-b"));
+
+        let conflicting = json!({
+            "message_id":"message-1",
+            "correlation_id":"factory-27",
+            "target_window_id":"window-2",
+            "idempotency_hash":"envelope-1"
+        });
+        assert!(!remote_record_matches_source(
+            &local,
+            &conflicting,
+            "nanoclaw-a"
+        ));
+    }
+
+    #[test]
+    fn correlated_replies_cannot_change_original_authority() {
+        let record = json!({
+            "correlation_id":"factory-27",
+            "target_window_id":"window-1"
+        });
+        let reply = json!({
+            "reply_id":"reply-1",
+            "message_id":"message-1",
+            "correlation_id":"factory-27",
+            "session_window_id":"window-1",
+            "message":"Reviewed"
+        });
+        assert!(reply_matches_message_authority(
+            &record,
+            "message-1",
+            &reply
+        ));
+
+        let wrong_target = json!({
+            "reply_id":"reply-2",
+            "message_id":"message-1",
+            "correlation_id":"factory-27",
+            "session_window_id":"window-2",
+            "message":"Reviewed"
+        });
+        assert!(!reply_matches_message_authority(
+            &record,
+            "message-1",
+            &wrong_target
         ));
     }
 }
