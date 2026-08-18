@@ -6,7 +6,7 @@ monorepo and trimmed to the components that live here.
 | Workflow | Trigger | What it does |
 |----------|---------|--------------|
 | `.github/workflows/ci.yml` | push / PR | Installs deps, type-checks and tests the TypeScript workspaces, and runs cargo check + clippy on the Rust engine. |
-| `.github/workflows/publish-libs.yml` | manual dispatch | Publishes the `@immorterm/*` shared libraries to npm in dependency order. |
+| `.github/workflows/publish-libs.yml` | manual dispatch | Publishes the `@immorterm/*` shared libraries and SDK packages to npm. |
 | `.github/workflows/promote.yml` | manual dispatch | Publishes the `immorterm` CLI to npm, packages/publishes the VS Code extension, and deploys the docs site. |
 
 ## Before any publishing lane will work
@@ -19,6 +19,7 @@ name, pointing at this repo and the workflow file that publishes it:
 
 - `immorterm` (CLI) → `promote.yml`
 - every `@immorterm/<lib>` → `publish-libs.yml`
+- `@immorterm/session-bridge` → `publish-libs.yml`
 
 Until that is done, the publish steps will fail with an OIDC/authorization error.
 
