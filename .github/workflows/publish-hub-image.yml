@@ -1,3 +1,6 @@
+# The first publish creates a private GHCR package even though this repository
+# is public. An organization owner must make `immorterm-hub` public once in the
+# package settings; GITHUB_TOKEN deliberately cannot change package visibility.
 name: Publish Session Bridge Hub image
 
 on:
@@ -51,17 +54,7 @@ jobs:
           provenance: mode=max
           sbom: true
 
-      # A new GHCR package is private even when its source repository is public.
-      # The image contains no credential or customer data, and public pull keeps
-      # every consumer from needing a registry secret merely to verify the exact
-      # ImmorTerm bytes it pins. Session Bridge authentication remains mandatory.
-      - name: Make the Hub image publicly readable
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Record the immutable digest
         run: |
-          gh api --method PATCH \
-            /orgs/ImmorTerm/packages/container/immorterm-hub \
-            -f visibility=public
-
           echo "Published ghcr.io/immorterm/immorterm-hub@${{ steps.build.outputs.digest }}" \
             >> "$GITHUB_STEP_SUMMARY"
