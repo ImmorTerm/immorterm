@@ -290,9 +290,16 @@ After code review and version decision:
 - notify FLAM so PR #85 can pin that exact version;
 - do not let FLAM copy wire types or add temporary workarounds.
 
-### 3. Build the secure outbound desktop-loopback-to-FLAM-k3s connector
+### 3. Land and deploy the secure outbound desktop-loopback-to-FLAM-k3s connector
 
-This is the primary remaining ImmorTerm responsibility from `task-1786740703871`.
+The generic connector source is now implemented on `codex/session-bridge-main`. See
+`docs/session-bridge-outbound-connector.md`. It adds the authenticated outbound WebSocket,
+persisted offline directory, durable queue drain, strict connector source binding, credential
+expiry/revocation checks, and loopback-only plaintext development rule. It still needs review,
+merge, FLAM deployment configuration, and a real desktop-to-staging proof.
+
+The remaining work from `task-1786740703871` is review/merge, FLAM deployment configuration,
+credential provisioning/rotation, and the real desktop-to-staging proof.
 
 Required properties:
 
@@ -313,6 +320,18 @@ Required properties:
 Use the same Session Bridge Hub/daemon contract. Do not create a FLAM-specific presence or message
 store. A served remote Hub behind TLS/private networking is already a supported topology, but it
 does not solve desktop loopback → k3s by itself.
+
+Local two-Hub proof completed on 18 Aug 2026:
+
+- a served Hub listed a session supplied by a loopback-only desktop Hub;
+- an online message reached `presented_to_agent_input` through the real Unix-socket delivery path;
+- a second message stayed `queued` while the desktop Hub was stopped and reached
+  `presented_to_agent_input` after restart;
+- the served Hub was then stopped while the desktop agent acknowledged and replied locally;
+- after the served Hub restarted, cursor replay restored state `replied` and the exact correlated
+  reply text;
+- the proof used distinct served/desktop homes and ports plus a minimal daemon socket double; it did
+  not use FLAM staging, so the real deployment proof below remains required.
 
 ### 4. Prove real end-to-end delivery
 

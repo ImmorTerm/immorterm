@@ -2,15 +2,15 @@
 //! delivery ledger. This is channel-neutral ImmorTerm infrastructure: callers
 //! address a stable project UUID + window_id, never a shell/session name.
 
+use axum::Json;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use notify::{RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
@@ -26,6 +26,8 @@ static LOCAL_WATCHER: OnceLock<Mutex<Option<notify::RecommendedWatcher>>> = Once
 static REMOTE_SOURCES: OnceLock<tokio::sync::Mutex<HashSet<String>>> = OnceLock::new();
 static RATE_LIMITS: OnceLock<Mutex<HashMap<String, VecDeque<u64>>>> = OnceLock::new();
 static DIRECTORY_REVISIONS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+static CONNECTORS: OnceLock<tokio::sync::RwLock<HashMap<String, ConnectorEntry>>> = OnceLock::new();
+static OUTBOUND_CONNECTOR: OnceLock<()> = OnceLock::new();
 
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_ATTACHMENTS: usize = 10;
@@ -33,6 +35,29 @@ const MAX_PENDING_PER_INSTALLATION: usize = 100;
 const MAX_PENDING_PER_TARGET: usize = 20;
 const MAX_REQUESTS_PER_MINUTE: usize = 60;
 const MAX_RETAINED_EVENTS: usize = 10_000;
+const MAX_CONNECTOR_SESSIONS: usize = 500;
+const MAX_CONNECTOR_REPAIR_MESSAGES: usize = 1_000;
+const MAX_CONNECTOR_FRAME_BYTES: usize = 2 * 1024 * 1024;
+const CONNECTOR_CONNECT: &str = "connector:connect";
+const CONNECTOR_AUDIENCE: &str = "immorterm:session-bridge:connector:v1";
+
+#[derive(Clone)]
+struct ConnectorEntry {
+    project_id: String,
+    connector_id: String,
+    connection_id: String,
+    connected: bool,
+    sessions: Vec<Value>,
+    sender: tokio::sync::mpsc::Sender<Value>,
+}
+
+fn connectors() -> &'static tokio::sync::RwLock<HashMap<String, ConnectorEntry>> {
+    CONNECTORS.get_or_init(|| tokio::sync::RwLock::new(HashMap::new()))
+}
+
+fn connector_key(project_id: &str, connector_id: &str) -> String {
+    format!("{project_id}:{connector_id}")
+}
 
 fn lock() -> std::sync::MutexGuard<'static, ()> {
     STORE_LOCK
@@ -105,6 +130,61 @@ fn remote_source_owns_message(project_id: &str, message_id: &str, remote_name: &
         })
 }
 
+fn connector_record_matches_source(local: &Value, remote: &Value, connector_id: &str) -> bool {
+    local["location"]["kind"] == "connector"
+        && local["location"]["name"] == connector_id
+        && local["message_id"] == remote["message_id"]
+        && local["correlation_id"] == remote["correlation_id"]
+        && local["target_window_id"] == remote["target_window_id"]
+        && local["idempotency_hash"] == remote["idempotency_hash"]
+}
+
+fn connector_source_owns_message(project_id: &str, message_id: &str, connector_id: &str) -> bool {
+    let _guard = lock();
+    load_store(project_id)["messages"]
+        .as_array()
+        .and_then(|messages| {
+            messages
+                .iter()
+                .find(|message| message["message_id"] == message_id)
+        })
+        .is_some_and(|message| {
+            message["location"]["kind"] == "connector"
+                && message["location"]["name"] == connector_id
+        })
+}
+
+fn mirror_connector_message(project_id: &str, connector_id: &str, record: &Value) {
+    let Some(message_id) = record["message_id"].as_str() else {
+        return;
+    };
+    let _guard = lock();
+    let store = load_store(project_id);
+    let Some(existing) = store["messages"].as_array().and_then(|messages| {
+        messages
+            .iter()
+            .find(|message| message["message_id"] == message_id)
+    }) else {
+        return;
+    };
+    if !connector_record_matches_source(existing, record, connector_id) {
+        return;
+    }
+    drop(_guard);
+    for step in record["history"].as_array().cloned().unwrap_or_default() {
+        let Some(state) = step["state"].as_str() else {
+            continue;
+        };
+        if state == "replied" {
+            continue;
+        }
+        let _ = transition(project_id, message_id, state, step["error"].as_str());
+    }
+    for reply in record["replies"].as_array().cloned().unwrap_or_default() {
+        let _ = append_reply(project_id, message_id, &reply);
+    }
+}
+
 fn reply_matches_message_authority(record: &Value, message_id: &str, reply: &Value) -> bool {
     reply["message_id"] == message_id
         && reply["correlation_id"] == record["correlation_id"]
@@ -136,10 +216,15 @@ fn mirror_remote_message(project_id: &str, remote_name: &str, record: &Value) {
     if existing_state.as_deref() != Some(state) {
         let history = record["history"].as_array().cloned().unwrap_or_default();
         if history.is_empty() {
-            let _ = transition(project_id, message_id, state, record["error"].as_str());
+            if state != "replied" {
+                let _ = transition(project_id, message_id, state, record["error"].as_str());
+            }
         } else {
             for step in history {
                 if let Some(step_state) = step["state"].as_str() {
+                    if step_state == "replied" {
+                        continue;
+                    }
                     let _ = transition(project_id, message_id, step_state, step["error"].as_str());
                 }
             }
@@ -197,35 +282,41 @@ fn append_reply(project_id: &str, message_id: &str, reply: &Value) -> Result<Val
             Err("reply_id already exists with a different reply".into())
         };
     }
-    if record["state"] == "replied" {
+    let repairing_missing_reply =
+        record["state"] == "replied" && record["replies"].as_array().is_some_and(Vec::is_empty);
+    if record["state"] == "replied" && !repairing_missing_reply {
         return Err("message already has a correlated reply".into());
     }
     record["replies"]
         .as_array_mut()
         .unwrap()
         .push(reply.clone());
-    let changed_at = now_ms();
-    record["state"] = json!("replied");
-    record["updated_at"] = json!(changed_at);
-    let attempt = record["attempt"].as_u64().unwrap_or(0);
-    record["history"].as_array_mut().unwrap().push(json!({
-        "state":"replied",
-        "at":changed_at,
-        "changed_at":millis_rfc3339(changed_at),
-        "attempt":attempt,
-    }));
+    if !repairing_missing_reply {
+        let changed_at = now_ms();
+        record["state"] = json!("replied");
+        record["updated_at"] = json!(changed_at);
+        let attempt = record["attempt"].as_u64().unwrap_or(0);
+        record["history"].as_array_mut().unwrap().push(json!({
+            "state":"replied",
+            "at":changed_at,
+            "changed_at":millis_rfc3339(changed_at),
+            "attempt":attempt,
+        }));
+    }
     let message_record = record.clone();
     save_store(project_id, &store)?;
     drop(_guard);
     let correlation_id = reply["correlation_id"].as_str();
-    let _ = record_event(
-        project_id,
-        "message_state_changed",
-        json!({"message":message_record}),
-        Some(message_id),
-        correlation_id,
-        Some(message_id),
-    );
+    if !repairing_missing_reply {
+        let _ = record_event(
+            project_id,
+            "message_state_changed",
+            json!({"message":message_record}),
+            Some(message_id),
+            correlation_id,
+            Some(message_id),
+        );
+    }
     let _ = record_event(
         project_id,
         "agent_reply",
@@ -360,6 +451,12 @@ const DIRECTORY_READ: &str = "directory:read";
 const MESSAGE_SEND: &str = "message:send";
 const EVENTS_SUBSCRIBE: &str = "events:subscribe";
 const HOST_OPERATIONS: [&str; 3] = [DIRECTORY_READ, MESSAGE_SEND, EVENTS_SUBSCRIBE];
+const PROVISIONABLE_OPERATIONS: [&str; 4] = [
+    DIRECTORY_READ,
+    MESSAGE_SEND,
+    EVENTS_SUBSCRIBE,
+    CONNECTOR_CONNECT,
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct InstallationCredential {
@@ -596,6 +693,7 @@ pub fn initialize() {
     if let Err(error) = bridge_token() {
         tracing::warn!("failed to initialize ImmorTerm bridge credential: {error}");
     }
+    start_outbound_connector();
 }
 
 /// Non-secret status for ImmorTerm's own settings UI. The credential value
@@ -607,6 +705,11 @@ pub async fn status() -> Json<Value> {
         .iter()
         .filter(|credential| credential.revoked_at.is_none() && credential.expires_at > now_ms())
         .count();
+    let connector_entries = connectors().read().await;
+    let connected_connectors = connector_entries
+        .values()
+        .filter(|entry| entry.connected)
+        .count();
     Json(json!({
         "enabled": settings.enabled && bridge_token().is_ok(),
         "version": 1,
@@ -617,6 +720,8 @@ pub async fn status() -> Json<Value> {
         "active_installation_credentials": active_installations,
         "project_scoped": true,
         "configured_remotes": super::remote_api::configured_remotes().len(),
+        "connected_outbound_connectors": connected_connectors,
+        "outbound_connector_configured": std::env::var_os("IMMORTERM_BRIDGE_CONNECTOR_URL").is_some(),
         "states": ["queued", "routing", "accepted_by_daemon", "presented_to_agent_input", "acknowledged_by_agent", "replied", "failed", "expired", "cancelled"],
     }))
 }
@@ -712,12 +817,12 @@ pub async fn provision_installation_credential(
     if operations.is_empty()
         || operations
             .iter()
-            .any(|operation| !HOST_OPERATIONS.contains(&operation.as_str()))
+            .any(|operation| !PROVISIONABLE_OPERATIONS.contains(&operation.as_str()))
     {
         return (
             StatusCode::BAD_REQUEST,
             Json(
-                json!({"error":"operations may contain only directory:read, message:send, events:subscribe"}),
+                json!({"error":"operations may contain only directory:read, message:send, events:subscribe, connector:connect"}),
             ),
         );
     }
@@ -827,7 +932,8 @@ pub async fn identity(headers: HeaderMap) -> (StatusCode, Json<Value>) {
             "directory.v1",
             "external_messages.v1",
             "agent_receipt_authority.v1",
-            "durable_events.v1"
+            "durable_events.v1",
+            "outbound_connectors.v1"
         ]
     });
     let value = match auth {
@@ -874,6 +980,503 @@ fn authenticate(headers: &HeaderMap) -> Result<AuthContext, String> {
         return Err("credential_expired".into());
     }
     Ok(AuthContext::Installation(credential))
+}
+
+fn connector_url_is_allowed(raw: &str) -> bool {
+    let Ok(url) = url::Url::parse(raw) else {
+        return false;
+    };
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/api/v1/bridge/connectors"
+    {
+        return false;
+    }
+    match url.scheme() {
+        "wss" => true,
+        "ws" => matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1")),
+        _ => false,
+    }
+}
+
+fn outbound_connector_token() -> Option<String> {
+    if let Ok(token) = std::env::var("IMMORTERM_BRIDGE_CONNECTOR_TOKEN") {
+        let token = token.trim();
+        if !token.is_empty() {
+            return Some(token.to_string());
+        }
+    }
+    let path = std::env::var("IMMORTERM_BRIDGE_CONNECTOR_TOKEN_FILE").ok()?;
+    let metadata = std::fs::metadata(&path).ok()?;
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return None;
+    }
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+}
+
+fn start_outbound_connector() {
+    let Ok(url) = std::env::var("IMMORTERM_BRIDGE_CONNECTOR_URL") else {
+        return;
+    };
+    if !connector_url_is_allowed(&url) {
+        tracing::warn!(
+            "Session Bridge connector URL must use wss, except for loopback development"
+        );
+        return;
+    }
+    if outbound_connector_token().is_none() {
+        tracing::warn!("Session Bridge connector token is not configured");
+        return;
+    }
+    if OUTBOUND_CONNECTOR.set(()).is_err() {
+        return;
+    }
+    ensure_local_event_source();
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        tracing::warn!("Session Bridge connector could not start outside a Tokio runtime");
+        return;
+    };
+    runtime.spawn(run_outbound_connector(url));
+}
+
+async fn outbound_directory_frame(project_id: &str) -> Value {
+    json!({
+        "type":"directory",
+        "sessions":local_project_sessions(project_id).await,
+    })
+}
+
+fn bounded_repair_messages(messages: &Value) -> Value {
+    let Some(messages) = messages.as_array() else {
+        return json!([]);
+    };
+    let byte_budget = MAX_CONNECTOR_FRAME_BYTES / 2;
+    let mut used = 0usize;
+    let mut selected = Vec::new();
+    for message in messages.iter().rev().take(MAX_CONNECTOR_REPAIR_MESSAGES) {
+        let size = serde_json::to_vec(message).map_or(0, |bytes| bytes.len());
+        if used.saturating_add(size) > byte_budget {
+            break;
+        }
+        used = used.saturating_add(size);
+        selected.push(message.clone());
+    }
+    selected.reverse();
+    json!(selected)
+}
+
+async fn outbound_replay_frames(project_id: &str, cursor: Option<&str>) -> Vec<Value> {
+    let (messages, retained_events, next_sequence) = {
+        let _guard = lock();
+        let store = load_store(project_id);
+        (
+            store["messages"].clone(),
+            store["events"].as_array().cloned().unwrap_or_default(),
+            store["next_event_sequence"].as_u64().unwrap_or(1),
+        )
+    };
+    let requested_sequence = cursor.and_then(parse_event_cursor);
+    let oldest_sequence = retained_events
+        .first()
+        .and_then(|event| event["sequence"].as_u64())
+        .unwrap_or(next_sequence);
+    let cursor_expired =
+        requested_sequence.is_some_and(|sequence| sequence.saturating_add(1) < oldest_sequence);
+    if cursor.is_none() || requested_sequence.is_none() || cursor_expired {
+        return vec![json!({
+            "type":"repair_snapshot",
+            "cursor":event_cursor(next_sequence.saturating_sub(1)),
+            "sessions":local_project_sessions(project_id).await,
+            "messages":bounded_repair_messages(&messages),
+        })];
+    }
+    retained_events
+        .into_iter()
+        .filter(|event| {
+            event["sequence"]
+                .as_u64()
+                .is_some_and(|sequence| sequence > requested_sequence.unwrap())
+        })
+        .map(|event| json!({"type":"event","event":event}))
+        .collect()
+}
+
+async fn run_outbound_connector(url: String) {
+    loop {
+        let Some(token) = outbound_connector_token() else {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            continue;
+        };
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let connection = async {
+            let mut request = url
+                .clone()
+                .into_client_request()
+                .map_err(|error| error.to_string())?;
+            request.headers_mut().insert(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {token}")
+                    .parse()
+                    .map_err(|_| "invalid connector credential header".to_string())?,
+            );
+            tokio_tungstenite::connect_async(request)
+                .await
+                .map(|(stream, _)| stream)
+                .map_err(|error| error.to_string())
+        }
+        .await;
+        if let Ok(stream) = connection {
+            let (mut sink, mut source) = stream.split();
+            let mut event_rx = events().subscribe();
+            let mut refresh = tokio::time::interval(std::time::Duration::from_secs(30));
+            let mut identity: Option<(String, String, u64)> = None;
+            loop {
+                tokio::select! {
+                    incoming = source.next() => {
+                        let Some(Ok(message)) = incoming else { break };
+                        let Ok(text) = message.to_text() else { continue };
+                        let Ok(frame) = serde_json::from_str::<Value>(text) else { continue };
+                        if frame["type"] == "welcome" {
+                            let project_id = frame["project_id"].as_str().unwrap_or_default();
+                            let connector_id = frame["connector_id"].as_str().unwrap_or_default();
+                            let expires_at = frame["expires_at"].as_u64().unwrap_or_default();
+                            if !valid_id(project_id) || !valid_id(connector_id) || expires_at <= now_ms() {
+                                break;
+                            }
+                            identity = Some((project_id.to_string(), connector_id.to_string(), expires_at));
+                            for replay in outbound_replay_frames(project_id, frame["cursor"].as_str()).await {
+                                if sink.send(tokio_tungstenite::tungstenite::Message::Text(replay.to_string())).await.is_err() {
+                                    break;
+                                }
+                            }
+                            let directory = outbound_directory_frame(project_id).await;
+                            if sink.send(tokio_tungstenite::tungstenite::Message::Text(directory.to_string())).await.is_err() {
+                                break;
+                            }
+                        } else if frame["type"] == "deliver" {
+                            let Some((project_id, connector_id, expires_at)) = identity.as_ref() else { continue };
+                            if *expires_at <= now_ms() || frame["project_id"].as_str() != Some(project_id) {
+                                break;
+                            }
+                            let request = frame["request"].clone();
+                            let message_id = request["message_id"].as_str().unwrap_or_default().to_string();
+                            let auth = AuthContext::Installation(InstallationCredential {
+                                installation_id: connector_id.clone(),
+                                project_id: project_id.clone(),
+                                token_id: "outbound-connector".into(),
+                                token_hash: String::new(),
+                                audience: CONNECTOR_AUDIENCE.into(),
+                                operations: vec![MESSAGE_SEND.into()],
+                                created_at: now_ms(),
+                                expires_at: *expires_at,
+                                revoked_at: None,
+                            });
+                            let _ = send_authorized(auth, request).await;
+                            let record = {
+                                let _guard = lock();
+                                load_store(project_id)["messages"]
+                                    .as_array()
+                                    .and_then(|messages| messages.iter().find(|message| message["message_id"] == message_id))
+                                    .cloned()
+                            };
+                            if let Some(record) = record {
+                                let result = json!({"type":"delivery_result","record":record});
+                                if sink.send(tokio_tungstenite::tungstenite::Message::Text(result.to_string())).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    event = event_rx.recv(), if identity.is_some() => {
+                        let Ok(event) = event else { continue };
+                        let (project_id, _, _) = identity.as_ref().unwrap();
+                        if event["type"] == "directory_changed" {
+                            let directory = outbound_directory_frame(project_id).await;
+                            if sink.send(tokio_tungstenite::tungstenite::Message::Text(directory.to_string())).await.is_err() {
+                                break;
+                            }
+                        } else if event["projectId"].as_str() == Some(project_id) {
+                            let frame = json!({"type":"event","event":event});
+                            if sink.send(tokio_tungstenite::tungstenite::Message::Text(frame.to_string())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    _ = refresh.tick(), if identity.is_some() => {
+                        let (project_id, _, expires_at) = identity.as_ref().unwrap();
+                        if *expires_at <= now_ms() {
+                            break;
+                        }
+                        let directory = outbound_directory_frame(project_id).await;
+                        if sink.send(tokio_tungstenite::tungstenite::Message::Text(directory.to_string())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+}
+
+fn valid_connector_sessions(project_id: &str, sessions: &Value) -> Option<Vec<Value>> {
+    let sessions = sessions.as_array()?;
+    if sessions.len() > MAX_CONNECTOR_SESSIONS {
+        return None;
+    }
+    sessions
+        .iter()
+        .all(|session| {
+            session["window_id"].as_str().is_some_and(valid_id)
+                && session["project_id"].as_str() == Some(project_id)
+                && session["session_name"].as_str().is_some_and(valid_id)
+        })
+        .then(|| sessions.clone())
+}
+
+async fn update_connector_directory(
+    project_id: &str,
+    connector_id: &str,
+    connection_id: &str,
+    sessions: Vec<Value>,
+) -> bool {
+    let key = connector_key(project_id, connector_id);
+    let mut entries = connectors().write().await;
+    let Some(entry) = entries
+        .get_mut(&key)
+        .filter(|entry| entry.connection_id == connection_id)
+    else {
+        return false;
+    };
+    entry.sessions = sessions.clone();
+    drop(entries);
+    let _ = persist_connector_sessions(project_id, connector_id, &sessions);
+    let _ = events().send(json!({"type":"directory_changed","project_id":"*"}));
+    true
+}
+
+fn connector_delivery_request(record: &Value) -> Value {
+    json!({
+        "project_id":record["project_id"],
+        "target_window_id":record["target_window_id"],
+        "message_id":record["message_id"],
+        "correlation_id":record["correlation_id"],
+        "message":record["message"],
+        "attachments":record["attachments"],
+        "trace_context":record["trace_context"],
+        "expires_at":record["expires_at"],
+    })
+}
+
+async fn connector_sender(
+    project_id: &str,
+    connector_id: &str,
+) -> Option<tokio::sync::mpsc::Sender<Value>> {
+    connectors()
+        .read()
+        .await
+        .get(&connector_key(project_id, connector_id))
+        .filter(|entry| entry.connected)
+        .map(|entry| entry.sender.clone())
+}
+
+async fn drain_connector_queue(project_id: String, connector_id: String) {
+    expire_stale_messages(&project_id);
+    let Some(sender) = connector_sender(&project_id, &connector_id).await else {
+        return;
+    };
+    let records = {
+        let _guard = lock();
+        load_store(&project_id)["messages"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|record| {
+                record["location"]["kind"] == "connector"
+                    && record["location"]["name"] == connector_id
+                    && matches!(record["state"].as_str(), Some("queued" | "routing"))
+            })
+            .collect::<Vec<_>>()
+    };
+    for mut record in records {
+        let message_id = record["message_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if record["state"] == "queued" {
+            if let Ok(routing) = transition(&project_id, &message_id, "routing", None) {
+                record = routing;
+            }
+        }
+        let frame = json!({
+            "type":"deliver",
+            "project_id":project_id,
+            "request":connector_delivery_request(&record),
+        });
+        if sender.send(frame).await.is_err() {
+            break;
+        }
+    }
+}
+
+pub async fn connector_ws(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    let credential = match authenticate(&headers) {
+        Ok(AuthContext::Installation(credential)) if credential_can_connect(&credential) => {
+            credential
+        }
+        Ok(_) => return StatusCode::FORBIDDEN.into_response(),
+        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+    ws.max_message_size(MAX_CONNECTOR_FRAME_BYTES)
+        .max_frame_size(MAX_CONNECTOR_FRAME_BYTES)
+        .on_upgrade(move |socket| handle_connector(socket, credential))
+        .into_response()
+}
+
+fn credential_can_connect(credential: &InstallationCredential) -> bool {
+    credential.revoked_at.is_none()
+        && credential.expires_at > now_ms()
+        && credential
+            .operations
+            .iter()
+            .any(|item| item == CONNECTOR_CONNECT)
+        && credential.audience == CONNECTOR_AUDIENCE
+}
+
+async fn handle_connector(mut socket: WebSocket, credential: InstallationCredential) {
+    let project_id = credential.project_id.clone();
+    let connector_id = credential.installation_id.clone();
+    let connection_id = format!(
+        "conn-{}-{}",
+        now_ms(),
+        NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let welcome = json!({
+        "type":"welcome",
+        "project_id":project_id,
+        "connector_id":connector_id,
+        "expires_at":credential.expires_at,
+        "protocol_version":1,
+        "cursor":persisted_connector_cursor(&project_id, &connector_id),
+    });
+    if socket
+        .send(WsMessage::Text(welcome.to_string().into()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let (mut sink, mut source) = socket.split();
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<Value>(128);
+    let persisted_sessions = persisted_connector_sessions(&project_id)
+        .remove(&connector_id)
+        .unwrap_or_default();
+    {
+        let key = connector_key(&project_id, &connector_id);
+        let mut entries = connectors().write().await;
+        let sessions = entries
+            .get(&key)
+            .map(|entry| entry.sessions.clone())
+            .unwrap_or(persisted_sessions);
+        entries.insert(
+            key,
+            ConnectorEntry {
+                project_id: project_id.clone(),
+                connector_id: connector_id.clone(),
+                connection_id: connection_id.clone(),
+                connected: true,
+                sessions,
+                sender,
+            },
+        );
+    }
+    let _ = events().send(json!({"type":"directory_changed","project_id":"*"}));
+    tokio::spawn(drain_connector_queue(
+        project_id.clone(),
+        connector_id.clone(),
+    ));
+    let mut credential_check = tokio::time::interval(std::time::Duration::from_secs(30));
+    loop {
+        tokio::select! {
+            outgoing = receiver.recv() => {
+                let Some(frame) = outgoing else { break };
+                if sink.send(WsMessage::Text(frame.to_string().into())).await.is_err() {
+                    break;
+                }
+            }
+            incoming = source.next() => {
+                let Some(Ok(message)) = incoming else { break };
+                let Ok(text) = message.to_text() else { continue };
+                let Ok(frame) = serde_json::from_str::<Value>(text) else { continue };
+                if frame["type"] == "directory" {
+                    let Some(sessions) = valid_connector_sessions(&project_id, &frame["sessions"]) else { continue };
+                    if update_connector_directory(&project_id, &connector_id, &connection_id, sessions).await {
+                        tokio::spawn(drain_connector_queue(project_id.clone(), connector_id.clone()));
+                    }
+                } else if frame["type"] == "repair_snapshot" {
+                    let Some(sessions) = valid_connector_sessions(&project_id, &frame["sessions"]) else { continue };
+                    let Some(messages) = frame["messages"].as_array().filter(|messages| messages.len() <= MAX_CONNECTOR_REPAIR_MESSAGES).cloned() else { continue };
+                    if !update_connector_directory(&project_id, &connector_id, &connection_id, sessions).await {
+                        continue;
+                    }
+                    for record in messages {
+                        mirror_connector_message(&project_id, &connector_id, &record);
+                    }
+                    if let Some(cursor) = frame["cursor"].as_str() {
+                        let _ = persist_connector_cursor(&project_id, &connector_id, cursor);
+                    }
+                    tokio::spawn(drain_connector_queue(project_id.clone(), connector_id.clone()));
+                } else if frame["type"] == "delivery_result" {
+                    mirror_connector_message(&project_id, &connector_id, &frame["record"]);
+                } else if frame["type"] == "event" {
+                    let event = &frame["event"];
+                    if event["projectId"].as_str() != Some(&project_id) {
+                        continue;
+                    }
+                    let payload = if event["payload"].is_object() { &event["payload"] } else { event };
+                    if event["type"] == "message_state_changed" {
+                        mirror_connector_message(&project_id, &connector_id, &payload["message"]);
+                    } else if event["type"] == "agent_reply" {
+                        if let Some(message_id) = event["messageId"]
+                            .as_str()
+                            .or_else(|| event["message_id"].as_str())
+                            .filter(|message_id| connector_source_owns_message(&project_id, message_id, &connector_id))
+                        {
+                            let _ = append_reply(&project_id, message_id, &payload["reply"]);
+                        }
+                    }
+                    if let Some(cursor) = event["cursor"].as_str() {
+                        let _ = persist_connector_cursor(&project_id, &connector_id, cursor);
+                    }
+                }
+            }
+            _ = credential_check.tick() => {
+                if credential.expires_at <= now_ms()
+                    || load_installation_credentials().iter().any(|current| {
+                        current.token_id == credential.token_id && current.revoked_at.is_some()
+                    })
+                {
+                    break;
+                }
+            }
+        }
+    }
+    let key = connector_key(&project_id, &connector_id);
+    let mut entries = connectors().write().await;
+    if let Some(entry) = entries
+        .get_mut(&key)
+        .filter(|entry| entry.connection_id == connection_id)
+    {
+        entry.connected = false;
+    }
+    drop(entries);
+    let _ = events().send(json!({"type":"directory_changed","project_id":"*"}));
 }
 
 fn supplied_bearer(headers: &HeaderMap) -> Result<&str, &'static str> {
@@ -997,18 +1600,7 @@ fn directory_revision(sessions: &[Value]) -> String {
         .collect()
 }
 
-async fn project_sessions(project_id: &str) -> Vec<Value> {
-    let local = super::registry::enriched_registry_snapshot().await;
-    let mut sessions = local["sessions"].as_array().cloned().unwrap_or_default();
-    for session in &mut sessions {
-        session["location"] = json!({ "kind": "local" });
-    }
-    let mut remote = super::remote_api::configured_remote_sessions().await;
-    for session in &mut remote {
-        let name = session["remote"].as_str().unwrap_or_default();
-        session["location"] = json!({ "kind": "remote", "name": name });
-    }
-    sessions.extend(remote);
+fn normalize_project_sessions(mut sessions: Vec<Value>, project_id: &str) -> Vec<Value> {
     sessions.retain(|session| {
         session["owner_project_id"].as_str() == Some(project_id)
             || session["project_id"].as_str() == Some(project_id)
@@ -1057,6 +1649,93 @@ async fn project_sessions(project_id: &str) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+async fn local_project_sessions(project_id: &str) -> Vec<Value> {
+    let local = super::registry::enriched_registry_snapshot().await;
+    let mut sessions = local["sessions"].as_array().cloned().unwrap_or_default();
+    for session in &mut sessions {
+        session["location"] = json!({ "kind": "local" });
+    }
+    normalize_project_sessions(sessions, project_id)
+}
+
+fn select_unambiguous_connector_sessions(candidates: Vec<Value>) -> Vec<Value> {
+    let mut by_window: HashMap<String, Vec<Value>> = HashMap::new();
+    for session in candidates {
+        let Some(window_id) = session["window_id"].as_str().map(str::to_string) else {
+            continue;
+        };
+        by_window.entry(window_id).or_default().push(session);
+    }
+    by_window
+        .into_values()
+        .filter_map(|sessions| {
+            let connected = sessions
+                .iter()
+                .filter(|session| session["connector_connected"] == true)
+                .collect::<Vec<_>>();
+            let mut selected = if connected.len() == 1 {
+                (*connected[0]).clone()
+            } else if connected.is_empty() && sessions.len() == 1 {
+                sessions.into_iter().next().unwrap()
+            } else {
+                return None;
+            };
+            selected.as_object_mut()?.remove("connector_connected");
+            Some(selected)
+        })
+        .collect()
+}
+
+async fn connector_project_sessions(project_id: &str) -> Vec<Value> {
+    let live = {
+        let entries = connectors().read().await;
+        entries
+            .values()
+            .filter(|entry| entry.project_id == project_id)
+            .map(|entry| {
+                (
+                    entry.connector_id.clone(),
+                    (entry.connected, entry.sessions.clone()),
+                )
+            })
+            .collect::<HashMap<_, _>>()
+    };
+    let mut directories = persisted_connector_sessions(project_id);
+    for (connector_id, (_, sessions)) in &live {
+        directories.insert(connector_id.clone(), sessions.clone());
+    }
+    let candidates = directories
+        .into_iter()
+        .flat_map(|(connector_id, sessions)| {
+            let connected = live
+                .get(&connector_id)
+                .is_some_and(|(connected, _)| *connected);
+            sessions.into_iter().map(move |mut session| {
+                session["location"] = json!({"kind":"connector","name":connector_id});
+                session["connector_connected"] = json!(connected);
+                session["alive"] = json!(connected && session["alive"].as_bool().unwrap_or(false));
+                if !connected {
+                    session["status"] = json!("offline");
+                }
+                session
+            })
+        })
+        .collect::<Vec<_>>();
+    select_unambiguous_connector_sessions(candidates)
+}
+
+async fn project_sessions(project_id: &str) -> Vec<Value> {
+    let mut sessions = local_project_sessions(project_id).await;
+    let mut remote = super::remote_api::configured_remote_sessions().await;
+    for session in &mut remote {
+        let name = session["remote"].as_str().unwrap_or_default();
+        session["location"] = json!({ "kind": "remote", "name": name });
+    }
+    sessions.extend(normalize_project_sessions(remote, project_id));
+    sessions.extend(connector_project_sessions(project_id).await);
+    sessions
 }
 
 #[derive(Deserialize)]
@@ -1121,6 +1800,9 @@ fn normalize_store(mut store: Value) -> Value {
     if !store["agent_receipts"].is_object() {
         store["agent_receipts"] = json!({});
     }
+    if !store["connectors"].is_object() {
+        store["connectors"] = json!({});
+    }
     for message in store["messages"].as_array_mut().unwrap() {
         if message["state"] == "failed/offline" {
             message["state"] = json!("failed");
@@ -1172,6 +1854,64 @@ fn normalize_store(mut store: Value) -> Value {
     }
     store["version"] = json!(2);
     store
+}
+
+fn persisted_connector_sessions(project_id: &str) -> HashMap<String, Vec<Value>> {
+    let _guard = lock();
+    load_store(project_id)["connectors"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(connector_id, entry)| {
+            entry["sessions"]
+                .as_array()
+                .cloned()
+                .map(|sessions| (connector_id.clone(), sessions))
+        })
+        .collect()
+}
+
+fn persist_connector_sessions(
+    project_id: &str,
+    connector_id: &str,
+    sessions: &[Value],
+) -> Result<(), String> {
+    let _guard = lock();
+    let mut store = load_store(project_id);
+    store["connectors"][connector_id] = json!({
+        "sessions":sessions,
+        "last_seen_at":now_ms(),
+    });
+    save_store(project_id, &store)
+}
+
+fn persisted_connector_cursor(project_id: &str, connector_id: &str) -> Option<String> {
+    let _guard = lock();
+    load_store(project_id)["connectors"][connector_id]["cursor"]
+        .as_str()
+        .map(str::to_string)
+}
+
+fn persist_connector_cursor(
+    project_id: &str,
+    connector_id: &str,
+    cursor: &str,
+) -> Result<(), String> {
+    let Some(sequence) = parse_event_cursor(cursor) else {
+        return Err("invalid connector cursor".into());
+    };
+    let _guard = lock();
+    let mut store = load_store(project_id);
+    let current = store["connectors"][connector_id]["cursor"]
+        .as_str()
+        .and_then(parse_event_cursor)
+        .unwrap_or_default();
+    if sequence > current {
+        store["connectors"][connector_id]["cursor"] = json!(cursor);
+        store["connectors"][connector_id]["last_seen_at"] = json!(now_ms());
+        save_store(project_id, &store)?;
+    }
+    Ok(())
 }
 
 fn save_store(project_id: &str, value: &Value) -> Result<(), String> {
@@ -1540,6 +2280,10 @@ pub async fn send(headers: HeaderMap, Json(request): Json<Value>) -> Response {
         Ok(auth) => auth,
         Err(error) => return auth_error(&error).into_response(),
     };
+    send_authorized(auth, request).await
+}
+
+async fn send_authorized(auth: AuthContext, request: Value) -> Response {
     if !auth.permits(MESSAGE_SEND) {
         return bridge_response(
             StatusCode::FORBIDDEN,
@@ -1726,17 +2470,34 @@ pub async fn send(headers: HeaderMap, Json(request): Json<Value>) -> Response {
         None,
     );
 
-    let _ = transition(project_id, &message_id, "routing", None);
     let expiry_project = project_id.to_string();
-    let expiry_message = message_id.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(
             expires_at.saturating_sub(now_ms()),
         ))
         .await;
         expire_stale_messages(&expiry_project);
-        let _ = expiry_message;
     });
+
+    if target["location"]["kind"] == "connector" {
+        let connector_id = target["location"]["name"].as_str().unwrap_or_default();
+        let routed = if let Some(sender) = connector_sender(project_id, connector_id).await {
+            let routed = transition(project_id, &message_id, "routing", None)
+                .unwrap_or_else(|_| record.clone());
+            let frame = json!({
+                "type":"deliver",
+                "project_id":project_id,
+                "request":connector_delivery_request(&routed),
+            });
+            let _ = sender.send(frame).await;
+            routed
+        } else {
+            record.clone()
+        };
+        return bridge_response(StatusCode::ACCEPTED, routed);
+    }
+
+    let _ = transition(project_id, &message_id, "routing", None);
 
     if !target["alive"].as_bool().unwrap_or(false) {
         let failed = transition(
@@ -2092,6 +2853,7 @@ pub async fn contract(headers: HeaderMap) -> (StatusCode, Json<Value>) {
                     "external_messages.v1",
                     "agent_receipt_authority.v1",
                     "durable_events.v1",
+                    "outbound_connectors.v1",
                     "text_messages.v1"
                 ]
             },
@@ -2104,9 +2866,13 @@ pub async fn contract(headers: HeaderMap) -> (StatusCode, Json<Value>) {
             "acknowledge":"POST /api/v1/bridge/messages/{message_id}/ack (receiving daemon receipt only)",
             "reply":"POST /api/v1/bridge/messages/{message_id}/reply",
             "events":"WS /api/v1/bridge/events?cursor=OPAQUE (project derived from installation credential)",
+            "connector":"WS /api/v1/bridge/connectors (connector:connect credential with the fixed connector audience)",
             "states":["queued","routing","accepted_by_daemon","presented_to_agent_input","acknowledged_by_agent","replied","failed","expired","cancelled"],
             "addressing":"credential-derived project_id + stable target_window_id only",
             "host_operations":["directory:read","message:send","events:subscribe"],
+            "connector_operation":"connector:connect",
+            "connector_audience":CONNECTOR_AUDIENCE,
+            "connector_delivery":"desktop-initiated WSS; queued messages remain durable on the served Hub and drain after reconnect",
             "agent_authority":"acknowledgement and reply require an opaque per-message receipt installed only in the exact receiving daemon; deployment and installation credentials are rejected",
             "idempotency":"canonical project, target, correlation, content, attachments, expiry and trace metadata must match; conflicting reuse returns 409",
             "event_delivery":"project-ordered, durable, at-least-once; deduplicate by eventId and resume with cursor",
@@ -2225,6 +2991,7 @@ mod tests {
         assert_eq!(migrated["messages"][0]["history"][0]["state"], "failed");
         assert_eq!(migrated["events"], json!([]));
         assert_eq!(migrated["next_event_sequence"], 1);
+        assert_eq!(migrated["connectors"], json!({}));
     }
 
     #[test]
@@ -2366,6 +3133,148 @@ mod tests {
             &record,
             "message-1",
             &wrong_target
+        ));
+    }
+
+    #[test]
+    fn outbound_connector_requires_tls_except_on_loopback() {
+        assert!(connector_url_is_allowed(
+            "wss://longstory.example/api/v1/bridge/connectors"
+        ));
+        assert!(connector_url_is_allowed(
+            "ws://127.0.0.1:1440/api/v1/bridge/connectors"
+        ));
+        assert!(connector_url_is_allowed(
+            "ws://localhost:1440/api/v1/bridge/connectors"
+        ));
+        assert!(!connector_url_is_allowed(
+            "ws://longstory.example/api/v1/bridge/connectors"
+        ));
+        assert!(!connector_url_is_allowed("https://longstory.example"));
+        assert!(!connector_url_is_allowed(
+            "wss://secret@longstory.example/api/v1/bridge/connectors"
+        ));
+        assert!(!connector_url_is_allowed(
+            "wss://longstory.example/api/v1/bridge/connectors?token=secret"
+        ));
+        assert!(!connector_url_is_allowed(
+            "wss://longstory.example/another-path"
+        ));
+    }
+
+    #[test]
+    fn connector_credential_has_one_fixed_audience_and_operation() {
+        let mut credential = InstallationCredential {
+            installation_id: "desktop-1".into(),
+            project_id: "project-1".into(),
+            token_id: "token-1".into(),
+            token_hash: token_hash("secret"),
+            audience: CONNECTOR_AUDIENCE.into(),
+            operations: vec![CONNECTOR_CONNECT.into()],
+            created_at: 1,
+            expires_at: u64::MAX,
+            revoked_at: None,
+        };
+        assert!(credential_can_connect(&credential));
+        credential.audience = "another-audience".into();
+        assert!(!credential_can_connect(&credential));
+        credential.audience = CONNECTOR_AUDIENCE.into();
+        credential.operations = vec![MESSAGE_SEND.into()];
+        assert!(!credential_can_connect(&credential));
+        credential.operations = vec![CONNECTOR_CONNECT.into()];
+        credential.revoked_at = Some(2);
+        assert!(!credential_can_connect(&credential));
+    }
+
+    #[test]
+    fn connector_directory_cannot_widen_project_scope() {
+        let valid = json!([{
+            "window_id":"window-1",
+            "project_id":"project-1",
+            "session_name":"project-1-window-1",
+        }]);
+        assert!(valid_connector_sessions("project-1", &valid).is_some());
+        assert!(valid_connector_sessions("project-2", &valid).is_none());
+    }
+
+    #[test]
+    fn duplicate_connector_targets_require_one_connected_owner() {
+        let offline_a = json!({
+            "window_id":"window-1",
+            "location":{"kind":"connector","name":"desktop-a"},
+            "connector_connected":false,
+        });
+        let offline_b = json!({
+            "window_id":"window-1",
+            "location":{"kind":"connector","name":"desktop-b"},
+            "connector_connected":false,
+        });
+        assert!(
+            select_unambiguous_connector_sessions(vec![offline_a.clone(), offline_b.clone()])
+                .is_empty()
+        );
+        let mut online = offline_a.clone();
+        online["connector_connected"] = json!(true);
+        let selected = select_unambiguous_connector_sessions(vec![online.clone(), offline_b]);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0]["location"]["name"], "desktop-a");
+        assert!(selected[0]["connector_connected"].is_null());
+        let mut second_online = online.clone();
+        second_online["location"]["name"] = json!("desktop-b");
+        assert!(select_unambiguous_connector_sessions(vec![online, second_online]).is_empty());
+    }
+
+    #[test]
+    fn connector_repair_snapshot_is_bounded_and_keeps_newest_records() {
+        let messages = json!(
+            (0..1_100)
+                .map(|index| json!({"message_id":format!("message-{index}")}))
+                .collect::<Vec<_>>()
+        );
+        let bounded = bounded_repair_messages(&messages);
+        assert_eq!(
+            bounded.as_array().unwrap().len(),
+            MAX_CONNECTOR_REPAIR_MESSAGES
+        );
+        assert_eq!(bounded[0]["message_id"], "message-100");
+        assert_eq!(bounded[999]["message_id"], "message-1099");
+    }
+
+    #[test]
+    fn connector_events_are_bound_to_the_exact_connector_and_envelope() {
+        let served = json!({
+            "message_id":"message-1",
+            "correlation_id":"factory-27",
+            "target_window_id":"window-1",
+            "idempotency_hash":"envelope-1",
+            "location":{"kind":"connector","name":"desktop-1"}
+        });
+        let desktop = json!({
+            "message_id":"message-1",
+            "correlation_id":"factory-27",
+            "target_window_id":"window-1",
+            "idempotency_hash":"envelope-1"
+        });
+        assert!(connector_record_matches_source(
+            &served,
+            &desktop,
+            "desktop-1"
+        ));
+        assert!(!connector_record_matches_source(
+            &served,
+            &desktop,
+            "desktop-2"
+        ));
+        let changed_target = json!({
+            "message_id":"message-1",
+            "correlation_id":"factory-27",
+            "target_window_id":"window-2",
+            "idempotency_hash":"envelope-1"
+        });
+        assert!(!connector_record_matches_source(
+            &served,
+            &changed_target,
+            "desktop-1"
         ));
     }
 }

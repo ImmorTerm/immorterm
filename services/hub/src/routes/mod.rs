@@ -111,6 +111,7 @@ pub fn api_routes() -> Router {
         .route("/bridge/messages/{message_id}/ack", post(bridge::acknowledge))
         .route("/bridge/messages/{message_id}/reply", post(bridge::reply))
         .route("/bridge/events", get(bridge::event_ws))
+        .route("/bridge/connectors", get(bridge::connector_ws))
         // Claude Code paste-image cache: hover-preview for `[Image #N]` placeholders.
         .route("/claude-cache/image/{session}/{n}", get(claude_cache::image))
         // Remote ImmorTerm hosts — picker dropdown, registry aggregation, SSH tunneling.
