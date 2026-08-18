@@ -1107,6 +1107,7 @@ async fn outbound_replay_frames(project_id: &str, cursor: Option<&str>) -> Vec<V
 }
 
 async fn run_outbound_connector(url: String) {
+    let mut consecutive_failures = 0u64;
     loop {
         let Some(token) = outbound_connector_token() else {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -1130,6 +1131,17 @@ async fn run_outbound_connector(url: String) {
                 .map_err(|error| error.to_string())
         }
         .await;
+        if let Err(error) = &connection {
+            consecutive_failures = consecutive_failures.saturating_add(1);
+            if consecutive_failures == 1 || consecutive_failures.is_multiple_of(30) {
+                tracing::warn!(
+                    consecutive_failures,
+                    "Session Bridge connector failed to connect: {error}"
+                );
+            }
+        } else {
+            consecutive_failures = 0;
+        }
         if let Ok(stream) = connection {
             let (mut sink, mut source) = stream.split();
             let mut event_rx = events().subscribe();
