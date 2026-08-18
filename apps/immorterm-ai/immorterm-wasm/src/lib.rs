@@ -1025,6 +1025,7 @@ impl WasmTerminalInner {
     /// Returns true if the frame was rendered, false if GPU not initialized.
     pub fn render(&mut self) -> bool {
         // Build selection lists before borrowing renderer (avoids borrow conflict)
+        let codex_prompt_highlight = self.ai_dialect == AiDialect::Codex;
         let pseudo_sels: Vec<Selection> = self.pseudo_cursors.iter()
             .filter(|s| s.is_active)
             .cloned()
@@ -1039,6 +1040,7 @@ impl WasmTerminalInner {
             (Some(g), Some(r)) => (g, r),
             _ => return false,
         };
+        renderer.codex_prompt_highlight = codex_prompt_highlight;
 
         let surface_texture = match gpu.surface.get_current_texture() {
             Ok(t) => t,
@@ -6650,4 +6652,3 @@ impl WasmTerminal {
         }
     }
 }
-
