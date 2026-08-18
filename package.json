@@ -34,6 +34,7 @@
       "apps/extension",
       "apps/immorterm",
       "libs/*",
+      "packages/session-bridge",
       "packages/immorterm-opencode-plugin"
     ],
     "catalog": {

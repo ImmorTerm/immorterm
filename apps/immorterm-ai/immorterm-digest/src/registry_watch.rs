@@ -340,13 +340,69 @@ pub fn default_registry_path() -> PathBuf {
 
 fn load_registry(path: &Path) -> Option<RegistryFileView> {
     let data = std::fs::read_to_string(path).ok()?;
-    match serde_json::from_str::<RegistryFileView>(&data) {
-        Ok(v) => Some(v),
+    let mut file = match serde_json::from_str::<RegistryFileView>(&data) {
+        Ok(v) => v,
         Err(e) => {
             tracing::warn!("registry parse failed at {}: {}", path.display(), e);
-            None
+            return None;
+        }
+    };
+    // Union registry.d/<project_id>/<window_id>.json (the daemon's
+    // per-session files) over the global registry.json. registry.d is the
+    // authoritative source for the fields the digest keys on
+    // (ai_session_id, ai_transcript_path, tool, pid, ai_stats), so dir wins:
+    // overlay by window_id, appending dir-only windows. Absent/empty
+    // registry.d → behavior identical to reading the global file alone.
+    // RegistryEntryView never deserializes the legacy claude_session_id, so
+    // no unmirror is needed here — dedup by window_id is what matters.
+    if let Some(dir_entries) = read_registry_d(path) {
+        for entry in dir_entries {
+            match file
+                .sessions
+                .iter_mut()
+                .find(|e| e.window_id == entry.window_id)
+            {
+                Some(existing) => *existing = entry, // dir wins
+                None => file.sessions.push(entry),
+            }
         }
     }
+    Some(file)
+}
+
+/// Glob `<registry_dir>/registry.d/**/*.json` and parse each as a single
+/// session entry. Skips malformed/mid-write files rather than failing the
+/// whole load. Returns `None` when the dir is absent — the "no union" signal.
+fn read_registry_d(registry_path: &Path) -> Option<Vec<RegistryEntryView>> {
+    let root = registry_path.parent()?.join("registry.d");
+    let mut out = Vec::new();
+    let mut stack = vec![root.clone()];
+    let mut found_dir = false;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        found_dir = true;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            match serde_json::from_str::<RegistryEntryView>(&raw) {
+                Ok(v) => out.push(v),
+                // Mid-write / malformed file — skip it, don't fail the load.
+                Err(_) => continue,
+            }
+        }
+    }
+    if found_dir { Some(out) } else { None }
 }
 
 fn real_pid_alive(pid: u32) -> bool {
@@ -904,6 +960,65 @@ mod tests {
             ReconcileAction::Register { tool, .. } => assert_eq!(tool, "codex"),
             other => panic!("expected Register, got {:?}", other),
         }
+    }
+
+    /// registry.d overlays the global file: dir wins on shared window_id,
+    /// dir-only windows are appended, global-only windows are kept.
+    #[test]
+    fn registry_d_unions_over_global() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let reg = dir.path().join("registry.json");
+        // Global has w1 (stale ai_session_id) and w2 (global-only).
+        std::fs::write(
+            &reg,
+            r#"{"sessions":[
+              {"window_id":"w1","project_dir":"/p","ai_session_id":"stale"},
+              {"window_id":"w2","project_dir":"/p","ai_session_id":"global2"}
+            ]}"#,
+        )
+        .unwrap();
+        // registry.d has a fresh w1 and a dir-only w3.
+        let pd = dir.path().join("registry.d").join("proj");
+        std::fs::create_dir_all(&pd).unwrap();
+        std::fs::write(
+            pd.join("w1.json"),
+            r#"{"window_id":"w1","project_dir":"/p","ai_session_id":"fresh"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pd.join("w3.json"),
+            r#"{"window_id":"w3","project_dir":"/p","ai_session_id":"dir3"}"#,
+        )
+        .unwrap();
+
+        let file = load_registry(&reg).expect("load");
+        let by_id = |id: &str| {
+            file.sessions
+                .iter()
+                .find(|e| e.window_id == id)
+                .and_then(|e| e.ai_session_id.clone())
+        };
+        assert_eq!(file.sessions.len(), 3);
+        assert_eq!(by_id("w1").as_deref(), Some("fresh")); // dir wins
+        assert_eq!(by_id("w2").as_deref(), Some("global2")); // global-only kept
+        assert_eq!(by_id("w3").as_deref(), Some("dir3")); // dir-only added
+    }
+
+    /// No registry.d dir → identical to reading the global file alone.
+    #[test]
+    fn absent_registry_d_is_a_noop() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let reg = dir.path().join("registry.json");
+        std::fs::write(
+            &reg,
+            r#"{"sessions":[{"window_id":"w1","project_dir":"/p","ai_session_id":"s1"}]}"#,
+        )
+        .unwrap();
+        let file = load_registry(&reg).expect("load");
+        assert_eq!(file.sessions.len(), 1);
+        assert_eq!(file.sessions[0].ai_session_id.as_deref(), Some("s1"));
     }
 
     /// An unrecognised path must not override an explicit announce.

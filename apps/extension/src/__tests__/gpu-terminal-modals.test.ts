@@ -175,6 +175,51 @@ describe('Modal System — Show/Dismiss', () => {
   });
 });
 
+describe('Modal System — Session Bridge', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('shows non-secret bridge readiness and credential location', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce({ json: () => Promise.resolve({
+        enabled: true,
+        version: 1,
+        credential_file: '~/.immorterm/bridge-token',
+        active_installation_credentials: 2,
+        configured_remotes: 2,
+      }) })
+      .mockResolvedValueOnce({ json: () => Promise.resolve({ remotes: [
+        { name: 'docker', ssh_target: 'docker.example', ssh_port: 22 },
+        { name: 'build', ssh_target: 'build.example', ssh_port: 2222 },
+      ] }) }));
+    const { modals, modalBody, modalTitle } = createTestModals({ hubBaseUrl: 'http://127.0.0.1:1440' });
+    modals.showModal('bridge');
+    await vi.waitFor(() => expect(modalBody.textContent).toContain('contract v1'));
+    expect(modalTitle.textContent).toBe('Session Bridge');
+    expect(modalBody.textContent).toContain('~/.immorterm/bridge-token');
+    expect(modalBody.textContent).toContain('Deployment admin');
+    expect(modalBody.textContent).toContain('2 active · short-lived and project-scoped');
+    expect(modalBody.textContent).toContain('Configured remotes (2)');
+    expect(modalBody.textContent).toContain('docker.example:22');
+    expect(modalBody.textContent).not.toMatch(/[a-f0-9]{64}/);
+  });
+
+  it('persists bridge enablement from the toggle', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ json: () => Promise.resolve({ enabled: true, version: 1, credential_file: '~/.immorterm/bridge-token' }) })
+      .mockResolvedValueOnce({ json: () => Promise.resolve({ remotes: [] }) })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ enabled: false }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { modals, modalBody } = createTestModals({ hubBaseUrl: 'http://127.0.0.1:1440' });
+    modals.showModal('bridge');
+    await vi.waitFor(() => expect(modalBody.querySelector('[data-testid="bridge-enabled-toggle"]')).toBeTruthy());
+    (modalBody.querySelector('[data-testid="bridge-enabled-toggle"]') as HTMLElement).click();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:1440/api/v1/bridge/settings',
+      expect.objectContaining({ method: 'PUT', body: JSON.stringify({ enabled: false }) }),
+    ));
+  });
+});
+
 // ── Appearance Modal ─────────────────────────────────────────────
 
 describe('Modal System — Appearance', () => {

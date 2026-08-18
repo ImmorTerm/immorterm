@@ -24,7 +24,7 @@ import * as readline from 'readline';
 import { execFile, spawn } from 'child_process';
 import { logger } from './utils/logger';
 import { generateWindowId } from './utils/process';
-import { updateRegistryNameAndCommand, updateRegistryTitleLocked, updateRegistrySessionOrder, removeTerminalFromRegistry, removeSessionStatus, getRegistryTheme, updateRegistryTheme, updateSessionStatus, updateSessionSpeakMode, getSessionSpeakMode, markSpeakModeReset, getCurrentClaudeSessionId, getRegistryEntryByWindowId, getShelvedSessions, getClaudeResumeId, getClaudeExplicitlyExited, setActiveTerminal, getActiveTerminal, updateClaudeSessionId, removeClaudeSessionId, moveToShelvedRegistry, moveFromShelvedRegistry, removeShelvedRegistryEntry, readProjectId, resolveOwnerProjectFromPath } from './registry-client';
+import { updateRegistryNameAndCommand, updateRegistryTitleLocked, updateRegistrySessionOrder, removeTerminalFromRegistry, removeSessionStatus, getRegistryTheme, updateRegistryTheme, updateSessionStatus, updateSessionSpeakMode, getSessionSpeakMode, markSpeakModeReset, getCurrentClaudeSessionId, getRegistryEntryByWindowId, getShelvedSessions, getClaudeResumeId, getClaudeExplicitlyExited, setActiveTerminal, getActiveTerminal, updateClaudeSessionId, removeClaudeSessionId, moveToShelvedRegistry, moveFromShelvedRegistry, removeShelvedRegistryEntry, readProjectId, resolveOwnerProjectFromPath, readSessionsFromDir, mergeRegistryDOverGlobal } from './registry-client';
 import { getDescendantPids, killDescendants, findClaudePidInTree } from './utils/screen-commands';
 import { auditedKill } from './utils/kill-audit';
 import {
@@ -737,9 +737,11 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
       `media-src ${webview.cspSource} blob:`,
       // Link-preview HTML iframe loads from asWebviewUri (cspSource origin).
       // Without this, default-src='none' blocks the iframe entirely.
+      // 'self' permits the plan-artifact srcdoc iframe (sandboxed, opaque
+      // origin — its own strict CSP governs what runs inside it).
       // Google entries enable the explore-popup's embedded search via igu=1
       // (the unblocked-frame variant that doesn't set X-Frame-Options:DENY).
-      `frame-src ${webview.cspSource} https://www.google.com https://*.google.com`,
+      `frame-src 'self' ${webview.cspSource} https://www.google.com https://*.google.com`,
     ].join('; ');
 
     html = html.replace('__CSS_URI__', cssUri.toString());
@@ -2817,6 +2819,18 @@ Return ONLY a JSON object with these fields:
       // key; falls back to projectPath comparison if the project-id file
       // doesn't exist yet (brand-new project, first session never spawned).
       this.ownerProjectId = readProjectId(this.projectPath);
+
+      // Phase 2: UNION the global registry.json read above with this project's
+      // partial, AI-only per-session registry.d files (keyed by window_id).
+      // registry.d only overlays DAEMON-owned fields onto matching global
+      // entries; extension-owned fields (display_name/title/theme/status) stay
+      // from registry.json. registry.d must merge, not replace — each daemon
+      // writes only its own file, so it is never complete vs registry.json.
+      // Empty/absent dir → registry.sessions unchanged. The enrichment passes
+      // below run harmlessly either way (dir entries already carry
+      // owner_project_id, so they no-op).
+      const dirSessions = readSessionsFromDir(this.ownerProjectId);
+      registry.sessions = mergeRegistryDOverGlobal(registry.sessions, dirSessions);
 
       // Pre-filter cross-project enrichment from each entry's own session.json.
       // session.json is daemon-EXCLUSIVE (single writer, no race), so the new

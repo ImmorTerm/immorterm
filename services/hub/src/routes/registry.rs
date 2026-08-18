@@ -3,16 +3,16 @@
 //! Enables the browser-based GPU terminal, VS Code webview, and future clients
 //! to list, spawn, close, shelve, reattach, and rename daemon sessions.
 
+use axum::Json;
+use axum::extract::{Path, Query};
+use axum::http::StatusCode;
+use serde::Deserialize;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use axum::extract::{Path, Query};
-use axum::http::StatusCode;
-use axum::Json;
-use serde::Deserialize;
-use serde_json::{json, Value};
 use tracing::{info, warn};
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -53,7 +53,9 @@ fn normalize_registry_keys(root: &mut Value) {
         return;
     };
     for entry in sessions.iter_mut() {
-        let Some(obj) = entry.as_object_mut() else { continue };
+        let Some(obj) = entry.as_object_mut() else {
+            continue;
+        };
         for (legacy, modern) in LEGACY_ENTRY_KEYS {
             if let Some(v) = obj.remove(*legacy)
                 && !obj.contains_key(*modern)
@@ -114,7 +116,9 @@ fn mirror_legacy_keys(root: &mut Value) {
         return;
     };
     for entry in sessions.iter_mut() {
-        let Some(obj) = entry.as_object_mut() else { continue };
+        let Some(obj) = entry.as_object_mut() else {
+            continue;
+        };
         for (legacy, modern) in LEGACY_ENTRY_KEYS {
             if let Some(v) = obj.get(*modern).cloned() {
                 obj.insert((*legacy).to_string(), v);
@@ -128,9 +132,161 @@ fn load_registry() -> Result<Value, String> {
     let path = registry_path();
     let data = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read registry.json: {}", e))?;
-    let mut root: Value = serde_json::from_str(&data)
-        .map_err(|e| format!("Failed to parse registry.json: {}", e))?;
+    let mut root: Value =
+        serde_json::from_str(&data).map_err(|e| format!("Failed to parse registry.json: {}", e))?;
     normalize_registry_keys(&mut root);
+    Ok(root)
+}
+
+fn registry_d_dir() -> PathBuf {
+    home_dir().join(".immorterm/registry.d")
+}
+
+/// Fields the daemon owns in its per-session registry.d file. Only these are
+/// overlaid onto the matching global entry. Mirrors `DAEMON_OWNED_FIELDS` in
+/// the extension's registry-client.ts.
+const DAEMON_OWNED_FIELDS: &[&str] = &[
+    "name",
+    "pid",
+    "ws_port",
+    "session_type",
+    "ai_session_id",
+    "ai_transcript_path",
+    "ai_stats",
+    "structured_log_dir",
+    "owner_project_dir",
+    "owner_project_id",
+    "owner_project_name",
+    "worktree",
+    "is_working",
+    "needs_attention",
+    "last_activity_at",
+    "heartbeat_at",
+];
+
+/// Per-entry version of `normalize_registry_keys`: drop the legacy
+/// `claude_*` key when the modern `ai_*` key is present, else rename it.
+fn normalize_entry(obj: &mut serde_json::Map<String, Value>) {
+    for (legacy, modern) in LEGACY_ENTRY_KEYS {
+        if let Some(v) = obj.remove(*legacy)
+            && !obj.contains_key(*modern)
+        {
+            obj.insert((*modern).to_string(), v);
+        }
+    }
+}
+
+/// One-level glob of `registry.d/<project_id>/<window_id>.json`.
+fn read_registry_d_files() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(top) = std::fs::read_dir(registry_d_dir()) else {
+        return out;
+    };
+    for proj in top.flatten() {
+        let p = proj.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(&p) else {
+            continue;
+        };
+        for f in files.flatten() {
+            let fp = f.path();
+            if fp.extension().and_then(|e| e.to_str()) == Some("json") {
+                out.push(fp);
+            }
+        }
+    }
+    out
+}
+
+/// Overlay the daemon's per-session `registry.d` files over the global
+/// registry sessions, in place. For a window present in both, only the
+/// daemon-owned fields are overlaid; windows present only in `registry.d`
+/// are appended. Absent-or-empty `registry.d` => no-op (behavior identical
+/// to reading `registry.json` alone).
+///
+/// READ-ONLY: never feed the result into a write path — dir-only windows
+/// would get persisted into `registry.json` and defeat the reversibility.
+pub(crate) fn union_registry_d(root: &mut Value) {
+    let mut dir_entries: HashMap<String, serde_json::Map<String, Value>> = HashMap::new();
+    for path in read_registry_d_files() {
+        let Ok(data) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        // Skip a file caught mid-write — a partial parse is not authoritative.
+        let Ok(mut v) = serde_json::from_str::<Value>(&data) else {
+            continue;
+        };
+        let Some(obj) = v.as_object_mut() else {
+            continue;
+        };
+        normalize_entry(obj);
+        let Some(wid) = obj
+            .get("window_id")
+            .and_then(|w| w.as_str())
+            .map(String::from)
+        else {
+            continue;
+        };
+        dir_entries.insert(wid, std::mem::take(obj));
+    }
+    overlay_dir_entries(root, dir_entries);
+}
+
+/// Pure merge half of `union_registry_d`: overlay daemon-owned fields onto
+/// matching global entries by `window_id`, append dir-only windows. Split out
+/// so the merge is testable without touching the filesystem.
+fn overlay_dir_entries(
+    root: &mut Value,
+    dir_entries: HashMap<String, serde_json::Map<String, Value>>,
+) {
+    if dir_entries.is_empty() {
+        return;
+    }
+
+    if !root.get("sessions").map(|s| s.is_array()).unwrap_or(false) {
+        root["sessions"] = json!([]);
+    }
+    let sessions = root
+        .get_mut("sessions")
+        .and_then(|s| s.as_array_mut())
+        .unwrap();
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for entry in sessions.iter_mut() {
+        let Some(obj) = entry.as_object_mut() else {
+            continue;
+        };
+        let Some(wid) = obj
+            .get("window_id")
+            .and_then(|w| w.as_str())
+            .map(String::from)
+        else {
+            continue;
+        };
+        if let Some(dir_obj) = dir_entries.get(&wid) {
+            for f in DAEMON_OWNED_FIELDS {
+                if let Some(v) = dir_obj.get(*f) {
+                    obj.insert((*f).to_string(), v.clone());
+                }
+            }
+            seen.insert(wid);
+        }
+    }
+    for (wid, obj) in dir_entries {
+        if seen.contains(&wid) {
+            continue;
+        }
+        sessions.push(Value::Object(obj));
+    }
+}
+
+/// Read-only registry load with `registry.d` overlaid. NEVER feed the result
+/// into `save_registry_atomic` — see `union_registry_d`.
+fn load_registry_unioned() -> Result<Value, String> {
+    let mut root = load_registry()?;
+    union_registry_d(&mut root);
     Ok(root)
 }
 
@@ -163,15 +319,71 @@ fn load_session_status() -> Value {
 /// is impossible.
 fn save_session_status_atomic(root: &Value) -> Result<(), String> {
     let path = session_status_path();
-    if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let tmp = path.with_extension("json.tmp");
     let json = serde_json::to_string_pretty(root)
         .map_err(|e| format!("session-status serialize: {}", e))?;
-    std::fs::write(&tmp, json)
-        .map_err(|e| format!("session-status tmp write: {}", e))?;
-    std::fs::rename(&tmp, &path)
-        .map_err(|e| format!("session-status rename: {}", e))?;
+    std::fs::write(&tmp, json).map_err(|e| format!("session-status tmp write: {}", e))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("session-status rename: {}", e))?;
     Ok(())
+}
+
+/// flock(2) exclusive lock on `~/.immorterm/registry.lock`, released on drop
+/// (fd close, incl. process death). THE single shared registry lock: the same
+/// flock(2) advisory lock the Rust daemon takes (`nix::fcntl::Flock`,
+/// registry.rs `lock_registry`) and the VS Code extension takes (open with
+/// `O_EXLOCK`, registry-client.ts `withRegistryLock`). All three interoperate
+/// because all three are flock(2) on this one path — the same parity plans.rs
+/// documents for the Plans dir lock.
+///
+/// Held across a caller's whole read-modify-write so no other writer can slip a
+/// stale snapshot between the read and the write. Callers acquire it BEFORE
+/// their read; `save_registry_atomic` itself stays lock-free (it runs under the
+/// caller's guard — acquiring again would deadlock on a fresh fd).
+///
+/// Returns `None` if the lock can't be taken; degrading to unlocked is
+/// deliberate (mirrors the daemon) — the shrinkage guard + tmp+rename still
+/// apply, and losing the race beats refusing the write.
+/// ponytail: blocking exclusive flock, no timeout — matches the daemon's
+/// blocking `LockExclusive`; the lock is held only across one ~15KB
+/// read-merge-write, so contention is microseconds.
+struct RegistryLock(#[allow(dead_code)] std::fs::File);
+
+fn lock_registry() -> Option<RegistryLock> {
+    use std::os::unix::io::AsRawFd;
+    let path = home_dir().join(".immorterm/registry.lock");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .ok()?;
+    // Non-blocking with a short bounded retry (~100ms): the hub must NEVER block
+    // its request thread waiting on a contended lock — while daemons stream LLM
+    // output they hammer this lock, and a blocking wait here piles up. If we
+    // can't get it quickly, write unserialized: registry.d is the authoritative
+    // per-session source, so a racing global-file write can't lose daemon data.
+    let mut acquired = false;
+    for _ in 0..20 {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            acquired = true;
+            break;
+        }
+        if std::io::Error::last_os_error().raw_os_error() != Some(libc::EWOULDBLOCK) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    if !acquired {
+        warn!("registry lock contended — writing unserialized (registry.d is authoritative)");
+        return None;
+    }
+    Some(RegistryLock(file))
 }
 
 /// Atomic write of registry.json with a shrinkage guard.
@@ -189,7 +401,8 @@ fn save_session_status_atomic(root: &Value) -> Result<(), String> {
 fn save_registry_atomic(new_root: &Value) -> Result<(), String> {
     let path = registry_path();
 
-    let new_count = new_root.get("sessions")
+    let new_count = new_root
+        .get("sessions")
         .and_then(|s| s.as_array())
         .map(|a| a.len())
         .unwrap_or(0);
@@ -197,7 +410,8 @@ fn save_registry_atomic(new_root: &Value) -> Result<(), String> {
     if let Ok(disk_data) = std::fs::read_to_string(&path)
         && let Ok(disk_root) = serde_json::from_str::<Value>(&disk_data)
     {
-        let disk_count = disk_root.get("sessions")
+        let disk_count = disk_root
+            .get("sessions")
             .and_then(|s| s.as_array())
             .map(|a| a.len())
             .unwrap_or(0);
@@ -211,14 +425,15 @@ fn save_registry_atomic(new_root: &Value) -> Result<(), String> {
         }
     }
 
-    if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let tmp = path.with_extension("json.tmp");
     let mut out = new_root.clone();
     mirror_legacy_keys(&mut out);
     let json = serde_json::to_string_pretty(&out)
         .map_err(|e| format!("Failed to serialize registry: {}", e))?;
-    std::fs::write(&tmp, json)
-        .map_err(|e| format!("Failed to write registry tmp: {}", e))?;
+    std::fs::write(&tmp, json).map_err(|e| format!("Failed to write registry tmp: {}", e))?;
     std::fs::rename(&tmp, &path)
         .map_err(|e| format!("Failed to rename registry tmp into place: {}", e))?;
     Ok(())
@@ -274,6 +489,8 @@ pub struct ClaudeStatsSnapshot {
 /// same inline dedup pass (one session_id, one entry, newest wins) in a
 /// single read-modify-write.
 pub fn batch_sync_claude_state(updates: &[ClaudeSyncUpdate]) -> Result<(), String> {
+    // Lock spans the load through save_registry_atomic below — see lock_registry.
+    let _lock = lock_registry();
     let mut registry = load_registry()?;
     let mut dirty = false;
     {
@@ -283,8 +500,12 @@ pub fn batch_sync_claude_state(updates: &[ClaudeSyncUpdate]) -> Result<(), Strin
         for update in updates {
             let Some(entry) = sessions.iter_mut().find(|s| {
                 s.get("window_id").and_then(|v| v.as_str()) == Some(update.window_id.as_str())
-            }) else { continue };
-            let Some(obj) = entry.as_object_mut() else { continue };
+            }) else {
+                continue;
+            };
+            let Some(obj) = entry.as_object_mut() else {
+                continue;
+            };
             // Phase A: write `tool` whenever caller supplied one, regardless
             // of active state. Vendor-aware hooks announce themselves before
             // their first session_id is known.
@@ -327,7 +548,9 @@ pub fn batch_sync_claude_state(updates: &[ClaudeSyncUpdate]) -> Result<(), Strin
                 // the 2026-05-18 "sessions started empty" incident: every 30s
                 // tick reset every shelved-but-not-running session to UUID-less
                 // and the recall cascade fell through to plain `claude`.
-                if obj.remove("ai_stats").is_some() { dirty = true; }
+                if obj.remove("ai_stats").is_some() {
+                    dirty = true;
+                }
             }
         }
 
@@ -344,14 +567,21 @@ pub fn batch_sync_claude_state(updates: &[ClaudeSyncUpdate]) -> Result<(), Strin
                 .and_then(|s| s.get("start_time"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            groups.entry(sid.to_string()).or_default().push((idx, start));
+            groups
+                .entry(sid.to_string())
+                .or_default()
+                .push((idx, start));
         }
         for (_sid, mut group) in groups {
-            if group.len() <= 1 { continue; }
+            if group.len() <= 1 {
+                continue;
+            }
             group.sort_by_key(|e| std::cmp::Reverse(e.1));
             for (idx, _) in group.into_iter().skip(1) {
                 if let Some(obj) = sessions[idx].as_object_mut() {
-                    if obj.remove("ai_session_id").is_some() { dirty = true; }
+                    if obj.remove("ai_session_id").is_some() {
+                        dirty = true;
+                    }
                 }
             }
         }
@@ -385,7 +615,11 @@ fn find_daemon_binary() -> Option<PathBuf> {
         .ok()
         .and_then(|out| {
             let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if path.is_empty() { None } else { Some(PathBuf::from(path)) }
+            if path.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(path))
+            }
         })
 }
 
@@ -404,7 +638,9 @@ pub(crate) fn generate_window_id() -> String {
 /// Find WebSocket port file for a session name, return (port, daemon_pid).
 fn find_ws_port(session_name: &str) -> Option<(u16, u32)> {
     let dir = socket_dir();
-    let Ok(entries) = std::fs::read_dir(&dir) else { return None };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return None;
+    };
     let suffix = format!(".{}.ws", session_name);
 
     for entry in entries.flatten() {
@@ -444,26 +680,96 @@ async fn wait_for_ws_port(session_name: &str, timeout_ms: u64) -> Option<(u16, u
 /// registry `name` field, while the Rust daemon keys everything by
 /// `window_id`; accept either so callers don't have to pre-resolve.
 fn update_registry_entry(id: &str, updater: impl Fn(&mut Value)) -> Result<(), String> {
+    // Hold the shared lock across the read AND the write so a daemon/hub write
+    // can't land between them and get clobbered by our stale snapshot.
+    let _lock = lock_registry();
     let data = std::fs::read_to_string(registry_path())
         .map_err(|e| format!("Failed to read registry: {}", e))?;
-    let mut registry: Value = serde_json::from_str(&data)
-        .map_err(|e| format!("Failed to parse registry: {}", e))?;
+    let mut registry: Value =
+        serde_json::from_str(&data).map_err(|e| format!("Failed to parse registry: {}", e))?;
     normalize_registry_keys(&mut registry);
 
-    let sessions = registry.get_mut("sessions")
+    if !registry
+        .get("sessions")
+        .map(|s| s.is_array())
+        .unwrap_or(false)
+    {
+        registry["sessions"] = json!([]);
+    }
+    let sessions = registry
+        .get_mut("sessions")
         .and_then(|s| s.as_array_mut())
         .ok_or("No sessions array in registry")?;
 
-    let entry = sessions.iter_mut()
+    let found = sessions.iter().any(|s| {
+        s.get("window_id").and_then(|w| w.as_str()) == Some(id)
+            || s.get("name").and_then(|w| w.as_str()) == Some(id)
+    });
+
+    // The window may live ONLY in the daemon's registry.d (first-class live
+    // state). Seed a durable global entry from that file so hub-owned fields
+    // (session_status, shelved_at, display_name, …) have a home; the read-time
+    // union re-overlays live daemon-owned fields, preserving reversibility.
+    // An unknown id still errors so a typo can't mint a ghost entry.
+    if !found {
+        let seed = seed_from_registry_d(
+            registry_d_entry_for(id)
+                .ok_or_else(|| format!("No entry with window_id/name={}", id))?,
+        );
+        sessions.push(seed);
+    }
+
+    let entry = sessions
+        .iter_mut()
         .find(|s| {
             s.get("window_id").and_then(|w| w.as_str()) == Some(id)
                 || s.get("name").and_then(|w| w.as_str()) == Some(id)
         })
-        .ok_or_else(|| format!("No entry with window_id/name={}", id))?;
+        .expect("entry present after optional seed");
 
     updater(entry);
 
     save_registry_atomic(&registry)
+}
+
+/// Find a window that lives only in registry.d by window_id OR registry `name`,
+/// returned as a full `Value`. Reuses the same file scan + key-normalisation as
+/// `union_registry_d`. `None` if no per-session file matches.
+fn registry_d_entry_for(id: &str) -> Option<Value> {
+    for path in read_registry_d_files() {
+        let Ok(data) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(mut v) = serde_json::from_str::<Value>(&data) else {
+            continue;
+        };
+        let Some(obj) = v.as_object_mut() else {
+            continue;
+        };
+        normalize_entry(obj);
+        let matches = obj.get("window_id").and_then(|w| w.as_str()) == Some(id)
+            || obj.get("name").and_then(|w| w.as_str()) == Some(id);
+        if matches {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Durable global stub for a registry.d-only window: the daemon's entry minus
+/// DAEMON_OWNED_FIELDS (volatile — re-overlaid at read time by the union) but
+/// keeping `name` (stable identity + reattach key). Pure so the strip is
+/// unit-testable without the filesystem.
+fn seed_from_registry_d(mut entry: Value) -> Value {
+    if let Some(obj) = entry.as_object_mut() {
+        for f in DAEMON_OWNED_FIELDS {
+            if *f == "name" {
+                continue;
+            }
+            obj.remove(*f);
+        }
+    }
+    entry
 }
 
 /// Request-deserialize helper — accept either `window_id` or `session_name`
@@ -471,8 +777,23 @@ fn update_registry_entry(id: &str, updater: impl Fn(&mut Value)) -> Result<(), S
 /// the former). Returns the first non-empty one.
 #[allow(dead_code)]
 fn pick_id(window_id: Option<&str>, session_name: Option<&str>) -> Option<String> {
-    window_id.and_then(|s| if s.is_empty() { None } else { Some(s.to_string()) })
-        .or_else(|| session_name.and_then(|s| if s.is_empty() { None } else { Some(s.to_string()) }))
+    window_id
+        .and_then(|s| {
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        })
+        .or_else(|| {
+            session_name.and_then(|s| {
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s.to_string())
+                }
+            })
+        })
 }
 
 /// Port of terminal/naming.ts::generateNextName. Scans every entry in
@@ -485,10 +806,14 @@ fn next_auto_display_name() -> String {
     if let Ok(reg) = load_registry() {
         if let Some(sessions) = reg.get("sessions").and_then(|s| s.as_array()) {
             for s in sessions {
-                let Some(name) = s.get("display_name").and_then(|v| v.as_str()) else { continue };
+                let Some(name) = s.get("display_name").and_then(|v| v.as_str()) else {
+                    continue;
+                };
                 if let Some(caps) = re.captures(name) {
                     if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<u64>().ok()) {
-                        if n > max_n { max_n = n; }
+                        if n > max_n {
+                            max_n = n;
+                        }
                     }
                 }
             }
@@ -500,7 +825,9 @@ fn next_auto_display_name() -> String {
 /// Clean up stale .ws files for a session name (dead PIDs).
 fn cleanup_stale_ws_files(session_name: &str) {
     let dir = socket_dir();
-    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
     let suffix = format!(".{}.ws", session_name);
 
     for entry in entries.flatten() {
@@ -519,14 +846,22 @@ fn cleanup_stale_ws_files(session_name: &str) {
 
 /// Kill a daemon by PID: SIGTERM, then wait up to 5s, then SIGKILL.
 async fn kill_daemon(pid: u32) {
-    if !is_process_alive(pid) { return; }
-    unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+    if !is_process_alive(pid) {
+        return;
+    }
+    unsafe {
+        libc::kill(pid as i32, libc::SIGTERM);
+    }
     for _ in 0..50 {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        if !is_process_alive(pid) { return; }
+        if !is_process_alive(pid) {
+            return;
+        }
     }
     if is_process_alive(pid) {
-        unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
     }
 }
 
@@ -574,7 +909,8 @@ fn spawn_daemon(
         });
     }
 
-    let child = cmd.spawn()
+    let child = cmd
+        .spawn()
         .map_err(|e| format!("Failed to spawn daemon: {}", e))?;
 
     // Don't wait for the child — it's a daemon
@@ -592,15 +928,14 @@ pub struct RegistryQuery {
 
 /// Return the full registry, optionally filtered by project_dir.
 /// Also returns unique project dirs for the project picker.
-pub async fn get_registry(
-    Query(q): Query<RegistryQuery>,
-) -> Json<Value> {
-    let registry = match load_registry() {
+pub async fn get_registry(Query(q): Query<RegistryQuery>) -> Json<Value> {
+    let registry = match load_registry_unioned() {
         Ok(r) => r,
         Err(e) => return Json(json!({ "error": e })),
     };
 
-    let sessions = registry.get("sessions")
+    let sessions = registry
+        .get("sessions")
         .and_then(|s| s.as_array())
         .cloned()
         .unwrap_or_default();
@@ -617,41 +952,50 @@ pub async fn get_registry(
         .get("sessions")
         .and_then(|v| v.as_object())
         .unwrap_or_else(|| {
-            static EMPTY: std::sync::OnceLock<serde_json::Map<String, Value>> = std::sync::OnceLock::new();
+            static EMPTY: std::sync::OnceLock<serde_json::Map<String, Value>> =
+                std::sync::OnceLock::new();
             EMPTY.get_or_init(serde_json::Map::new)
         });
 
     // Enrich each session with ws_port, alive status, and speak_mode from
     // session-status.json.
-    let enriched: Vec<Value> = sessions.iter().map(|s| {
-        let mut entry = s.clone();
-        let name = s.get("name").and_then(|n| n.as_str()).unwrap_or("");
-        let pid = s.get("pid").and_then(|p| p.as_u64()).unwrap_or(0) as u32;
-        let alive = pid > 0 && is_process_alive(pid);
-        entry["alive"] = json!(alive);
-        // Phase A: back-compat default for legacy entries that pre-date the
-        // `tool` field. Default to "claude-code" so sidebar/CTX-bar clients
-        // that read this endpoint always see a tool tag.
-        if entry.get("tool").and_then(|v| v.as_str()).map(|s| s.is_empty()).unwrap_or(true) {
-            entry["tool"] = json!(DEFAULT_TOOL);
-        }
-        if alive && !name.is_empty() {
-            if let Some((port, _)) = find_ws_port(name) {
-                entry["ws_port"] = json!(port);
+    let enriched: Vec<Value> = sessions
+        .iter()
+        .map(|s| {
+            let mut entry = s.clone();
+            let name = s.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let pid = s.get("pid").and_then(|p| p.as_u64()).unwrap_or(0) as u32;
+            let alive = pid > 0 && is_process_alive(pid);
+            entry["alive"] = json!(alive);
+            // Phase A: back-compat default for legacy entries that pre-date the
+            // `tool` field. Default to "claude-code" so sidebar/CTX-bar clients
+            // that read this endpoint always see a tool tag.
+            if entry
+                .get("tool")
+                .and_then(|v| v.as_str())
+                .map(|s| s.is_empty())
+                .unwrap_or(true)
+            {
+                entry["tool"] = json!(DEFAULT_TOOL);
             }
-        }
-        if let Some(wid) = s.get("window_id").and_then(|v| v.as_str()) {
-            if let Some(status) = status_by_wid.get(wid).and_then(|v| v.as_object()) {
-                if let Some(sm) = status.get("speak_mode") {
-                    entry["speak_mode"] = sm.clone();
-                }
-                if let Some(so) = status.get("session_order") {
-                    entry["session_order"] = so.clone();
+            if alive && !name.is_empty() {
+                if let Some((port, _)) = find_ws_port(name) {
+                    entry["ws_port"] = json!(port);
                 }
             }
-        }
-        entry
-    }).collect();
+            if let Some(wid) = s.get("window_id").and_then(|v| v.as_str()) {
+                if let Some(status) = status_by_wid.get(wid).and_then(|v| v.as_object()) {
+                    if let Some(sm) = status.get("speak_mode") {
+                        entry["speak_mode"] = sm.clone();
+                    }
+                    if let Some(so) = status.get("session_order") {
+                        entry["session_order"] = so.clone();
+                    }
+                }
+            }
+            entry
+        })
+        .collect();
 
     // Filter by project_dir if specified (same logic as extension's matchesProject)
     let filtered: Vec<&Value> = if let Some(ref project) = q.project_dir {
@@ -659,10 +1003,13 @@ pub async fn get_registry(
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        enriched.iter().filter(|s| {
-            let pd = s.get("project_dir").and_then(|p| p.as_str()).unwrap_or("");
-            pd == project || pd.ends_with(&format!("/{}", project_name))
-        }).collect()
+        enriched
+            .iter()
+            .filter(|s| {
+                let pd = s.get("project_dir").and_then(|p| p.as_str()).unwrap_or("");
+                pd == project || pd.ends_with(&format!("/{}", project_name))
+            })
+            .collect()
     } else {
         enriched.iter().collect()
     };
@@ -671,33 +1018,54 @@ pub async fn get_registry(
     // Only count alive sessions for accurate project picker display
     let mut project_map: HashMap<String, (usize, u64)> = HashMap::new();
     for s in &enriched {
-        let pd = s.get("project_dir").and_then(|p| p.as_str()).unwrap_or("").to_string();
-        if pd.is_empty() { continue; }
+        let pd = s
+            .get("project_dir")
+            .and_then(|p| p.as_str())
+            .unwrap_or("")
+            .to_string();
+        if pd.is_empty() {
+            continue;
+        }
         let alive = s.get("alive").and_then(|a| a.as_bool()).unwrap_or(false);
-        if !alive { continue; }
+        if !alive {
+            continue;
+        }
         let created = s.get("created_at").and_then(|c| c.as_u64()).unwrap_or(0);
         let entry = project_map.entry(pd).or_insert((0, 0));
         entry.0 += 1;
-        if created > entry.1 { entry.1 = created; }
+        if created > entry.1 {
+            entry.1 = created;
+        }
     }
 
-    let projects: Vec<Value> = project_map.into_iter().map(|(dir, (count, last_activity))| {
-        let name = std::path::Path::new(&dir)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| dir.clone());
-        json!({
-            "project_dir": dir,
-            "name": name,
-            "session_count": count,
-            "last_activity": last_activity,
+    let projects: Vec<Value> = project_map
+        .into_iter()
+        .map(|(dir, (count, last_activity))| {
+            let name = std::path::Path::new(&dir)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| dir.clone());
+            json!({
+                "project_dir": dir,
+                "name": name,
+                "session_count": count,
+                "last_activity": last_activity,
+            })
         })
-    }).collect();
+        .collect();
 
     Json(json!({
         "sessions": filtered,
         "projects": projects,
     }))
+}
+
+/// Internal bridge consumer: use the same enriched registry contract as the
+/// public route (registry.json ∪ registry.d, alive, ws_port, status fields).
+pub(crate) async fn enriched_registry_snapshot() -> Value {
+    get_registry(Query(RegistryQuery { project_dir: None }))
+        .await
+        .0
 }
 
 // ── POST /api/v1/registry/spawn ──────────────────────────────────
@@ -710,9 +1078,7 @@ pub struct SpawnRequest {
 }
 
 /// Spawn a new immorterm-ai daemon for a project directory.
-pub async fn spawn_session(
-    Json(req): Json<SpawnRequest>,
-) -> Json<Value> {
+pub async fn spawn_session(Json(req): Json<SpawnRequest>) -> Json<Value> {
     let binary = match find_daemon_binary() {
         Some(b) => b,
         None => return Json(json!({ "error": "immorterm-ai binary not found" })),
@@ -728,13 +1094,22 @@ pub async fn spawn_session(
         .display_name
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(next_auto_display_name);
-    let shell = req.shell.unwrap_or_else(|| {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
-    });
+    let shell = req
+        .shell
+        .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string()));
 
     cleanup_stale_ws_files(&session_name);
 
-    if let Err(e) = spawn_daemon(&binary, &session_name, &req.project_dir, &window_id, &display_name, &shell, None, false) {
+    if let Err(e) = spawn_daemon(
+        &binary,
+        &session_name,
+        &req.project_dir,
+        &window_id,
+        &display_name,
+        &shell,
+        None,
+        false,
+    ) {
         return Json(json!({ "error": e }));
     }
 
@@ -771,22 +1146,26 @@ pub struct CloseRequest {
 }
 
 /// Close (kill) a daemon session.
-pub async fn close_session(
-    Json(req): Json<CloseRequest>,
-) -> Json<Value> {
-    let registry = match load_registry() {
+pub async fn close_session(Json(req): Json<CloseRequest>) -> Json<Value> {
+    let registry = match load_registry_unioned() {
         Ok(r) => r,
         Err(e) => return Json(json!({ "error": e })),
     };
 
-    let sessions = registry.get("sessions").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+    let sessions = registry
+        .get("sessions")
+        .and_then(|s| s.as_array())
+        .cloned()
+        .unwrap_or_default();
     let entry = sessions.iter().find(|s| {
         s.get("window_id").and_then(|w| w.as_str()) == Some(&req.window_id)
             || s.get("name").and_then(|w| w.as_str()) == Some(&req.window_id)
     });
 
     let Some(entry) = entry else {
-        return Json(json!({ "error": format!("No session with window_id/name={}", req.window_id) }));
+        return Json(
+            json!({ "error": format!("No session with window_id/name={}", req.window_id) }),
+        );
     };
 
     let pid = entry.get("pid").and_then(|p| p.as_u64()).unwrap_or(0) as u32;
@@ -814,31 +1193,40 @@ pub struct ShelveRequest {
 }
 
 /// Shelve a session: kill daemon, mark as shelved in registry.
-pub async fn shelve_session(
-    Json(req): Json<ShelveRequest>,
-) -> Json<Value> {
-    let registry = match load_registry() {
+pub async fn shelve_session(Json(req): Json<ShelveRequest>) -> Json<Value> {
+    let registry = match load_registry_unioned() {
         Ok(r) => r,
         Err(e) => return Json(json!({ "error": e })),
     };
 
-    let sessions = registry.get("sessions").and_then(|s| s.as_array()).cloned().unwrap_or_default();
-    let entry = sessions.iter().find(|s| {
-        s.get("window_id").and_then(|w| w.as_str()) == Some(&req.window_id)
-    });
+    let sessions = registry
+        .get("sessions")
+        .and_then(|s| s.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let entry = sessions
+        .iter()
+        .find(|s| s.get("window_id").and_then(|w| w.as_str()) == Some(&req.window_id));
 
     let Some(entry) = entry else {
         return Json(json!({ "error": format!("No session with window_id={}", req.window_id) }));
     };
 
-    let ai_session_id = entry.get("ai_session_id")
+    let ai_session_id = entry
+        .get("ai_session_id")
         .and_then(|c| c.as_str())
         .map(|s| s.to_string());
     let pid = entry.get("pid").and_then(|p| p.as_u64()).unwrap_or(0) as u32;
 
-    if pid > 0 { kill_daemon(pid).await; }
+    if pid > 0 {
+        kill_daemon(pid).await;
+    }
 
-    let session_name = entry.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+    let session_name = entry
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("")
+        .to_string();
     if !session_name.is_empty() {
         cleanup_stale_ws_files(&session_name);
     }
@@ -874,28 +1262,50 @@ pub struct ReattachRequest {
 }
 
 /// Reattach a shelved session: spawn fresh daemon with original config.
-pub async fn reattach_session(
-    Json(req): Json<ReattachRequest>,
-) -> Json<Value> {
-    let registry = match load_registry() {
+pub async fn reattach_session(Json(req): Json<ReattachRequest>) -> Json<Value> {
+    let registry = match load_registry_unioned() {
         Ok(r) => r,
         Err(e) => return Json(json!({ "error": e })),
     };
 
-    let sessions = registry.get("sessions").and_then(|s| s.as_array()).cloned().unwrap_or_default();
-    let entry = sessions.iter().find(|s| {
-        s.get("window_id").and_then(|w| w.as_str()) == Some(&req.window_id)
-    });
+    let sessions = registry
+        .get("sessions")
+        .and_then(|s| s.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let entry = sessions
+        .iter()
+        .find(|s| s.get("window_id").and_then(|w| w.as_str()) == Some(&req.window_id));
 
     let Some(entry) = entry else {
-        return Json(json!({ "error": format!("No shelved session with window_id={}", req.window_id) }));
+        return Json(
+            json!({ "error": format!("No shelved session with window_id={}", req.window_id) }),
+        );
     };
 
-    let project_dir = entry.get("project_dir").and_then(|p| p.as_str()).unwrap_or("").to_string();
-    let display_name = entry.get("display_name").and_then(|d| d.as_str()).unwrap_or("immorterm").to_string();
-    let ai_session_id = entry.get("ai_session_id").and_then(|c| c.as_str()).map(|s| s.to_string());
-    let title_locked = entry.get("title_locked").and_then(|t| t.as_bool()).unwrap_or(false);
-    let session_name = entry.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+    let project_dir = entry
+        .get("project_dir")
+        .and_then(|p| p.as_str())
+        .unwrap_or("")
+        .to_string();
+    let display_name = entry
+        .get("display_name")
+        .and_then(|d| d.as_str())
+        .unwrap_or("immorterm")
+        .to_string();
+    let ai_session_id = entry
+        .get("ai_session_id")
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string());
+    let title_locked = entry
+        .get("title_locked")
+        .and_then(|t| t.as_bool())
+        .unwrap_or(false);
+    let session_name = entry
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("")
+        .to_string();
 
     if project_dir.is_empty() || session_name.is_empty() {
         return Json(json!({ "error": "Shelved entry missing project_dir or name" }));
@@ -911,8 +1321,14 @@ pub async fn reattach_session(
     cleanup_stale_ws_files(&session_name);
 
     if let Err(e) = spawn_daemon(
-        &binary, &session_name, &project_dir, &req.window_id,
-        &display_name, &shell, ai_session_id.as_deref(), title_locked,
+        &binary,
+        &session_name,
+        &project_dir,
+        &req.window_id,
+        &display_name,
+        &shell,
+        ai_session_id.as_deref(),
+        title_locked,
     ) {
         return Json(json!({ "error": e }));
     }
@@ -926,7 +1342,10 @@ pub async fn reattach_session(
                 warn!("Failed to update registry after reattach: {}", e);
             }
 
-            info!("Reattached session {} on ws://127.0.0.1:{}", session_name, port);
+            info!(
+                "Reattached session {} on ws://127.0.0.1:{}",
+                session_name, port
+            );
             Json(json!({
                 "session_name": session_name,
                 "window_id": req.window_id,
@@ -936,12 +1355,10 @@ pub async fn reattach_session(
                 "ai_session_id": ai_session_id,
             }))
         }
-        None => {
-            Json(json!({
-                "error": "Timeout waiting for daemon WebSocket port after reattach",
-                "session_name": session_name,
-            }))
-        }
+        None => Json(json!({
+            "error": "Timeout waiting for daemon WebSocket port after reattach",
+            "session_name": session_name,
+        })),
     }
 }
 
@@ -956,16 +1373,17 @@ pub struct RenameRequest {
 }
 
 /// Rename a session (updates display_name and locks title).
-pub async fn rename_session(
-    Json(req): Json<RenameRequest>,
-) -> Json<Value> {
+pub async fn rename_session(Json(req): Json<RenameRequest>) -> Json<Value> {
     let new_name = req.display_name.clone();
     match update_registry_entry(&req.window_id, |entry| {
         entry["display_name"] = json!(new_name);
         entry["title_locked"] = json!(true);
     }) {
         Ok(()) => {
-            info!("Renamed session {} to '{}'", req.window_id, req.display_name);
+            info!(
+                "Renamed session {} to '{}'",
+                req.window_id, req.display_name
+            );
             Json(json!({ "success": true }))
         }
         Err(e) => Json(json!({ "error": e })),
@@ -1011,7 +1429,8 @@ pub struct SpeakModeRequest {
 pub async fn set_speak_mode(Json(req): Json<SpeakModeRequest>) -> Json<Value> {
     let mut root = load_session_status();
     let sessions_val = root
-        .as_object_mut().map(|m| m.entry("sessions".to_string()).or_insert_with(|| json!({})));
+        .as_object_mut()
+        .map(|m| m.entry("sessions".to_string()).or_insert_with(|| json!({})));
     let Some(sessions) = sessions_val.and_then(|v| v.as_object_mut()) else {
         return Json(json!({ "error": "session-status.sessions is not an object" }));
     };
@@ -1033,7 +1452,11 @@ pub async fn set_speak_mode(Json(req): Json<SpeakModeRequest>) -> Json<Value> {
     info!(
         "[speak-mode] window_id={} {} (session-status.json)",
         req.window_id,
-        if clear { "cleared".to_string() } else { format!("= {}", mode) }
+        if clear {
+            "cleared".to_string()
+        } else {
+            format!("= {}", mode)
+        }
     );
     Json(json!({ "success": true, "speak_mode": if clear { Value::Null } else { json!(mode) } }))
 }
@@ -1084,7 +1507,8 @@ pub struct ReorderRequest {
 pub async fn reorder_sessions(Json(req): Json<ReorderRequest>) -> Json<Value> {
     let mut root = load_session_status();
     let sessions_val = root
-        .as_object_mut().map(|m| m.entry("sessions".to_string()).or_insert_with(|| json!({})));
+        .as_object_mut()
+        .map(|m| m.entry("sessions".to_string()).or_insert_with(|| json!({})));
     let Some(sessions) = sessions_val.and_then(|v| v.as_object_mut()) else {
         return Json(json!({ "error": "session-status.sessions is not an object" }));
     };
@@ -1115,12 +1539,18 @@ pub async fn reorder_sessions(Json(req): Json<ReorderRequest>) -> Json<Value> {
 #[derive(Deserialize)]
 pub struct SessionStatusSetRequest {
     pub window_id: String,
-    #[serde(default)] pub status: Option<String>,
-    #[serde(default)] pub shelved_at: Option<u64>,
-    #[serde(default)] pub claude_resume_id: Option<String>,
-    #[serde(default)] pub claude_explicitly_exited: Option<bool>,
-    #[serde(default)] pub session_order: Option<u64>,
-    #[serde(default)] pub speak_mode: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub shelved_at: Option<u64>,
+    #[serde(default)]
+    pub claude_resume_id: Option<String>,
+    #[serde(default)]
+    pub claude_explicitly_exited: Option<bool>,
+    #[serde(default)]
+    pub session_order: Option<u64>,
+    #[serde(default)]
+    pub speak_mode: Option<String>,
 }
 
 pub async fn session_status_set(Json(req): Json<SessionStatusSetRequest>) -> Json<Value> {
@@ -1129,7 +1559,8 @@ pub async fn session_status_set(Json(req): Json<SessionStatusSetRequest>) -> Jso
     }
     let mut root = load_session_status();
     let sessions_val = root
-        .as_object_mut().map(|m| m.entry("sessions".to_string()).or_insert_with(|| json!({})));
+        .as_object_mut()
+        .map(|m| m.entry("sessions".to_string()).or_insert_with(|| json!({})));
     let Some(sessions) = sessions_val.and_then(|v| v.as_object_mut()) else {
         return Json(json!({ "error": "session-status.sessions is not an object" }));
     };
@@ -1241,13 +1672,18 @@ pub async fn set_active_terminal(Json(req): Json<ActiveTerminalRequest>) -> Json
     }
     let mut root = load_session_status();
     let active_val = root
-        .as_object_mut().map(|m| m.entry("active".to_string()).or_insert_with(|| json!({})));
+        .as_object_mut()
+        .map(|m| m.entry("active".to_string()).or_insert_with(|| json!({})));
     let Some(active) = active_val.and_then(|v| v.as_object_mut()) else {
         return Json(json!({ "error": "session-status.active is not an object" }));
     };
     match req.window_id.as_deref() {
-        Some(wid) if !wid.is_empty() => { active.insert(ty.to_string(), json!(wid)); }
-        _ => { active.remove(ty); }
+        Some(wid) if !wid.is_empty() => {
+            active.insert(ty.to_string(), json!(wid));
+        }
+        _ => {
+            active.remove(ty);
+        }
     }
     if let Err(e) = save_session_status_atomic(&root) {
         return Json(json!({ "error": e }));
@@ -1380,8 +1816,7 @@ fn apply_session_link(
         // Stash the AI tool's pid alongside the snapshot fields the
         // claude_tracker writes. Doesn't conflict with the registry-level
         // `pid` (that one is the immorterm-ai daemon's pid).
-        obj.entry("ai_stats")
-            .or_insert_with(|| json!({}));
+        obj.entry("ai_stats").or_insert_with(|| json!({}));
         if let Some(stats) = obj.get_mut("ai_stats").and_then(|v| v.as_object_mut()) {
             stats.insert("pid".into(), json!(p));
         }
@@ -1400,6 +1835,9 @@ pub async fn session_link(Json(req): Json<SessionLinkRequest>) -> Json<Value> {
         }));
     }
 
+    // Lock spans the read through save_registry_atomic — no .await in between,
+    // so the guard stays on this thread. See lock_registry.
+    let _lock = lock_registry();
     let path = registry_path();
     let data = match std::fs::read_to_string(&path) {
         Ok(d) => d,
@@ -1507,10 +1945,7 @@ pub fn lookup_window(registry: &Value, window_id: &str) -> Result<Value, WindowL
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
 
-    let ai_stats = entry
-        .get("ai_stats")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+    let ai_stats = entry.get("ai_stats").cloned().unwrap_or_else(|| json!({}));
 
     let mut view = json!({
         "window_id":         window_id,
@@ -1529,7 +1964,7 @@ pub fn lookup_window(registry: &Value, window_id: &str) -> Result<Value, WindowL
 }
 
 pub async fn get_window(Path(window_id): Path<String>) -> (StatusCode, Json<Value>) {
-    let registry = match load_registry() {
+    let registry = match load_registry_unioned() {
         Ok(r) => r,
         Err(e) => {
             warn!("[/registry/window/{}] parse failure: {}", window_id, e);
@@ -1573,7 +2008,10 @@ pub fn lookup_by_transcript(registry: &Value, path: &str) -> Result<Value, Windo
     // then fall back to top-level ai_transcript_path. tool_history is
     // the precedence source per v4 §4.2.
     for entry in sessions {
-        let window_id = entry.get("window_id").and_then(|v| v.as_str()).unwrap_or("");
+        let window_id = entry
+            .get("window_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if window_id.is_empty() {
             continue;
         }
@@ -1593,7 +2031,10 @@ pub fn lookup_by_transcript(registry: &Value, path: &str) -> Result<Value, Windo
         // Fallback: legacy top-level field. Only consider if no tool_history
         // claim found above. Match exact path.
         if entry.get("ai_transcript_path").and_then(|v| v.as_str()) == Some(path) {
-            let tool = entry.get("tool").cloned().unwrap_or_else(|| json!("claude-code"));
+            let tool = entry
+                .get("tool")
+                .cloned()
+                .unwrap_or_else(|| json!("claude-code"));
             return Ok(json!({
                 "window_id":         window_id,
                 "vendor_session_id": entry.get("ai_session_id").cloned().unwrap_or(Value::Null),
@@ -1607,7 +2048,7 @@ pub fn lookup_by_transcript(registry: &Value, path: &str) -> Result<Value, Windo
 }
 
 pub async fn get_by_transcript(Query(q): Query<ByTranscriptQuery>) -> (StatusCode, Json<Value>) {
-    let registry = match load_registry() {
+    let registry = match load_registry_unioned() {
         Ok(r) => r,
         Err(e) => {
             warn!("[/registry/by-transcript] parse failure: {}", e);
@@ -1689,7 +2130,10 @@ pub fn apply_session_end(
         }
         Some(_) => {
             // tie-broken by first write — do NOT overwrite
-            Ok((false, "already ended (exit_reason mismatch — first write wins)".to_string()))
+            Ok((
+                false,
+                "already ended (exit_reason mismatch — first write wins)".to_string(),
+            ))
         }
         None => {
             let obj = row.as_object_mut().expect("row is object");
@@ -1733,6 +2177,9 @@ pub async fn session_end(Json(req): Json<SessionEndRequest>) -> (StatusCode, Jso
         );
     }
 
+    // Lock spans the read through save_registry_atomic — no .await in between,
+    // so the guard stays on this thread. See lock_registry.
+    let _lock = lock_registry();
     let path = registry_path();
     let data = match std::fs::read_to_string(&path) {
         Ok(d) => d,
@@ -1771,10 +2218,7 @@ pub async fn session_end(Json(req): Json<SessionEndRequest>) -> (StatusCode, Jso
             // atomic tmp+rename in a single place. The v4 §3 strict invariant
             // around fsync(file) + fsync(parent_dir) is still TODO.
             if let Err(e) = save_registry_atomic(&registry) {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(json!({ "error": e })),
-                );
+                return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": e })));
             }
             let _ = path;
             (
@@ -1830,6 +2274,104 @@ mod tests {
     }
 
     #[test]
+    fn union_overlays_daemon_fields_and_appends_dir_only() {
+        let mut reg = sample_registry();
+        let mut dir: HashMap<String, serde_json::Map<String, Value>> = HashMap::new();
+        // Overlay onto an existing window: only daemon-owned fields win;
+        // non-daemon fields on the global entry (project_dir) are untouched.
+        let mut overlay = serde_json::Map::new();
+        overlay.insert("window_id".into(), json!("11111-aaaa"));
+        overlay.insert("pid".into(), json!(4242));
+        overlay.insert("ai_session_id".into(), json!("sess-xyz"));
+        overlay.insert("is_working".into(), json!(true));
+        overlay.insert("needs_attention".into(), json!(false));
+        overlay.insert("last_activity_at".into(), json!(1_786_700_000_000_u64));
+        overlay.insert("heartbeat_at".into(), json!(1_786_700_001_000_u64));
+        overlay.insert("created_at".into(), json!(999)); // not daemon-owned → ignored
+        dir.insert("11111-aaaa".into(), overlay);
+        // Dir-only window → appended whole.
+        let mut only = serde_json::Map::new();
+        only.insert("window_id".into(), json!("33333-cccc"));
+        only.insert("ai_session_id".into(), json!("sess-new"));
+        dir.insert("33333-cccc".into(), only);
+
+        overlay_dir_entries(&mut reg, dir);
+        let sessions = reg["sessions"].as_array().unwrap();
+        assert_eq!(sessions.len(), 3, "dir-only window appended");
+        let first = &sessions[0];
+        assert_eq!(first["pid"], json!(4242), "daemon pid overlaid");
+        assert_eq!(first["ai_session_id"], json!("sess-xyz"));
+        assert_eq!(first["is_working"], json!(true));
+        assert_eq!(first["needs_attention"], json!(false));
+        assert_eq!(first["last_activity_at"], json!(1_786_700_000_000_u64));
+        assert_eq!(first["heartbeat_at"], json!(1_786_700_001_000_u64));
+        assert_eq!(
+            first["project_dir"],
+            json!("/tmp/demo"),
+            "global-only field kept"
+        );
+        assert!(
+            first.get("created_at").is_none(),
+            "non-daemon field not overlaid"
+        );
+    }
+
+    #[test]
+    fn seed_from_registry_d_strips_volatile_daemon_fields_keeps_identity() {
+        // A full registry.d entry (the daemon serializes the whole RegistryEntry).
+        let daemon = json!({
+            "window_id": "9-z",
+            "name": "demo-ai-9-z",
+            "project_dir": "/tmp/demo",
+            "display_name": "immorterm-3",
+            "pid": 5151,
+            "ws_port": 40001,
+            "ai_session_id": "sess-live",
+            "session_type": "ai",
+            "title_locked": true,
+        });
+        let seed = seed_from_registry_d(daemon);
+        // Volatile daemon-owned fields dropped so the read-time union re-supplies
+        // them (reversibility): a dead pid/ws_port must never freeze into registry.json.
+        assert!(seed.get("pid").is_none(), "pid stripped");
+        assert!(seed.get("ws_port").is_none(), "ws_port stripped");
+        assert!(
+            seed.get("ai_session_id").is_none(),
+            "ai_session_id stripped"
+        );
+        assert!(seed.get("session_type").is_none(), "session_type stripped");
+        // Identity + durable hub-relevant fields survive so reattach/rename work.
+        assert_eq!(
+            seed["name"],
+            json!("demo-ai-9-z"),
+            "name kept (reattach key)"
+        );
+        assert_eq!(seed["window_id"], json!("9-z"));
+        assert_eq!(
+            seed["project_dir"],
+            json!("/tmp/demo"),
+            "reattach needs project_dir"
+        );
+        assert_eq!(seed["display_name"], json!("immorterm-3"));
+        assert_eq!(seed["title_locked"], json!(true));
+    }
+
+    #[test]
+    fn normalize_entry_drops_legacy_when_modern_present() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("claude_session_id".into(), json!("legacy"));
+        obj.insert("ai_session_id".into(), json!("modern"));
+        normalize_entry(&mut obj);
+        assert_eq!(obj["ai_session_id"], json!("modern"));
+        assert!(obj.get("claude_session_id").is_none());
+        // Rename path: legacy present, modern absent.
+        let mut obj2 = serde_json::Map::new();
+        obj2.insert("claude_session_id".into(), json!("legacy"));
+        normalize_entry(&mut obj2);
+        assert_eq!(obj2["ai_session_id"], json!("legacy"));
+    }
+
+    #[test]
     fn session_link_stamps_tool_and_session_fields() {
         let mut reg = sample_registry();
         apply_session_link(
@@ -1854,15 +2396,8 @@ mod tests {
     #[test]
     fn session_link_rejects_unknown_window_id() {
         let mut reg = sample_registry();
-        let err = apply_session_link(
-            &mut reg,
-            "no-such-window",
-            "codex",
-            "sess",
-            "/tmp/x",
-            None,
-        )
-        .unwrap_err();
+        let err = apply_session_link(&mut reg, "no-such-window", "codex", "sess", "/tmp/x", None)
+            .unwrap_err();
         assert_eq!(err, "window_id not found");
     }
 
@@ -1885,8 +2420,15 @@ mod tests {
     #[test]
     fn valid_tools_includes_phase_a_vendors() {
         for vendor in [
-            "claude-code", "cursor", "codex", "windsurf",
-            "cline", "opencode", "gemini", "aider", "copilot",
+            "claude-code",
+            "cursor",
+            "codex",
+            "windsurf",
+            "cline",
+            "opencode",
+            "gemini",
+            "aider",
+            "copilot",
         ] {
             assert!(VALID_TOOLS.contains(&vendor), "missing {}", vendor);
         }
@@ -2059,7 +2601,10 @@ mod tests {
         assert_eq!(view["window_id"], json!("11111-aaaa"));
         assert_eq!(view["tool"], json!("claude-code"));
         assert_eq!(view["vendor_session_id"], json!("uuid-current"));
-        assert_eq!(view["transcript_path"], json!("/tmp/transcripts/uuid-current.jsonl"));
+        assert_eq!(
+            view["transcript_path"],
+            json!("/tmp/transcripts/uuid-current.jsonl")
+        );
         assert_eq!(view["project_dir"], json!("/tmp/demo"));
         assert_eq!(view["tool_history"].as_array().unwrap().len(), 2);
         assert_eq!(view["ai_alive"], json!(false), "pid=0 -> not alive");
@@ -2169,7 +2714,10 @@ mod tests {
         assert!(!updated);
         assert!(reason.contains("exit_reason matches"));
         // ended_at NOT overwritten
-        assert_eq!(reg["sessions"][0]["tool_history"][1]["ended_at"], json!("t1"));
+        assert_eq!(
+            reg["sessions"][0]["tool_history"][1]["ended_at"],
+            json!("t1")
+        );
     }
 
     #[test]
@@ -2197,8 +2745,8 @@ mod tests {
     #[test]
     fn session_end_rejects_session_not_in_history() {
         let mut reg = sample_with_history();
-        let err =
-            apply_session_end(&mut reg, "11111-aaaa", "unknown-sid", "idle_timeout", "t").unwrap_err();
+        let err = apply_session_end(&mut reg, "11111-aaaa", "unknown-sid", "idle_timeout", "t")
+            .unwrap_err();
         assert!(err.contains("not in tool_history"));
     }
 
@@ -2267,11 +2815,20 @@ mod tests {
 
     #[test]
     fn infer_tool_from_transcript_only_matches_known_vendor_dirs() {
-        assert_eq!(infer_tool_from_transcript("/home/u/.codex/sessions/a.jsonl"), Some("codex"));
-        assert_eq!(infer_tool_from_transcript("/home/u/.claude/projects/a.jsonl"), Some("claude-code"));
+        assert_eq!(
+            infer_tool_from_transcript("/home/u/.codex/sessions/a.jsonl"),
+            Some("codex")
+        );
+        assert_eq!(
+            infer_tool_from_transcript("/home/u/.claude/projects/a.jsonl"),
+            Some("claude-code")
+        );
         assert_eq!(infer_tool_from_transcript("/var/tmp/a.jsonl"), None);
         assert_eq!(infer_tool_from_transcript(""), None);
         // A project literally named ".codexstuff" must not match.
-        assert_eq!(infer_tool_from_transcript("/home/u/.codexstuff/a.jsonl"), None);
+        assert_eq!(
+            infer_tool_from_transcript("/home/u/.codexstuff/a.jsonl"),
+            None
+        );
     }
 }

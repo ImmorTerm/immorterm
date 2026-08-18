@@ -1,5 +1,6 @@
 //! REST API routes for immorterm-hub.
 
+pub mod bridge;
 pub mod claude_cache;
 pub mod config_api;
 pub mod digest_api;
@@ -19,6 +20,9 @@ use axum::Router;
 
 /// Build all /api/v1 routes.
 pub fn api_routes() -> Router {
+    // Materialize the 0600 bridge credential at hub startup so local clients
+    // and configured remote hubs never need an unauthenticated bootstrap call.
+    bridge::initialize();
     Router::new()
         // Registry (session management)
         .route("/registry", get(registry::get_registry))
@@ -86,6 +90,27 @@ pub fn api_routes() -> Router {
         .route("/tasks/{id}/link", post(tasks::link_task))
         .route("/tasks/{id}/unlink", post(tasks::unlink_task))
         .route("/tasks/{id}/enrich", post(tasks::enrich_task))
+        // Authenticated channel-neutral session bridge. Targets are resolved
+        // strictly through the canonical project registry.
+        .route("/bridge/status", get(bridge::status))
+        .route("/bridge/settings", put(bridge::update_settings))
+        .route("/bridge/rotate-token", post(bridge::rotate_token))
+        .route(
+            "/bridge/installations/credentials",
+            post(bridge::provision_installation_credential),
+        )
+        .route(
+            "/bridge/installations/{installation_id}/credentials/{token_id}",
+            axum::routing::delete(bridge::revoke_installation_credential),
+        )
+        .route("/bridge/contract", get(bridge::contract))
+        .route("/bridge/identity", get(bridge::identity))
+        .route("/bridge/directory", get(bridge::directory))
+        .route("/bridge/messages", post(bridge::send))
+        .route("/bridge/messages/{message_id}/cancel", post(bridge::cancel))
+        .route("/bridge/messages/{message_id}/ack", post(bridge::acknowledge))
+        .route("/bridge/messages/{message_id}/reply", post(bridge::reply))
+        .route("/bridge/events", get(bridge::event_ws))
         // Claude Code paste-image cache: hover-preview for `[Image #N]` placeholders.
         .route("/claude-cache/image/{session}/{n}", get(claude_cache::image))
         // Remote ImmorTerm hosts — picker dropdown, registry aggregation, SSH tunneling.

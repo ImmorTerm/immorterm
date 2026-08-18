@@ -51,6 +51,7 @@ syntect = { version = "5", default-features = false, features = ["default-syntax
 
 # RFC3339 timestamps for tool_history entries written by session-link.
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+sha2 = "0.10"
 
 # Gitignore-aware file walking for the file-browser sidebar's non-git
 # fallback (/api/v1/files/index, /api/v1/files/grep). Mirrors ripgrep's

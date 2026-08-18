@@ -87,17 +87,122 @@ function getRegistryPath(): string {
 	return path.join(IMMORTERM_GLOBAL_DIR, "registry.json");
 }
 
+// Per-session files the daemon dual-writes at registry.d/<project_id>/<window_id>.json
+// (AI sessions only). Union-overlaid over the global registry.json below.
+const REGISTRY_DIR = path.join(IMMORTERM_GLOBAL_DIR, "registry.d");
+
+// Legacy → modern key renames. Daemon dual-writes both; drop the legacy key when
+// the modern one is present so an entry never carries two different session ids.
+const LEGACY_ENTRY_KEYS: ReadonlyArray<readonly [string, string]> = [
+	["claude_session_id", "ai_session_id"],
+	["claude_transcript_path", "ai_transcript_path"],
+	["claude_stats", "ai_stats"],
+];
+
+// Fields the Rust daemon is the SINGLE writer of — the only ones a per-session
+// registry.d file may overlay onto a global entry.
+const DAEMON_OWNED_FIELDS = [
+	"name",
+	"pid",
+	"ws_port",
+	"session_type",
+	"ai_session_id",
+	"ai_transcript_path",
+	"ai_stats",
+	"structured_log_dir",
+	"owner_project_dir",
+	"owner_project_id",
+	"owner_project_name",
+	"worktree",
+] as const;
+
+function normalizeEntry(entry: RegistryEntry): void {
+	const e = entry as unknown as Record<string, unknown>;
+	for (const [legacy, modern] of LEGACY_ENTRY_KEYS) {
+		if (legacy in e) {
+			if (e[modern] === undefined) e[modern] = e[legacy];
+			delete e[legacy];
+		}
+	}
+}
+
+/** Glob registry.d/<project_id>/*.json across ALL projects, normalized. Returns
+ *  null when the dir is absent or yields no usable entries — additive/reversible. */
+function readSessionsFromDir(): RegistryEntry[] | null {
+	let projectDirs: string[];
+	try {
+		projectDirs = fs
+			.readdirSync(REGISTRY_DIR, { withFileTypes: true })
+			.filter((d) => d.isDirectory())
+			.map((d) => d.name);
+	} catch {
+		return null; // dir missing → fall back to global file
+	}
+	const sessions: RegistryEntry[] = [];
+	for (const proj of projectDirs) {
+		const dir = path.join(REGISTRY_DIR, proj);
+		let files: string[];
+		try {
+			files = fs.readdirSync(dir).filter((f) => f.endsWith(".json"));
+		} catch {
+			continue;
+		}
+		for (const f of files) {
+			try {
+				const entry = JSON.parse(
+					fs.readFileSync(path.join(dir, f), "utf-8"),
+				) as RegistryEntry;
+				normalizeEntry(entry);
+				sessions.push(entry);
+			} catch {
+				// malformed/partial file mid-write — skip it
+			}
+		}
+	}
+	return sessions.length > 0 ? sessions : null;
+}
+
+/** Field-level UNION of the global registry.json and the AI-only per-session
+ *  registry.d files, keyed by window_id. registry.d never REPLACES a global
+ *  entry — only overlays its daemon-owned fields; dir-only windows are added;
+ *  global-only windows kept. Empty/absent dir → global unchanged. */
+function mergeRegistryDOverGlobal(
+	globalSessions: RegistryEntry[],
+	dirSessions: RegistryEntry[] | null,
+): RegistryEntry[] {
+	for (const e of globalSessions) normalizeEntry(e);
+	if (!dirSessions || dirSessions.length === 0) return globalSessions;
+
+	const byWindow = new Map<string, RegistryEntry>();
+	for (const e of globalSessions) byWindow.set(e.window_id, { ...e });
+
+	for (const d of dirSessions) {
+		const g = byWindow.get(d.window_id);
+		if (!g) {
+			byWindow.set(d.window_id, d);
+			continue;
+		}
+		const dr = d as unknown as Record<string, unknown>;
+		const gr = g as unknown as Record<string, unknown>;
+		for (const f of DAEMON_OWNED_FIELDS) {
+			if (dr[f] !== undefined) gr[f] = dr[f];
+		}
+	}
+	return [...byWindow.values()];
+}
+
 export function readRegistry(): Registry {
 	const registryPath = getRegistryPath();
+	let sessions: RegistryEntry[] = [];
 	try {
 		if (fs.existsSync(registryPath)) {
 			const raw = fs.readFileSync(registryPath, "utf-8");
-			return JSON.parse(raw) as Registry;
+			sessions = (JSON.parse(raw) as Registry).sessions ?? [];
 		}
 	} catch {
 		// Corrupted or missing
 	}
-	return { sessions: [] };
+	return { sessions: mergeRegistryDOverGlobal(sessions, readSessionsFromDir()) };
 }
 
 // ---------------------------------------------------------------------------

@@ -367,6 +367,13 @@ const SHARE_CONTEXT_HOOK_FILE = 'immorterm-share-context.sh';
 const TASK_CONTEXT_HOOK_FILE = 'immorterm-task-context.sh';
 const USER_PROMPT_HOOK_FILE = 'immorterm-user-prompt.sh';
 const SPEAK_MODE_HOOK_FILE = 'immorterm-speak-mode.sh';
+// Reusable per-turn "discipline injector" (imm #16). Shared stamp state-machine
+// sourced by the plan/tasks discipline sub-hooks so all toggles behave alike:
+// full inject on first turn/change, ~20-tok reminder while stable, one-shot
+// reset on toggle-off, silent when default.
+const DISCIPLINE_LIB_FILE = '_immorterm-discipline.sh';
+const PLAN_DISCIPLINE_HOOK_FILE = 'immorterm-plan-discipline.sh';
+const TASKS_DISCIPLINE_HOOK_FILE = 'immorterm-tasks-discipline.sh';
 /** @deprecated Replaced by PLAN_PRESAVE_HOOK_FILE — kept in LEGACY_HOOK_FILES for cleanup */
 const PLAN_EXTRACTION_LEGACY = 'immorterm-plan-extraction.sh';
 const PLAN_PRETOOL_DIAG_LEGACY = 'immorterm-plan-pretool-diag.sh';
@@ -408,6 +415,9 @@ const ALL_HOOK_FILES = [
   TASK_CONTEXT_HOOK_FILE,
   USER_PROMPT_HOOK_FILE,
   SPEAK_MODE_HOOK_FILE,
+  DISCIPLINE_LIB_FILE,
+  PLAN_DISCIPLINE_HOOK_FILE,
+  TASKS_DISCIPLINE_HOOK_FILE,
   ENV_HELPER_FILE,
 ];
 
@@ -519,7 +529,17 @@ fi
 # but IMMORTERM_PROJECT_ID must still be scoped to prevent cross-project memory leakage
 if [ -n "$SESSION_ID" ]; then
   mkdir -p "$HOME/.immorterm/claude-env"
-  cat > "$HOME/.immorterm/claude-env/$SESSION_ID.env" << _ENVEOF
+  _IM_ENV_PATH="$HOME/.immorterm/claude-env/$SESSION_ID.env"
+  # Never overwrite a known terminal id with an empty one. This file is the
+  # ONLY reverse lookup from a Claude session UUID back to its ImmorTerm
+  # window, and it is what the daemon's resume-id backfill matches on. Hooks
+  # that fire without IMMORTERM_WINDOW_ID in their environment (subagents,
+  # compaction recovery) used to blank it, permanently costing that session
+  # its resume id — observed on 15 files, one of them a live session.
+  if [ -z "$IMMORTERM_ID" ] && [ -f "$_IM_ENV_PATH" ]; then
+    IMMORTERM_ID=$(sed -n 's/^IMMORTERM_ID=//p' "$_IM_ENV_PATH" | head -1)
+  fi
+  cat > "$_IM_ENV_PATH" << _ENVEOF
 IMMORTERM_ID=$IMMORTERM_ID
 IMMORTERM_PROJECT_ID=$PROJECT_ID
 _ENVEOF
@@ -902,17 +922,11 @@ print('1' if v is True else '0')
 " "$PROJECT_ROOT" 2>/dev/null)
 
 if [ "$PLANS_ENFORCE" = "1" ]; then
-  cat << 'PLAN_DISCIPLINE'
-
-### Planning Discipline — ACTIVE for this project
-
-Maintain a live plan with the \`immorterm_plan\` MCP tool for any non-trivial task:
-- **One stable id per effort** (kebab-case, e.g. \`auth-refactor\`). Always create-or-update that id — never mint a new id for the same work.
-- **Tag open decisions** in \`decisions[]\`: \`{id, label, options[], recommendation}\`. The user resolves them from the plan overlay and submits in one batch — do not stall waiting; proceed on your recommendation and adjust when the submission arrives.
-- **Author the \`html\` as a rich, self-contained visual brief in THIS PROJECT's own brand** — its tokens, fonts (inline as data URIs), and voice, NOT a generic or ImmorTerm-themed look. Same craft as a published artifact: real type hierarchy, considered spacing, a proper palette. The plan body is the project's; ImmorTerm only frames it. Keep it self-contained (inline CSS in a leading \`<style>\`; no external stylesheets/scripts — they are stripped).
-- **Anchor sections for comments**: wrap each major section of the plan \`html\` in an element with \`data-plan-section="<stable-section-id>"\` (e.g. \`data-plan-section="rollout"\`). User comments attach to these anchors.
-- **Keep it current**: update status/summary/html as work progresses. When a message "Plan <id> submitted: ..." arrives, read the decision resolutions and comments, apply them to the plan, and continue.
-PLAN_DISCIPLINE
+  # Plan-discipline INSTRUCTIONS now come from the per-turn
+  # immorterm-plan-discipline.sh sub-hook (imm #16), so the toggle applies
+  # immediately and re-anchors every turn instead of a fading once-per-session
+  # blast. SessionStart keeps only active-plan SURFACING below (orient the
+  # agent to any existing plan, once).
 
   # Active-plan surfacing — the plans slug MUST byte-match the daemon's
   # get_stable_project_id (immorterm-daemon/src/mcp.rs:4757):
@@ -942,9 +956,10 @@ except Exception: pass
 if not slug:
     # .immorterm/ is canonical; .claude/ is the legacy home and still read so
     # existing projects keep resolving to the same slug (and the same plans dir).
-    for d in ('.immorterm', '.claude'):
+    # NOT .immorterm/project-id — that holds the identity UUID, not a slug.
+    for d, f in (('.immorterm', 'project-slug'), ('.claude', 'project-id')):
         try:
-            pid = open(os.path.join(root, d, 'project-id')).read().strip()
+            pid = open(os.path.join(root, d, f)).read().strip()
             if pid:
                 slug = sanitize(pid)
                 break
@@ -5604,6 +5619,14 @@ TASK_OUTPUT=$(bash "$HOOKS_DIR/immorterm-task-context.sh" 2>/dev/null)
 SPEAK_OUTPUT=$(bash "$HOOKS_DIR/immorterm-speak-mode.sh" 2>/dev/null)
 [ -n "$SPEAK_OUTPUT" ] && printf '%s\\n' "$SPEAK_OUTPUT"
 
+# 3b. Plan discipline — live-plan instructions if enforced (imm #16), else silent.
+PLAN_DISC=$(bash "$HOOKS_DIR/immorterm-plan-discipline.sh" 2>/dev/null)
+[ -n "$PLAN_DISC" ] && printf '%s\\n' "$PLAN_DISC"
+
+# 3c. Task discipline — "use ImmorTerm task tools" if opted in (imm #13), else silent.
+TASK_DISC=$(bash "$HOOKS_DIR/immorterm-tasks-discipline.sh" 2>/dev/null)
+[ -n "$TASK_DISC" ] && printf '%s\\n' "$TASK_DISC"
+
 # 4. Ambient memory search (SLOW + can stall). HARD-CAP it at 3s so THIS
 # dispatcher always EXITS NORMALLY within the 5s hook budget — a timeout-KILL
 # discards a hook's ENTIRE stdout, including everything flushed above. stdin is
@@ -5732,6 +5755,207 @@ if [ -n "$STAMP_FILE" ]; then
   mkdir -p "$PERSONA_STAMP_DIR" 2>/dev/null
   printf '%s' "$SPEAK_MODE" > "$STAMP_FILE"
 fi
+exit 0
+`;
+}
+
+/**
+ * Generate the shared discipline-injector library (imm #16).
+ * A single per-turn stamp state-machine, sourced by the plan/tasks discipline
+ * sub-hooks so every toggle behaves identically:
+ *   FIRST/CHANGED → full block + write stamp; STABLE → short reminder;
+ *   TOGGLED OFF → one-shot reset + clear stamp; DEFAULT → silent.
+ * (Speak mode keeps its own equivalent logic for now — no test coverage, and
+ * folding it in is a later DRY cleanup, not worth destabilizing it here.)
+ */
+function generateDisciplineLib(): string {
+  return `#!/bin/bash
+# ImmorTerm: shared discipline injector (imm #16). Sourced — defines one
+# function; no side effects on source. Stamp lives at
+#   ~/.immorterm/discipline-stamps/<id>/<IMMORTERM_ID>   (content = value)
+# "Toggled off" is INFERRED from a leftover stamp, so no toggle-time plumbing
+# is needed. The CALLER must resolve its value reliably and only invoke this
+# when the config READ SUCCEEDED (exit silently on read failure) — otherwise a
+# transient error could look like an off-transition and fire a spurious reset.
+#
+# Usage: imm_inject_discipline <id> <value> <full_body> <reminder> <reset_text>
+#   value enabled = any non-empty token except off/default (e.g. "on" or a
+#   composite like "on:PREFIX" so changing the prefix re-injects). Empty,
+#   "off" or "default" ⇒ disabled.
+imm_inject_discipline() {
+  local id="$1" value="$2" full="$3" reminder="$4" reset="$5"
+  local wid="\${IMMORTERM_ID:-}"
+
+  # No session id ⇒ can't keep a per-session stamp. Degrade to stateless:
+  # emit the full block when enabled, silent otherwise.
+  if [ -z "$wid" ]; then
+    case "$value" in ''|off|default) return 0 ;; esac
+    printf '%s\\n' "$full"
+    return 0
+  fi
+
+  local dir="$HOME/.immorterm/discipline-stamps/$id"
+  local stamp="$dir/$wid"
+  local prev=""
+  [ -f "$stamp" ] && prev=$(cat "$stamp" 2>/dev/null)
+
+  case "$value" in
+    ''|off|default)
+      # Disabled. A lingering stamp means we WERE on ⇒ one-shot reset + clear.
+      if [ -n "$prev" ]; then
+        rm -f "$stamp" 2>/dev/null
+        [ -n "$reset" ] && printf '%s\\n' "$reset"
+      fi
+      return 0
+      ;;
+  esac
+
+  # Enabled.
+  if [ "$prev" = "$value" ]; then
+    [ -n "$reminder" ] && printf '%s\\n' "$reminder"
+    return 0
+  fi
+  printf '%s\\n' "$full"
+  mkdir -p "$dir" 2>/dev/null
+  printf '%s' "$value" > "$stamp"
+}
+`;
+}
+
+/**
+ * Generate the Plan Discipline injector (UserPromptSubmit sub-hook, imm #16).
+ * Per-turn replacement for the old SessionStart-once plan block: resolves
+ * plans.enforce (project → global default → off) and drives the shared
+ * injector, so the toggle applies immediately and re-anchors every turn.
+ */
+function generatePlanDisciplineHook(_projectId: string): string {
+  return `#!/bin/bash
+# ImmorTerm: Plan Discipline injector (UserPromptSubmit sub-hook).
+set -u
+HOOKS_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$HOOKS_DIR/_immorterm-env.sh" 2>/dev/null
+source "$HOOKS_DIR/_immorterm-discipline.sh" 2>/dev/null || exit 0
+PROJECT_ROOT="$(pwd)"
+
+# Resolve plans.enforce at RUNTIME (project → global default → off). Prints
+# "on"/"off"; prints NOTHING only if python3 itself can't run — in which case
+# we stay silent and never fake a reset. ponytail: a malformed config resolves
+# to "off" (a real reset), which is self-correcting next turn.
+ENFORCE=$(python3 -c "
+import json, os, sys
+def get(path, *keys):
+    with open(os.path.expanduser(path)) as f: v = json.load(f)
+    for k in keys: v = v[k]
+    return v
+val = None
+try:
+    val = get(os.path.join(sys.argv[1], '.immorterm', 'config.json'), 'plans', 'enforce')
+except Exception:
+    try: val = get('~/.immorterm/config.json', 'defaults', 'plans', 'enforce')
+    except Exception: val = False
+print('on' if val is True else 'off')
+" "$PROJECT_ROOT" 2>/dev/null)
+[ -n "$ENFORCE" ] || exit 0
+
+# IFS= read -r -d '' (not $(cat <<H)) so the body can contain apostrophes and
+# parens freely — a heredoc inside $() makes bash scan the body for a matching
+# quote/paren and an odd apostrophe count breaks it. read returns non-zero at
+# EOF (no NUL) but still fills FULL; harmless without set -e.
+IFS= read -r -d '' FULL <<'PLAN_FULL'
+<planning_discipline>
+### Planning Discipline — ACTIVE for this project
+
+Keep a LIVE plan for any non-trivial task with the \`immorterm_plan\` MCP tool. It renders in the ImmorTerm Plans panel as a visual brief the user opens, comments on, and resolves decisions in.
+
+**Plan mechanics**
+- ONE STABLE id per effort (kebab-case, e.g. \`auth-refactor\`) — always create-or-update that id; never mint a new id for the same work.
+- Put user-owned choices in \`decisions[]\`: \`{id, label, options[], recommendation}\`. ImmorTerm renders each as selectable option buttons with a Submit bar — you do NOT build those controls, only author the decision content. Never stall waiting: proceed on your recommendation and adjust when a "Plan <id> submitted: ..." message arrives with the user's resolutions + comments.
+- Wrap each major section of the \`html\` in \`data-plan-section="<stable-id>"\` (e.g. \`data-plan-section="rollout"\`) — user comments anchor to these.
+- INTERACTIVE BUTTONS (optional but powerful): the plan renders as a live artifact, so you can add buttons the user clicks to wake you. Put \`data-plan-action="<verb>"\` on any clickable element (e.g. \`<button data-plan-action="approve-rollout">Approve rollout</button>\`). A real user click sends you "Plan <id>: the user clicked ..." — you then read the plan and act. Use these for lightweight one-tap actions BEYOND the formal \`decisions[]\` (which already render their own option buttons + Submit); the button's own JS may also update the artifact in place.
+- Keep status/summary/html current as work progresses.
+
+**Design the \`html\` to the SAME BAR as a Claude Code artifact — a plan must look no less designed or beautiful than one.**
+- USE THE PROJECT'S OWN DESIGN LANGUAGE. Look first for its identity — CLAUDE.md, a theme/tokens file, existing CSS custom properties, component styles, AND its real logo/wordmark + icons (reuse the actual assets, inlined as data URIs) — then author in THAT palette, type scale, components, and voice so the plan looks like it shipped from the project itself. If none exist, choose a considered palette grounded in the project (deliberate neutrals with a slight hue bias toward one accent). Never a generic, default-AI, or ImmorTerm-themed look — the body is the PROJECT's; ImmorTerm only frames it.
+- REAL TYPOGRAPHY. A clear type scale and hierarchy; \`text-wrap: balance\` on headings; body measure ~65ch; uppercase labels get letter-spacing. The plan renders in a shadow DOM with NO external network, so do NOT link web fonts (they fail silently) — use a refined system stack or inline a face as a \`@font-face\` data URI.
+- LET LAYOUT DO THE SPACING — flex/grid + \`gap\`, not stacked per-element margins. Wide content (tables, code, diagrams) sits in its own \`overflow-x:auto\` container so the body never scrolls sideways. \`font-variant-numeric: tabular-nums\` wherever digits align.
+- AVOID AI-SLOP DEFAULTS: not Inter/Roboto, not purple-on-white gradients, not everything-centered, not emoji section markers, not \`rounded-lg\` on everything. Spend boldness in ONE place and keep the rest quiet. Structure (numbering, eyebrows, dividers) must encode something true, not decorate. Copy is design material: active voice, real content, no lorem.
+- SELF-CONTAINED + SAFE: put ALL CSS inline in a single leading \`<style>\`. No external stylesheets/scripts/fonts (they are stripped). Emit RAW HTML only — NEVER wrap the html in \`<![CDATA[ ... ]]>\` or in markdown code fences, which corrupt parsing and dump your CSS on screen as plain text.
+</planning_discipline>
+PLAN_FULL
+
+REMINDER='<planning_discipline id="reminder">Keep your live plan current with immorterm_plan — update the SAME plan id, tag open decisions, and do not drift into ad-hoc replies.</planning_discipline>'
+RESET='<planning_discipline id="reset">Planning discipline is now OFF for this project. You no longer need to maintain a live immorterm_plan.</planning_discipline>'
+
+imm_inject_discipline plans "$ENFORCE" "$FULL" "$REMINDER" "$RESET"
+exit 0
+`;
+}
+
+/**
+ * Generate the Task Discipline injector (UserPromptSubmit sub-hook, imm #13).
+ * When a project opts in (tasks.manageInImmorTerm), instructs the agent to
+ * manage its task list with the immorterm_* MCP tools under a set prefix,
+ * instead of a vendor-local todo list. Same per-turn stamp behaviour as plans;
+ * silent until the toggle writes the config.
+ */
+function generateTasksDisciplineHook(_projectId: string): string {
+  return `#!/bin/bash
+# ImmorTerm: Task Discipline injector (UserPromptSubmit sub-hook).
+set -u
+HOOKS_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$HOOKS_DIR/_immorterm-env.sh" 2>/dev/null
+source "$HOOKS_DIR/_immorterm-discipline.sh" 2>/dev/null || exit 0
+PROJECT_ROOT="$(pwd)"
+
+# Resolve tasks.manageInImmorTerm + tasks.prefix (project → global default →
+# built-in DEFAULT ON, imm #13). Explicit false anywhere opts a project out.
+# Emits two lines ("on|off" then the prefix), or nothing if python3 can't run
+# (so a transient failure stays silent and never fakes a reset).
+CFG=$(python3 -c "
+import json, os, sys
+def load(p):
+    try:
+        with open(os.path.expanduser(p)) as f: return json.load(f)
+    except Exception: return {}
+proj = load(os.path.join(sys.argv[1], '.immorterm', 'config.json'))
+glob = load('~/.immorterm/config.json')
+pt = proj.get('tasks') or {}
+gt = (glob.get('defaults') or {}).get('tasks') or {}
+v = pt.get('manageInImmorTerm')
+if v is None: v = gt.get('manageInImmorTerm')
+if v is None: v = True
+prefix = pt.get('prefix') or gt.get('prefix') or ''
+print('on' if v is not False else 'off')
+print(prefix)
+" "$PROJECT_ROOT" 2>/dev/null)
+[ -n "$CFG" ] || exit 0
+STATE=$(printf '%s' "$CFG" | sed -n '1p')
+PREFIX=$(printf '%s' "$CFG" | sed -n '2p')
+
+# The prefix is part of the value so changing it re-injects the full block.
+VALUE="off"
+[ "$STATE" = "on" ] && VALUE="on:\${PREFIX}"
+
+PTAG=""
+[ -n "$PREFIX" ] && PTAG=" Prefix every task title with \\"[\${PREFIX} #N]\\" (e.g. \\"[\${PREFIX} #1] Add login\\") so they group under \\"\${PREFIX}\\" in the Tasks panel."
+
+# IFS= read -r -d '' (see plan hook) — unquoted delimiter so \${PTAG} still expands.
+IFS= read -r -d '' FULL <<TASKS_FULL
+<task_discipline>
+### Task Management — use ImmorTerm's task tools for this project
+
+Manage your working task list with the ImmorTerm task MCP tools, NOT a vendor-local or in-session todo list:
+- immorterm_create_task(title="…", lane="now|next|later") to add work.\${PTAG}
+- immorterm_update_task(task_id="…", status="in_progress|done", lane="…") as you progress — mark done when complete.
+- immorterm_list_tasks() to review the current list before you plan.
+This keeps your tasks visible to the user in the ImmorTerm panel and durable across sessions.
+</task_discipline>
+TASKS_FULL
+
+REMINDER='<task_discipline id="reminder">Track your tasks with the immorterm_* task tools (not a local todo list); keep statuses current.</task_discipline>'
+RESET='<task_discipline id="reset">You no longer need to manage your task list in ImmorTerm for this project.</task_discipline>'
+
+imm_inject_discipline tasks "$VALUE" "$FULL" "$REMINDER" "$RESET"
 exit 0
 `;
 }
@@ -8105,6 +8329,9 @@ export function installMemoryHooks(
       { name: TASK_CONTEXT_HOOK_FILE, generator: generateTaskContextHook },
       { name: USER_PROMPT_HOOK_FILE, generator: generateUserPromptHook },
       { name: SPEAK_MODE_HOOK_FILE, generator: () => generateSpeakModeHook() },
+      { name: DISCIPLINE_LIB_FILE, generator: () => generateDisciplineLib() },
+      { name: PLAN_DISCIPLINE_HOOK_FILE, generator: generatePlanDisciplineHook },
+      { name: TASKS_DISCIPLINE_HOOK_FILE, generator: generateTasksDisciplineHook },
       { name: ENV_HELPER_FILE, generator: generateEnvHelper },
     ];
 

@@ -64,7 +64,12 @@ function getGitRemoteRepoName(workspacePath: string): string | null {
  * Must stay in step with the daemon's `project_id_from_file` (mcp.rs) and the
  * hub's `read_project_id_file` (routes/project_id.rs).
  */
-const PROJECT_ID_DIRS = ['.immorterm', '.claude'] as const;
+const PROJECT_ID_FILES = [
+  // NOT `.immorterm/project-id` — that filename holds the identity UUID, and
+  // reading it here repoints tasks/plans at an empty set.
+  ['.immorterm', 'project-slug'],
+  ['.claude', 'project-id'],
+] as const;
 
 /**
  * Read the saved project ID if one exists, preferring the canonical location.
@@ -73,8 +78,8 @@ const PROJECT_ID_DIRS = ['.immorterm', '.claude'] as const;
  * @returns Saved project ID or null if not found
  */
 function readProjectIdFile(workspacePath: string): string | null {
-  for (const dir of PROJECT_ID_DIRS) {
-    const projectIdPath = path.join(workspacePath, dir, 'project-id');
+  for (const [dir, file] of PROJECT_ID_FILES) {
+    const projectIdPath = path.join(workspacePath, dir, file);
     try {
       if (!fs.existsSync(projectIdPath)) continue;
       const content = fs.readFileSync(projectIdPath, 'utf8').trim();
@@ -111,7 +116,7 @@ function readProjectIdFile(workspacePath: string): string | null {
  */
 function writeProjectIdFile(workspacePath: string, projectId: string): void {
   const stateDir = path.join(workspacePath, '.immorterm');
-  const projectIdPath = path.join(stateDir, 'project-id');
+  const projectIdPath = path.join(stateDir, 'project-slug');
 
   try {
     if (!fs.existsSync(stateDir)) {
