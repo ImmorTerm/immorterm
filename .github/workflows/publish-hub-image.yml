@@ -36,6 +36,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and publish the exact main commit
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -49,3 +50,18 @@ jobs:
           cache-to: type=gha,mode=max,scope=immorterm-hub
           provenance: mode=max
           sbom: true
+
+      # A new GHCR package is private even when its source repository is public.
+      # The image contains no credential or customer data, and public pull keeps
+      # every consumer from needing a registry secret merely to verify the exact
+      # ImmorTerm bytes it pins. Session Bridge authentication remains mandatory.
+      - name: Make the Hub image publicly readable
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --method PATCH \
+            /orgs/ImmorTerm/packages/container/immorterm-hub \
+            -f visibility=public
+
+          echo "Published ghcr.io/immorterm/immorterm-hub@${{ steps.build.outputs.digest }}" \
+            >> "$GITHUB_STEP_SUMMARY"
