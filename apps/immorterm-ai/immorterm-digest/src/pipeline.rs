@@ -19,18 +19,38 @@ use tokio::time::timeout;
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
     pub script_path: PathBuf,
+    pub longstory_binary: Option<PathBuf>,
+    pub longstory_mode: LongstoryDigestMode,
     pub timeout: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LongstoryDigestMode {
+    Mirror,
+    Replace,
 }
 
 impl PipelineConfig {
     pub fn for_workspace(workspace: &std::path::Path) -> Self {
+        let longstory_binary =
+            std::env::var_os("LONGSTORY_CODING_DIGEST_BINARY").map(PathBuf::from);
+        let longstory_mode = match std::env::var("LONGSTORY_CODING_DIGEST_MODE") {
+            Ok(value) if value.eq_ignore_ascii_case("replace") => LongstoryDigestMode::Replace,
+            _ => LongstoryDigestMode::Mirror,
+        };
         Self {
             script_path: workspace
                 .join(".immorterm")
                 .join("hooks")
                 .join("immorterm-memory-digest.sh"),
+            longstory_binary,
+            longstory_mode,
             timeout: Duration::from_secs(600),
         }
+    }
+
+    pub fn longstory_replaces_local_digest(&self) -> bool {
+        self.longstory_binary.is_some() && self.longstory_mode == LongstoryDigestMode::Replace
     }
 }
 
@@ -48,6 +68,15 @@ pub struct DigestInvocation<'a> {
 
 #[derive(Debug)]
 pub struct DigestOutcome {
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    pub duration: Duration,
+    pub stderr_tail: String,
+}
+
+#[derive(Debug)]
+pub struct LongstoryDigestOutcome {
+    pub configured: bool,
     pub exit_code: Option<i32>,
     pub timed_out: bool,
     pub duration: Duration,
@@ -125,6 +154,64 @@ pub async fn run_digest<'a>(cfg: &PipelineConfig, req: DigestInvocation<'a>) -> 
         }
         Ok(Err(e)) => Err(anyhow::Error::new(e).context("spawn digest script")),
         Err(_) => Ok(DigestOutcome {
+            exit_code: None,
+            timed_out: true,
+            duration: started.elapsed(),
+            stderr_tail: String::new(),
+        }),
+    }
+}
+
+/// Send one due session to Longstory. ImmorTerm owns session discovery and
+/// lifecycle timing; Longstory owns normalization, checkpoints, rolling
+/// summaries, and governed lesson candidates.
+pub async fn run_longstory_digest<'a>(
+    cfg: &PipelineConfig,
+    req: DigestInvocation<'a>,
+) -> Result<LongstoryDigestOutcome> {
+    let Some(binary) = &cfg.longstory_binary else {
+        return Ok(LongstoryDigestOutcome {
+            configured: false,
+            exit_code: None,
+            timed_out: false,
+            duration: Duration::ZERO,
+            stderr_tail: String::new(),
+        });
+    };
+    validate_no_dashdash("project_id", req.project_id)?;
+    validate_no_dashdash("vendor_session_id", req.vendor_session_id)?;
+    validate_no_dashdash("tool", req.tool)?;
+    validate_no_dashdash("trigger", req.trigger)?;
+    if !binary.exists() {
+        anyhow::bail!(
+            "Longstory coding digest binary missing at {}",
+            binary.display()
+        );
+    }
+
+    let started = std::time::Instant::now();
+    let mut cmd = Command::new(binary);
+    cmd.env("LONGSTORY_PROJECT_ID", req.project_id)
+        .env("LONGSTORY_SESSION_ID", req.vendor_session_id)
+        .env("LONGSTORY_SESSION_SOURCE", req.tool)
+        .env("LONGSTORY_TRANSCRIPT_PATH", req.transcript_path)
+        .env("LONGSTORY_TRANSCRIPT_FORMAT", "immorterm")
+        .env("LONGSTORY_DIGEST_TRIGGER", req.trigger)
+        .env_remove("LONGSTORY_SESSION_MANIFEST_PATH")
+        .env_remove("LONGSTORY_DIGEST_POLL_INTERVAL_SECONDS")
+        .kill_on_drop(true);
+
+    match timeout(cfg.timeout, cmd.output()).await {
+        Ok(Ok(output)) => Ok(LongstoryDigestOutcome {
+            configured: true,
+            exit_code: output.status.code(),
+            timed_out: false,
+            duration: started.elapsed(),
+            stderr_tail: tail_lines(&String::from_utf8_lossy(&output.stderr), 40),
+        }),
+        Ok(Err(error)) => Err(anyhow::Error::new(error).context("spawn Longstory coding digest")),
+        Err(_) => Ok(LongstoryDigestOutcome {
+            configured: true,
             exit_code: None,
             timed_out: true,
             duration: started.elapsed(),
@@ -265,5 +352,57 @@ exit 0
         req.vendor_session_id = "evil--injection";
         let err = run_digest(&cfg, req).await.unwrap_err();
         assert!(err.to_string().contains("contains '--'"));
+    }
+
+    #[tokio::test]
+    async fn longstory_is_optional_and_receives_the_trusted_session() {
+        let dir = tempdir().unwrap();
+        let capture = dir.path().join("longstory-env.txt");
+        let binary = dir.path().join("longstory-coding-digest");
+        std::fs::write(
+            &binary,
+            format!(
+                r#"#!/usr/bin/env bash
+printf '%s\n' "$LONGSTORY_PROJECT_ID" "$LONGSTORY_SESSION_ID" "$LONGSTORY_SESSION_SOURCE" "$LONGSTORY_TRANSCRIPT_PATH" "$LONGSTORY_TRANSCRIPT_FORMAT" "$LONGSTORY_DIGEST_TRIGGER" > '{}'
+"#,
+                capture.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&binary, permissions).unwrap();
+        }
+        let cfg = PipelineConfig {
+            script_path: dir.path().join("unused"),
+            longstory_binary: Some(binary),
+            longstory_mode: LongstoryDigestMode::Replace,
+            timeout: Duration::from_secs(2),
+        };
+        assert!(cfg.longstory_replaces_local_digest());
+        let transcript = dir.path().join("session.jsonl");
+        let outcome = run_longstory_digest(
+            &cfg,
+            invocation("project-1", "window-1", "session-1", &transcript, "milestone"),
+        )
+        .await
+        .unwrap();
+        assert!(outcome.configured);
+        assert_eq!(outcome.exit_code, Some(0));
+        let values = std::fs::read_to_string(capture).unwrap();
+        assert_eq!(
+            values.lines().collect::<Vec<_>>(),
+            vec![
+                "project-1",
+                "session-1",
+                "claude-code",
+                transcript.to_str().unwrap(),
+                "immorterm",
+                "milestone"
+            ]
+        );
     }
 }

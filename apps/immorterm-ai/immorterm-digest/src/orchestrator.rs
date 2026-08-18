@@ -16,7 +16,7 @@ use tokio::time::interval;
 use crate::debouncer::Trigger;
 use crate::hub_client::{HubClient, SessionEndRequest, Wal, WalEntry};
 use crate::lifecycle::{LifecycleState, SessionStatus};
-use crate::pipeline::{run_digest, DigestInvocation, PipelineConfig};
+use crate::pipeline::{run_digest, run_longstory_digest, DigestInvocation, PipelineConfig};
 use crate::registry::SessionRegistry;
 use crate::watcher::FsSignal;
 
@@ -196,37 +196,54 @@ async fn dispatch_action(action: FireAction, cfg: OrchestratorConfig) {
         c.timeout = Duration::from_secs(600);
         c
     };
-    let outcome = run_digest(
-        &pipeline_cfg,
-        DigestInvocation {
-            project_id: &action.project_id,
-            window_id: &action.window_id,
-            tool: &action.tool,
-            vendor_session_id: &action.vendor_session_id,
-            transcript_path: &action.transcript_path,
-            trigger: action.trigger.as_wire(),
-            exit_reason: None,
-            dry_run: false,
-        },
-    )
-    .await;
+    let invocation = || DigestInvocation {
+        project_id: &action.project_id,
+        window_id: &action.window_id,
+        tool: &action.tool,
+        vendor_session_id: &action.vendor_session_id,
+        transcript_path: &action.transcript_path,
+        trigger: action.trigger.as_wire(),
+        exit_reason: None,
+        dry_run: false,
+    };
     let _ = cfg;
-    match outcome {
-        Ok(o) if o.exit_code == Some(0) => {
-            tracing::info!(
+    if !pipeline_cfg.longstory_replaces_local_digest() {
+        match run_digest(&pipeline_cfg, invocation()).await {
+            Ok(o) if o.exit_code == Some(0) => tracing::info!(
                 "digest ok session={} trigger={} dur={:?}",
                 action.vendor_session_id,
                 action.trigger.as_wire(),
                 o.duration
-            );
+            ),
+            Ok(o) => tracing::warn!(
+                "digest exit={:?} session={} stderr_tail={}",
+                o.exit_code,
+                action.vendor_session_id,
+                o.stderr_tail
+            ),
+            Err(e) => tracing::warn!("digest spawn failed for {}: {e}", action.vendor_session_id),
         }
+    }
+
+    match run_longstory_digest(&pipeline_cfg, invocation()).await {
+        Ok(o) if !o.configured => {}
+        Ok(o) if o.exit_code == Some(0) => tracing::info!(
+            "Longstory digest ok session={} trigger={} dur={:?}",
+            action.vendor_session_id,
+            action.trigger.as_wire(),
+            o.duration
+        ),
         Ok(o) => tracing::warn!(
-            "digest exit={:?} session={} stderr_tail={}",
+            "Longstory digest exit={:?} timed_out={} session={} stderr_tail={}",
             o.exit_code,
+            o.timed_out,
             action.vendor_session_id,
             o.stderr_tail
         ),
-        Err(e) => tracing::warn!("digest spawn failed for {}: {e}", action.vendor_session_id),
+        Err(error) => tracing::warn!(
+            "Longstory digest spawn failed for {}: {error}",
+            action.vendor_session_id
+        ),
     }
 }
 

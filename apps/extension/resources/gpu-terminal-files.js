@@ -224,6 +224,37 @@ export function showFloatingMenu(x, y, { title, className, items }) {
 
 // ── Public factory ─────────────────────────────────────────────
 
+/** Convert filesystem/transport failures into actionable UI without leaking
+ * host-specific read_dir/ENOENT strings into the Files panel. */
+export function fileBrowserErrorMessage({ remoteName = '', remoteRestoreState = '', remoteCandidates = [], operation = 'Files' } = {}) {
+  if (remoteRestoreState === 'ambiguous') {
+    const choices = remoteCandidates.length ? ' (' + remoteCandidates.join(', ') + ')' : '';
+    return 'This restored tab lost its remote identity and multiple remotes match this project' + choices
+      + '. Reopen it from the Remote project picker and choose the correct host.';
+  }
+  if (remoteRestoreState === 'unresolved') {
+    return 'This restored project is not available locally and has no saved remote identity. '
+      + 'Reopen it from the Remote project picker.';
+  }
+  if (remoteName) {
+    return operation + ' are unavailable on remote “' + remoteName + '”. '
+      + 'Check its SSH connection in Remote settings, then reconnect or reopen this tab.';
+  }
+  return 'This project folder is unavailable on this Mac. Reopen the project, or choose its host from the Remote project picker.';
+}
+
+export function fileBrowserApiBase(hubBaseUrl, remoteName, endpoint) {
+  return hubBaseUrl + (remoteName
+    ? '/api/v1/remotes/' + encodeURIComponent(remoteName) + '/files/' + endpoint
+    : '/api/v1/files/' + endpoint);
+}
+
+export function fileBrowserListUrl(hubBaseUrl, remoteName, path) {
+  return hubBaseUrl + (remoteName
+    ? '/api/v1/remotes/' + encodeURIComponent(remoteName) + '/ls?path=' + encodeURIComponent(path)
+    : '/api/ls?path=' + encodeURIComponent(path));
+}
+
 /**
  * Creates the file browser panel. Returns { refresh, focusSearch, dispose }.
  *
@@ -232,6 +263,8 @@ export function showFloatingMenu(x, y, { title, className, items }) {
  * @param {HTMLInputElement} deps.searchInput — header search input
  * @param {() => string} deps.getRoot     — absolute project root ('' if unknown)
  * @param {string} deps.remoteName        — remote host name ('' = local)
+ * @param {string} deps.remoteRestoreState — unresolved legacy identity state
+ * @param {string[]} deps.remoteCandidates — ambiguous legacy remote candidates
  * @param {string} deps.hubBaseUrl        — absolute hub base URL
  * @param {(dir: string) => Promise<{entries?: Array, error?: string}>} deps.listDir
  * @param {(path: string, x: number, y: number, opts?: {pin?: boolean, line?: number}) => void} deps.openPreview
@@ -248,6 +281,8 @@ export function createFileBrowser({
   searchInput,
   getRoot,
   remoteName,
+  remoteRestoreState = '',
+  remoteCandidates = [],
   hubBaseUrl,
   listDir,
   openPreview,
@@ -290,9 +325,7 @@ export function createFileBrowser({
   const MAX_RENDERED_RESULTS = 200;
 
   // ── Hub URL builders (remote-aware) ──────────────────────────
-  const apiBase = (endpoint) => hubBaseUrl + (remoteName
-    ? '/api/v1/remotes/' + encodeURIComponent(remoteName) + '/files/' + endpoint
-    : '/api/v1/files/' + endpoint);
+  const apiBase = (endpoint) => fileBrowserApiBase(hubBaseUrl, remoteName, endpoint);
 
   // ── Git status (dirty indicators) ────────────────────────────
 
@@ -456,7 +489,9 @@ export function createFileBrowser({
       entries = await fetchDir(dirAbs);
     } catch (err) {
       if (seq !== renderSeq) return;
-      container.appendChild(el('div', 'fb-error', 'Listing failed: ' + (err && err.message || err)));
+      container.appendChild(el('div', 'fb-error', fileBrowserErrorMessage({
+        remoteName, remoteRestoreState, remoteCandidates, operation: 'Files',
+      })));
       return;
     }
     if (seq !== renderSeq || disposed) return;
@@ -493,6 +528,13 @@ export function createFileBrowser({
     if (!root) {
       treeEl.textContent = '';
       treeEl.appendChild(el('div', 'fb-empty', 'No project root'));
+      return;
+    }
+    if (remoteRestoreState) {
+      treeEl.textContent = '';
+      treeEl.appendChild(el('div', 'fb-error', fileBrowserErrorMessage({
+        remoteName, remoteRestoreState, remoteCandidates, operation: 'Files',
+      })));
       return;
     }
     await fetchStatus(false);
@@ -645,7 +687,9 @@ export function createFileBrowser({
     if (seq !== renderSeq || disposed || searchQuery !== q) return;
     treeEl.textContent = '';
     if (!idx) {
-      treeEl.appendChild(el('div', 'fb-error', 'File index unavailable'));
+      treeEl.appendChild(el('div', 'fb-error', fileBrowserErrorMessage({
+        remoteName, remoteRestoreState, remoteCandidates, operation: 'File search',
+      })));
       return;
     }
     const scored = [];
@@ -676,7 +720,9 @@ export function createFileBrowser({
     if (seq !== renderSeq || mySeq !== grepSeq || disposed || !searchQuery.startsWith('>')) return;
     treeEl.textContent = '';
     if (d.error) {
-      treeEl.appendChild(el('div', 'fb-error', 'Search failed: ' + d.error));
+      treeEl.appendChild(el('div', 'fb-error', fileBrowserErrorMessage({
+        remoteName, remoteRestoreState, remoteCandidates, operation: 'File search',
+      })));
       return;
     }
     const matches = d.matches || [];

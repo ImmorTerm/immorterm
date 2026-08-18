@@ -982,13 +982,21 @@ fn spawn_project_webview<R: tauri::Runtime>(
     let remote_qs = tab.remote.as_deref()
         .map(|r| format!("&remote={}", urlencode_component(r)))
         .unwrap_or_default();
+    let remote_restore_qs = if tab.remote_identity_unresolved {
+        let state = if tab.remote_candidates.len() > 1 { "ambiguous" } else { "unresolved" };
+        let candidates = tab.remote_candidates.join(",");
+        format!("&remote_restore={state}&remote_candidates={}", urlencode_component(&candidates))
+    } else {
+        String::new()
+    };
     let url_str = format!(
-        "{}/gpu-terminal.html?project_dir={}&tab_id={}&mode={}{}&ts={ts}",
+        "{}/gpu-terminal.html?project_dir={}&tab_id={}&mode={}{}{}&ts={ts}",
         hub_base(),
         urlencode_component(&tab.project_dir),
         tab.id,
         tab.mode.as_query(),
         remote_qs,
+        remote_restore_qs,
     );
     let url = WebviewUrl::External(url_str.parse().map_err(tauri::Error::InvalidUrl)?);
     let wv_label = tab_webview_label(window_label, &tab.id);
