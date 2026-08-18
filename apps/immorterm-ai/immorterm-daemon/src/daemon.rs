@@ -3587,15 +3587,13 @@ async fn handle_client_connection(
                             Ok(()) => {
                                 if state.external_message_receipts.len() >= 100
                                     && !state.external_message_receipts.contains_key(&message_id)
-                                {
-                                    if let Some(oldest) = state
+                                    && let Some(oldest) = state
                                         .external_message_receipts
                                         .keys()
                                         .next()
                                         .cloned()
-                                    {
-                                        state.external_message_receipts.remove(&oldest);
-                                    }
+                                {
+                                    state.external_message_receipts.remove(&oldest);
                                 }
                                 state
                                     .external_message_receipts
