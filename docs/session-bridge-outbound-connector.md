@@ -4,6 +4,23 @@ The outbound connector lets a served ImmorTerm Hub reach sessions on a desktop H
 
 This is transport for Longstory Code. It does not store or search Longstory knowledge itself.
 
+## Run the served Hub
+
+ImmorTerm publishes a Hub-only container for the SaaS or private-network side of the connection:
+
+```bash
+docker run --rm \
+  -p 1440:1440 \
+  -e IMMORTERM_BRIDGE_TOKEN \
+  -v immorterm-hub-data:/data/.immorterm \
+  ghcr.io/immorterm/immorterm-hub:main-<full-commit-sha>
+```
+
+Set `IMMORTERM_BRIDGE_TOKEN` in the launching process without placing its value in the command.
+Pin the full `main-<sha>` tag in a deployment. The moving `main` tag is for testing only. Keep the
+Hub at one replica unless its project store and live connector ownership have been moved to shared
+storage. Put TLS or a private network in front of port 1440; do not publish the raw port.
+
 ## Provision a connector credential
 
 Use the served Hub deployment administrator credential only to create or revoke a short-lived connector credential:

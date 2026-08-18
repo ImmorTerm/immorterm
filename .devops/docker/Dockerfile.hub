@@ -1,0 +1,69 @@
+# Session Bridge Hub — small server image for a SaaS or private control plane.
+#
+# This image contains only immorterm-hub. Desktop builds keep using the bundled
+# sidecar, and remote agent boxes keep using Dockerfile.immorterm-ai-headless.
+FROM rust:1.93-trixie AS builder
+
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY apps/immorterm-ai/immorterm-core/Cargo.toml apps/immorterm-ai/immorterm-core/Cargo.toml
+COPY apps/immorterm-ai/immorterm-daemon/Cargo.toml apps/immorterm-ai/immorterm-daemon/Cargo.toml
+COPY apps/immorterm-ai/immorterm-digest/Cargo.toml apps/immorterm-ai/immorterm-digest/Cargo.toml
+COPY apps/immorterm-ai/immorterm-render/Cargo.toml apps/immorterm-ai/immorterm-render/Cargo.toml
+COPY apps/immorterm-ai/immorterm-wasm/Cargo.toml apps/immorterm-ai/immorterm-wasm/Cargo.toml
+COPY libs/conversation-adapters/Cargo.toml libs/conversation-adapters/Cargo.toml
+COPY libs/conversation-schema/Cargo.toml libs/conversation-schema/Cargo.toml
+COPY libs/structured-logs/Cargo.toml libs/structured-logs/Cargo.toml
+COPY services/hub/Cargo.toml services/hub/Cargo.toml
+
+# Cargo resolves every workspace member even though this image builds one crate.
+RUN mkdir -p \
+      apps/immorterm-ai/immorterm-core/src \
+      apps/immorterm-ai/immorterm-daemon/src \
+      apps/immorterm-ai/immorterm-digest/src \
+      apps/immorterm-ai/immorterm-render/src \
+      apps/immorterm-ai/immorterm-wasm/src \
+      libs/conversation-adapters/src \
+      libs/conversation-schema/src \
+      libs/structured-logs/src \
+      services/hub/src && \
+    printf '' > apps/immorterm-ai/immorterm-core/src/lib.rs && \
+    printf 'fn main() {}\n' > apps/immorterm-ai/immorterm-daemon/src/main.rs && \
+    printf '' > apps/immorterm-ai/immorterm-digest/src/lib.rs && \
+    printf 'fn main() {}\n' > apps/immorterm-ai/immorterm-digest/src/main.rs && \
+    printf '' > apps/immorterm-ai/immorterm-render/src/lib.rs && \
+    printf '' > apps/immorterm-ai/immorterm-wasm/src/lib.rs && \
+    printf '' > libs/conversation-adapters/src/lib.rs && \
+    printf '' > libs/conversation-schema/src/lib.rs && \
+    printf '' > libs/structured-logs/src/lib.rs && \
+    printf 'fn main() {}\n' > services/hub/src/main.rs && \
+    cargo build --release --locked -p immorterm-hub
+
+COPY services/hub/src services/hub/src
+RUN touch services/hub/src/main.rs && cargo build --release --locked -p immorterm-hub
+
+FROM debian:trixie-slim
+
+LABEL org.opencontainers.image.source="https://github.com/ImmorTerm/immorterm"
+LABEL org.opencontainers.image.description="ImmorTerm Session Bridge Hub"
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/* && \
+    groupadd --system --gid 10001 immorterm && \
+    useradd --system --uid 10001 --gid immorterm --home-dir /data immorterm && \
+    mkdir -p /data/.immorterm /opt/immorterm/static && \
+    chown -R immorterm:immorterm /data
+
+COPY --from=builder /src/target/release/immorterm-hub /usr/local/bin/immorterm-hub
+
+ENV HOME=/data
+ENV IMMORTERM_HUB_HOST=0.0.0.0
+ENV RUST_LOG=info
+
+USER immorterm
+VOLUME ["/data/.immorterm"]
+EXPOSE 1440
+
+ENTRYPOINT ["immorterm-hub"]
+CMD ["serve", "--port", "1440", "--static-dir", "/opt/immorterm/static"]
