@@ -1093,8 +1093,8 @@ dependencies = [
 
 [[package]]
 name = "envoyage"
-version = "0.1.1"
-source = "git+https://github.com/Envoyage-Browsing/envoyage#d4a83bf64f1d9d937ebeb3e438e0dbc2f1e8af26"
+version = "0.2.0"
+source = "git+https://github.com/Envoyage-Browsing/envoyage?rev=950ba745157523713d357086041cc432ac7c9625#950ba745157523713d357086041cc432ac7c9625"
 dependencies = [
  "axum",
  "base64",
@@ -1102,10 +1102,13 @@ dependencies = [
  "image",
  "imageproc",
  "nix 0.29.0",
+ "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tokio-tungstenite 0.24.0",
+ "url",
 ]
 
 [[package]]
@@ -1141,7 +1144,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3910,7 +3913,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4382,7 +4385,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5224,7 +5227,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5810,6 +5813,7 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]
@@ -6294,7 +6298,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
