@@ -23,6 +23,11 @@ name, pointing at this repo and the workflow file that publishes it:
 
 Until that is done, the publish steps will fail with an OIDC/authorization error.
 
+For a brand-new package, npm requires the package to exist before Trusted Publishing
+can be configured. Publish its first version once from an npm owner account, then add
+the Trusted Publisher mapping above. `@immorterm/session-bridge` is currently in this
+one-time bootstrap state; do not add a long-lived npm token to GitHub to work around it.
+
 ## Secrets / variables the release lanes expect
 
 These were referenced by the source monorepo's promote pipeline and must be recreated
