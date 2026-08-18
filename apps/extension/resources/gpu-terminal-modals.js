@@ -133,6 +133,7 @@ export function createModalSystem({
       insights: 'Insights',
       license: 'License',
       logs: 'Session Logs',
+      bridge: 'Session Bridge',
       wizard: 'Setup Wizard',
       appearance: 'Personalize',
       'session-summary': 'Session Summary',
@@ -157,6 +158,7 @@ export function createModalSystem({
     modalContainer.classList.add('visible');
     if (kind === 'diagnostics') renderDiagnosticsModal();
     else if (kind === 'insights') renderInsightsModal();
+    else if (kind === 'bridge') renderBridgeModal();
     else if (kind === 'services') renderServicesModal();
     else if (kind === 'license') renderLicenseModal();
     else if (kind === 'logs') renderLogsModal();
@@ -306,11 +308,13 @@ export function createModalSystem({
           // Hub without the plans keys → leave the section hidden (deploy-
           // ordering guard: modals.js can ship before the hub binary).
           if (!cfg || typeof cfg.plansEnforce === 'undefined' || !pdProjectDir) return;
+          const globalDefault = !!cfg.globalPlansEnforce;
           const pdHeader = el('div', 'modal-section-header', 'Planning');
           pdHeader.style.cssText = 'margin-bottom:4px;font-weight:600;font-size:11px;text-transform:uppercase;opacity:0.6';
           pdWrap.appendChild(pdHeader);
           const pdHint = el('div', 'modal-row-detail',
-            'Instructs AI agents to keep a live plan with tagged decisions and comment anchors. Applies at next session start.');
+            'Instructs AI agents to keep a live plan with tagged decisions and comment anchors. Applies at next session start. '
+            + 'Default follows your global setting (currently ' + (globalDefault ? 'On' : 'Off') + ').');
           pdHint.style.cssText = 'margin-bottom:8px;font-size:11px;opacity:0.7';
           pdWrap.appendChild(pdHint);
           const pdRow = el('div', 'modal-row');
@@ -318,10 +322,9 @@ export function createModalSystem({
           const pdSeg = el('div', 'modal-segmented');
           pdRow.appendChild(pdSeg);
           pdWrap.appendChild(pdRow);
-          const globalDefault = !!cfg.globalPlansEnforce;
           const raw = (typeof cfg.projectPlansEnforce === 'boolean') ? cfg.projectPlansEnforce : null;
           const choices = [
-            { value: null, label: 'Default (' + (globalDefault ? 'On' : 'Off') + ')' },
+            { value: null, label: 'Default' },
             { value: true, label: 'On' },
             { value: false, label: 'Off' },
           ];
@@ -347,6 +350,88 @@ export function createModalSystem({
           }
         })
         .catch(err => console.warn('[plans-enforce] config load failed', err));
+    }
+
+    // ── Task management (tasks.manageInImmorTerm) — imm #13 ──────────────
+    // Per-project opt-out (DEFAULT ON): instruct AI agents to manage their
+    // task list with ImmorTerm's task MCP tools under an optional prefix,
+    // instead of a vendor-local todo list. Written via the generic shallow-
+    // merge project-config PUT (the whole tasks object is replaced, so both
+    // keys ship together); read at hook RUNTIME so it applies from the next
+    // prompt with no reinstall. Own fetch chain so it's independent of the
+    // plans keys (works on hubs that predate them).
+    {
+      const tWrap = el('div');
+      tWrap.style.marginTop = '14px';
+      section.appendChild(tWrap);
+
+      let tProjectDir = null;
+      const tState = { manageInImmorTerm: true, prefix: '' };
+      fetch(HUB + '/api/info')
+        .then(r => r.json())
+        .catch(() => ({}))
+        .then(info => {
+          tProjectDir = (info && (info.projectDir || info.project_dir)) || null;
+          if (!tProjectDir) return null;
+          return fetch(configReadUrl('project_dir=' + encodeURIComponent(tProjectDir)))
+            .then(r => r.json()).catch(() => ({}));
+        })
+        .then(cfg => {
+          if (!tProjectDir) return;
+          const t = (cfg && cfg.tasks) || {};
+          // Default ON: absent → on; only an explicit false opts out.
+          tState.manageInImmorTerm = t.manageInImmorTerm !== false;
+          tState.prefix = (typeof t.prefix === 'string') ? t.prefix : '';
+
+          const tHeader = el('div', 'modal-section-header', 'Tasks');
+          tHeader.style.cssText = 'margin-bottom:4px;font-weight:600;font-size:11px;text-transform:uppercase;opacity:0.6';
+          tWrap.appendChild(tHeader);
+          const tHint = el('div', 'modal-row-detail',
+            "Have AI agents manage their task list with ImmorTerm's task tools — visible in the Tasks panel and durable across sessions — instead of a vendor-local to-do list. On by default; applies from the next prompt.");
+          tHint.style.cssText = 'margin-bottom:8px;font-size:11px;opacity:0.7';
+          tWrap.appendChild(tHint);
+
+          const save = () => {
+            fetch(configProjectWriteUrl(), {
+              method: 'PUT',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                projectDir: tProjectDir,
+                tasks: { manageInImmorTerm: tState.manageInImmorTerm, prefix: tState.prefix },
+              }),
+            }).catch(err => console.error('[tasks-manage] save failed', err));
+          };
+
+          // Prefix input row — built first so the toggle handler can show/hide it.
+          const prefixRow = el('div', 'modal-row');
+          prefixRow.appendChild(el('span', 'modal-row-label', 'Task prefix'));
+          const prefixInput = el('input', 'modal-input');
+          prefixInput.type = 'text';
+          prefixInput.placeholder = 'e.g. ' + ((tProjectDir.split('/').filter(Boolean).pop()) || 'proj');
+          prefixInput.value = tState.prefix;
+          prefixInput.style.maxWidth = '160px';
+          prefixInput.addEventListener('change', () => {
+            tState.prefix = prefixInput.value.trim();
+            save();
+          });
+          prefixRow.appendChild(prefixInput);
+
+          const tRow = el('div', 'modal-row');
+          tRow.appendChild(el('span', 'modal-row-label', 'Manage tasks in ImmorTerm'));
+          const tToggle = el('div', 'modal-toggle' + (tState.manageInImmorTerm ? ' on' : ''));
+          tRow.appendChild(tToggle);
+          tRow.style.cursor = 'pointer';
+          tRow.addEventListener('click', () => {
+            tState.manageInImmorTerm = !tToggle.classList.contains('on');
+            tToggle.classList.toggle('on', tState.manageInImmorTerm);
+            prefixRow.style.display = tState.manageInImmorTerm ? 'flex' : 'none';
+            save();
+          });
+          tWrap.appendChild(tRow);
+          prefixRow.style.display = tState.manageInImmorTerm ? 'flex' : 'none';
+          tWrap.appendChild(prefixRow);
+        })
+        .catch(err => console.warn('[tasks-manage] config load failed', err));
     }
 
     // Border toggle
@@ -576,6 +661,159 @@ export function createModalSystem({
   function renderInsightsModal() {
     modalBody.appendChild(modalSpinner('Loading insights...'));
     // Data fetch is triggered by gpu-terminal.html when the modal opens
+  }
+
+  // ── Session Bridge configuration. Secrets are never fetched into the
+  // webview. The file/env credential is deployment-admin authority; normal
+  // integrations use short-lived, project-scoped installation credentials.
+  function renderBridgeModal() {
+    clearEl(modalBody);
+    modalBody.appendChild(modalSpinner('Loading session bridge settings...'));
+    Promise.all([
+      fetch(HUB + '/api/v1/bridge/status').then((response) => response.json()),
+      fetch(HUB + '/api/v1/remotes').then((response) => response.json()),
+    ])
+      .then(([data, remoteData]) => {
+        if (activeModal !== 'bridge') return;
+        clearEl(modalBody);
+
+        const section = el('div', 'modal-section');
+        const enabledRow = el('div', 'modal-row');
+        enabledRow.appendChild(el('span', 'modal-row-label', 'Project-scoped bridge'));
+        const enabledWrap = el('div', 'modal-toggle-wrap');
+        const enabledText = el('span', 'modal-row-detail', data.enabled ? 'Enabled · contract v' + data.version : 'Disabled');
+        const enabledToggle = el('div', 'modal-toggle' + (data.enabled ? ' on' : ''));
+        enabledToggle.setAttribute('role', 'switch');
+        enabledToggle.setAttribute('aria-checked', String(Boolean(data.enabled)));
+        enabledToggle.setAttribute('data-testid', 'bridge-enabled-toggle');
+        enabledWrap.appendChild(enabledText);
+        enabledWrap.appendChild(enabledToggle);
+        enabledRow.appendChild(enabledWrap);
+        enabledRow.style.cursor = 'pointer';
+        enabledRow.addEventListener('click', async () => {
+          const next = !enabledToggle.classList.contains('on');
+          enabledRow.style.pointerEvents = 'none';
+          try {
+            const response = await fetch(HUB + '/api/v1/bridge/settings', {
+              method: 'PUT', headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ enabled: next }),
+            });
+            const result = await response.json();
+            if (response.ok === false || result.error) throw new Error(result.error || 'Unable to save bridge setting');
+            enabledToggle.classList.toggle('on', next);
+            enabledToggle.setAttribute('aria-checked', String(next));
+            enabledText.textContent = next ? 'Enabled · contract v' + data.version : 'Disabled';
+          } catch (error) {
+            enabledText.textContent = error.message || 'Unable to save';
+          } finally {
+            enabledRow.style.pointerEvents = '';
+          }
+        });
+        section.appendChild(enabledRow);
+
+        const credentialSource = data.credential_file || 'deployment secret store';
+        section.appendChild(modalStatusRow('Authentication', 'pass', 'Deployment admin · ' + credentialSource));
+        section.appendChild(modalStatusRow(
+          'Installations',
+          'pass',
+          String(data.active_installation_credentials || 0) + ' active · short-lived and project-scoped',
+        ));
+        const authActions = el('div', '');
+        authActions.style.cssText = 'display:flex;justify-content:flex-end;margin:6px 0 12px;';
+        const rotate = el('button', 'modal-btn', 'Rotate admin credential');
+        rotate.setAttribute('data-testid', 'bridge-rotate-token');
+        rotate.addEventListener('click', async () => {
+          if (typeof confirm === 'function' && !confirm('Rotate the Session Bridge administrator credential? Provisioning clients must reload it.')) return;
+          rotate.disabled = true;
+          try {
+            const response = await fetch(HUB + '/api/v1/bridge/rotate-token', { method: 'POST' });
+            const result = await response.json();
+            if (response.ok === false || result.error) throw new Error(result.error || 'Rotation failed');
+            rotate.textContent = 'Rotated — clients must reconnect';
+          } catch (error) {
+            rotate.textContent = error.message || 'Rotation failed';
+          } finally {
+            rotate.disabled = false;
+          }
+        });
+        authActions.appendChild(rotate);
+        section.appendChild(authActions);
+
+        const remotes = Array.isArray(remoteData.remotes) ? remoteData.remotes : [];
+        const remoteHeader = el('div', 'modal-section-header', 'Configured remotes (' + remotes.length + ')');
+        remoteHeader.style.marginTop = '12px';
+        section.appendChild(remoteHeader);
+        for (const remote of remotes) {
+          const row = el('div', 'modal-row');
+          const identity = el('div', '');
+          identity.style.cssText = 'min-width:0;flex:1;';
+          identity.appendChild(el('div', 'modal-row-label', remote.name));
+          identity.appendChild(el('div', 'modal-row-detail', remote.ssh_target + ':' + remote.ssh_port));
+          row.appendChild(identity);
+          const actions = el('div', '');
+          actions.style.cssText = 'display:flex;gap:6px;';
+          const test = el('button', 'modal-btn', 'Test');
+          test.setAttribute('data-remote-test', remote.name);
+          test.addEventListener('click', async () => {
+            test.disabled = true;
+            test.textContent = 'Testing…';
+            try {
+              const result = await fetch(HUB + '/api/v1/remotes/' + encodeURIComponent(remote.name) + '/test', { method: 'POST' }).then((response) => response.json());
+              test.textContent = result.ok ? 'Connected' : (result.error || 'Unavailable');
+            } catch (_) { test.textContent = 'Unavailable'; }
+            test.disabled = false;
+          });
+          const remove = el('button', 'modal-btn danger', 'Remove');
+          remove.setAttribute('data-remote-remove', remote.name);
+          remove.addEventListener('click', async () => {
+            if (typeof confirm === 'function' && !confirm('Remove remote “' + remote.name + '”?')) return;
+            remove.disabled = true;
+            const response = await fetch(HUB + '/api/v1/remotes/' + encodeURIComponent(remote.name), { method: 'DELETE' });
+            const result = await response.json();
+            if (response.ok === false || result.error) {
+              remove.textContent = result.error || 'Failed'; remove.disabled = false; return;
+            }
+            renderBridgeModal();
+          });
+          actions.appendChild(test);
+          actions.appendChild(remove);
+          row.appendChild(actions);
+          section.appendChild(row);
+        }
+
+        const add = el('div', '');
+        add.style.cssText = 'display:grid;grid-template-columns:1fr 1.5fr 72px auto;gap:6px;margin-top:10px;';
+        const name = el('input', 'modal-input'); name.placeholder = 'Name'; name.setAttribute('aria-label', 'Remote name');
+        const target = el('input', 'modal-input'); target.placeholder = 'user@host or SSH alias'; target.setAttribute('aria-label', 'SSH target');
+        const port = el('input', 'modal-input'); port.placeholder = '22'; port.type = 'number'; port.setAttribute('aria-label', 'SSH port');
+        const addButton = el('button', 'modal-btn primary', 'Add'); addButton.setAttribute('data-testid', 'bridge-add-remote');
+        addButton.addEventListener('click', async () => {
+          if (!name.value.trim() || !target.value.trim()) return;
+          addButton.disabled = true;
+          const body = { name: name.value.trim(), ssh_target: target.value.trim() };
+          if (port.value) body.ssh_port = Number(port.value);
+          const response = await fetch(HUB + '/api/v1/remotes', {
+            method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+          });
+          const result = await response.json();
+          if (response.ok === false || result.error) {
+            addButton.textContent = result.error || 'Failed'; addButton.disabled = false; return;
+          }
+          renderBridgeModal();
+        });
+        add.appendChild(name); add.appendChild(target); add.appendChild(port); add.appendChild(addButton);
+        section.appendChild(add);
+
+        const help = el('div', 'modal-help-text');
+        help.textContent = 'Disabling rejects new bridge traffic. Targets are stable project UUID + window ID. The token is never displayed here. Delivery and acknowledgement are separate states; PTY write success is not agent acknowledgement.';
+        section.appendChild(help);
+        modalBody.appendChild(section);
+      })
+      .catch(() => {
+        if (activeModal !== 'bridge') return;
+        clearEl(modalBody);
+        modalBody.appendChild(el('div', 'modal-info error', 'Session Bridge status is unavailable. Restart the ImmorTerm Hub, then reopen this panel.'));
+      });
   }
 
   function handleInsightsResult(data) {
@@ -2940,6 +3178,7 @@ export function createModalSystem({
       { icon: '\uD83C\uDFA8', label: 'Theme', desc: 'Terminal color scheme', kind: 'theme-picker' },
       { icon: '\uD83D\uDCC2', label: 'Shelved Sessions', desc: 'Restore or delete shelved sessions', kind: 'shelved-sessions' },
       { icon: '\u26A1', label: 'Performance', desc: 'Background session memory mode', kind: 'performance' },
+      { icon: '\uD83D\uDEE1', label: 'Session Bridge', desc: 'Security, delivery states, and remote readiness', kind: 'bridge' },
       { icon: '\uD83D\uDD11', label: 'License', desc: 'Manage your license key', kind: 'license' },
     ];
 

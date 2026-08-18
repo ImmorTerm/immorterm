@@ -2129,6 +2129,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "syntect",
  "tokio",
  "tokio-tungstenite 0.24.0",

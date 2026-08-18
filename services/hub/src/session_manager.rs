@@ -653,7 +653,12 @@ impl SessionManager {
     /// by keeping the identical check.
     async fn load_registry(&self) {
         let Ok(raw) = std::fs::read_to_string(Self::registry_path()) else { return };
-        let Ok(registry): Result<Value, _> = serde_json::from_str(&raw) else { return };
+        let Ok(mut registry): Result<Value, _> = serde_json::from_str(&raw) else { return };
+        // Overlay the daemon's registry.d per-session files so AI windows that
+        // live only there are visible to this project's SessionManager. The
+        // project filter below narrows the union to this project. Read-only —
+        // this table is never written back to registry.json.
+        crate::routes::registry::union_registry_d(&mut registry);
         let Some(sessions) = registry.get("sessions").and_then(|s| s.as_array()) else { return };
         let relevant: Vec<&Value> = sessions
             .iter()

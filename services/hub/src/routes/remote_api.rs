@@ -19,16 +19,16 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
+use axum::Json;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::{broadcast, OnceCell as TokioOnceCell};
+use tokio::sync::{OnceCell as TokioOnceCell, broadcast};
 use tracing::{info, warn};
 
 // ── Schema duplicated from immorterm-daemon::remote ─────────────────
@@ -60,7 +60,7 @@ pub struct RemoteEntry {
 /// Base URL of the remote's hub as seen FROM the remote itself (curl
 /// runs over SSH inside the remote's namespace, so this is always
 /// loopback — only the port varies).
-fn remote_hub_base(entry: &RemoteEntry) -> String {
+pub(crate) fn remote_hub_base(entry: &RemoteEntry) -> String {
     format!("http://127.0.0.1:{}", entry.hub_port)
 }
 
@@ -73,9 +73,15 @@ fn strict_flag(entry: &RemoteEntry) -> &'static str {
     }
 }
 
-fn default_ssh_port() -> u16 { 22 }
-fn default_hub_port() -> u16 { crate::config::DEFAULT_HUB_PORT }
-fn default_immorterm_home() -> String { "~/.immorterm".to_string() }
+fn default_ssh_port() -> u16 {
+    22
+}
+fn default_hub_port() -> u16 {
+    crate::config::DEFAULT_HUB_PORT
+}
+fn default_immorterm_home() -> String {
+    "~/.immorterm".to_string()
+}
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct RemotesFile {
@@ -96,12 +102,15 @@ fn load_remotes() -> std::io::Result<RemotesFile> {
         return Ok(RemotesFile::default());
     }
     let raw = std::fs::read_to_string(&path)?;
-    serde_json::from_str(&raw)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    serde_json::from_str(&raw).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
-fn lookup_remote(name: &str) -> Option<RemoteEntry> {
-    load_remotes().ok()?.remotes.into_iter().find(|r| r.name == name)
+pub(crate) fn lookup_remote(name: &str) -> Option<RemoteEntry> {
+    load_remotes()
+        .ok()?
+        .remotes
+        .into_iter()
+        .find(|r| r.name == name)
 }
 
 /// Atomic save of remotes.json. Mirrors what the daemon CLI does so the
@@ -128,7 +137,9 @@ fn now_unix() -> i64 {
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
-        && name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
 }
 
 // ── Routes ──────────────────────────────────────────────────────────
@@ -141,7 +152,10 @@ pub async fn list_remotes() -> (StatusCode, Json<Value>) {
         Ok(f) => (StatusCode::OK, Json(json!({ "remotes": f.remotes }))),
         Err(e) => {
             warn!("read remotes.json failed: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
         }
     }
 }
@@ -161,40 +175,60 @@ pub struct AddRemoteReq {
 /// `POST /api/v1/remotes` — register a new remote. Mirrors what
 /// `immorterm-ai remote add` does on the CLI; the UI calls this from
 /// the Remotes Manager modal.
-pub async fn add_remote(
-    Json(req): Json<AddRemoteReq>,
-) -> (StatusCode, Json<Value>) {
+pub async fn add_remote(Json(req): Json<AddRemoteReq>) -> (StatusCode, Json<Value>) {
     if !valid_name(&req.name) {
-        return (StatusCode::BAD_REQUEST, Json(json!({
-            "error": "name must be 1–64 alphanumerics, '-' or '_'"
-        })));
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "name must be 1–64 alphanumerics, '-' or '_'"
+            })),
+        );
     }
     if req.ssh_target.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "ssh_target required" })));
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "ssh_target required" })),
+        );
     }
     let mut f = match load_remotes() {
         Ok(f) => f,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            );
+        }
     };
     if f.remotes.iter().any(|r| r.name == req.name) {
-        return (StatusCode::CONFLICT, Json(json!({
-            "error": format!("remote '{}' already exists", req.name)
-        })));
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!("remote '{}' already exists", req.name)
+            })),
+        );
     }
     let entry = RemoteEntry {
         name: req.name.clone(),
         ssh_target: req.ssh_target,
         ssh_port: req.ssh_port.unwrap_or(22),
-        immorterm_home: req.immorterm_home.unwrap_or_else(|| "~/.immorterm".to_string()),
+        immorterm_home: req
+            .immorterm_home
+            .unwrap_or_else(|| "~/.immorterm".to_string()),
         hub_port: req.hub_port.unwrap_or_else(default_hub_port),
         created_at: now_unix(),
         strict_known_hosts: false,
     };
     f.remotes.push(entry.clone());
     if let Err(e) = save_remotes(&f) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })));
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        );
     }
-    info!("[remotes] added '{}' → {}:{}", entry.name, entry.ssh_target, entry.ssh_port);
+    info!(
+        "[remotes] added '{}' → {}:{}",
+        entry.name, entry.ssh_target, entry.ssh_port
+    );
     (StatusCode::OK, Json(serde_json::to_value(&entry).unwrap()))
 }
 
@@ -222,40 +256,73 @@ pub async fn edit_remote(
 ) -> (StatusCode, Json<Value>) {
     let mut f = match load_remotes() {
         Ok(f) => f,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            );
+        }
     };
     let Some(entry) = f.remotes.iter_mut().find(|r| r.name == name) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("no remote named '{name}'") })));
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("no remote named '{name}'") })),
+        );
     };
-    if let Some(v) = req.ssh_target { entry.ssh_target = v; }
-    if let Some(v) = req.ssh_port { entry.ssh_port = v; }
-    if let Some(v) = req.immorterm_home { entry.immorterm_home = v; }
-    if let Some(v) = req.hub_port { entry.hub_port = v; }
-    if let Some(v) = req.strict_known_hosts { entry.strict_known_hosts = v; }
+    if let Some(v) = req.ssh_target {
+        entry.ssh_target = v;
+    }
+    if let Some(v) = req.ssh_port {
+        entry.ssh_port = v;
+    }
+    if let Some(v) = req.immorterm_home {
+        entry.immorterm_home = v;
+    }
+    if let Some(v) = req.hub_port {
+        entry.hub_port = v;
+    }
+    if let Some(v) = req.strict_known_hosts {
+        entry.strict_known_hosts = v;
+    }
     let updated = entry.clone();
     if let Err(e) = save_remotes(&f) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })));
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        );
     }
     info!("[remotes] edited '{}'", updated.name);
-    (StatusCode::OK, Json(serde_json::to_value(&updated).unwrap()))
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(&updated).unwrap()),
+    )
 }
 
 /// `DELETE /api/v1/remotes/{name}` — remove a remote. Doesn't kill any
 /// active tunnels using it; those die naturally on next use.
-pub async fn remove_remote(
-    Path(name): Path<String>,
-) -> (StatusCode, Json<Value>) {
+pub async fn remove_remote(Path(name): Path<String>) -> (StatusCode, Json<Value>) {
     let mut f = match load_remotes() {
         Ok(f) => f,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            );
+        }
     };
     let before = f.remotes.len();
     f.remotes.retain(|r| r.name != name);
     if f.remotes.len() == before {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("no remote named '{name}'") })));
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("no remote named '{name}'") })),
+        );
     }
     if let Err(e) = save_remotes(&f) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })));
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        );
     }
     info!("[remotes] removed '{name}'");
     (StatusCode::OK, Json(json!({ "ok": true })))
@@ -276,7 +343,10 @@ pub async fn get_remote_config(
     Query(q): Query<RegistryQuery>,
 ) -> (StatusCode, Json<Value>) {
     let Some(entry) = lookup_remote(&name) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("no remote named '{name}'") })));
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("no remote named '{name}'") })),
+        );
     };
     let qs = match q.project_dir.as_deref() {
         Some(d) if !d.is_empty() => format!("?project_dir={}", urlencoding(d)),
@@ -286,17 +356,24 @@ pub async fn get_remote_config(
     let probe = tokio::task::spawn_blocking(move || {
         Command::new("ssh")
             .args([
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=5",
-                "-o", "StrictHostKeyChecking=accept-new",
-                "-p", &entry_clone.ssh_port.to_string(),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-p",
+                &entry_clone.ssh_port.to_string(),
                 &entry_clone.ssh_target,
                 // The remote hub binds loopback inside its container/host.
                 // -s = silent, --fail = exit non-zero on HTTP error.
                 // URL shell-quoted: `qs` carries caller-controlled params.
                 &format!(
                     "curl -sf --max-time 5 {}",
-                    shell_quote(&format!("{}/api/v1/config{qs}", remote_hub_base(&entry_clone))),
+                    shell_quote(&format!(
+                        "{}/api/v1/config{qs}",
+                        remote_hub_base(&entry_clone)
+                    )),
                 ),
             ])
             .output()
@@ -306,16 +383,25 @@ pub async fn get_remote_config(
         Ok(Ok(o)) => o,
         Ok(Err(e)) => {
             warn!("[remote-config] ssh spawn failed for '{name}': {e}");
-            return (StatusCode::BAD_GATEWAY, Json(json!({ "error": format!("ssh: {e}") })));
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("ssh: {e}") })),
+            );
         }
         Err(e) => {
             warn!("[remote-config] join error for '{name}': {e}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("join: {e}") })));
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("join: {e}") })),
+            );
         }
     };
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        warn!("[remote-config] curl exit={:?}: {stderr}", out.status.code());
+        warn!(
+            "[remote-config] curl exit={:?}: {stderr}",
+            out.status.code()
+        );
         return (
             StatusCode::BAD_GATEWAY,
             Json(json!({
@@ -370,13 +456,12 @@ pub async fn put_remote_preferences(
     proxy_remote_put(&name, "/api/v1/config/preferences", body).await
 }
 
-async fn proxy_remote_put(
-    name: &str,
-    remote_path: &str,
-    body: Value,
-) -> (StatusCode, Json<Value>) {
+async fn proxy_remote_put(name: &str, remote_path: &str, body: Value) -> (StatusCode, Json<Value>) {
     let Some(entry) = lookup_remote(name) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("no remote named '{name}'") })));
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("no remote named '{name}'") })),
+        );
     };
     let body_str = serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string());
     // Shell-escape the JSON body with single quotes; embedded ' becomes '\''.
@@ -391,10 +476,14 @@ async fn proxy_remote_put(
     let probe = tokio::task::spawn_blocking(move || {
         Command::new("ssh")
             .args([
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=5",
-                "-o", "StrictHostKeyChecking=accept-new",
-                "-p", &entry_clone.ssh_port.to_string(),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-p",
+                &entry_clone.ssh_port.to_string(),
                 &entry_clone.ssh_target,
                 &cmd,
             ])
@@ -403,8 +492,18 @@ async fn proxy_remote_put(
     .await;
     let out = match probe {
         Ok(Ok(o)) => o,
-        Ok(Err(e)) => return (StatusCode::BAD_GATEWAY, Json(json!({ "error": format!("ssh: {e}") }))),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("join: {e}") }))),
+        Ok(Err(e)) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("ssh: {e}") })),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("join: {e}") })),
+            );
+        }
     };
     if !out.status.success() {
         return (
@@ -419,7 +518,10 @@ async fn proxy_remote_put(
     let body = String::from_utf8_lossy(&out.stdout);
     match serde_json::from_str::<Value>(&body) {
         Ok(v) => (StatusCode::OK, Json(v)),
-        Err(_) => (StatusCode::OK, Json(json!({ "success": true, "raw": body }))),
+        Err(_) => (
+            StatusCode::OK,
+            Json(json!({ "success": true, "raw": body })),
+        ),
     }
 }
 
@@ -443,13 +545,15 @@ pub async fn get_remote_claude_image(
     method: axum::http::Method,
 ) -> axum::response::Response {
     use axum::body::Body;
-    use axum::http::{header, StatusCode as Sc};
+    use axum::http::{StatusCode as Sc, header};
     use axum::response::Response;
 
     let Some(entry) = lookup_remote(&name) else {
         return Response::builder()
             .status(Sc::NOT_FOUND)
-            .body(Body::from(format!(r#"{{"error":"no remote named '{name}'"}}"#)))
+            .body(Body::from(format!(
+                r#"{{"error":"no remote named '{name}'"}}"#
+            )))
             .unwrap();
     };
     // Build the remote path. Mirror the local hub's layout — files at
@@ -482,10 +586,14 @@ pub async fn get_remote_claude_image(
     let probe = tokio::task::spawn_blocking(move || {
         Command::new("ssh")
             .args([
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=5",
-                "-o", "StrictHostKeyChecking=accept-new",
-                "-p", &entry_for_run.ssh_port.to_string(),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-p",
+                &entry_for_run.ssh_port.to_string(),
                 &entry_for_run.ssh_target,
                 &cmd_str,
             ])
@@ -494,26 +602,48 @@ pub async fn get_remote_claude_image(
     .await;
     let out = match probe {
         Ok(Ok(o)) => o,
-        _ => return Response::builder()
-            .status(Sc::BAD_GATEWAY)
-            .body(Body::empty())
-            .unwrap(),
+        _ => {
+            return Response::builder()
+                .status(Sc::BAD_GATEWAY)
+                .body(Body::empty())
+                .unwrap();
+        }
     };
     if !out.status.success() {
-        return Response::builder().status(Sc::NOT_FOUND).body(Body::empty()).unwrap();
+        return Response::builder()
+            .status(Sc::NOT_FOUND)
+            .body(Body::empty())
+            .unwrap();
     }
     if is_head {
         let body = String::from_utf8_lossy(&out.stdout);
         if body.trim() == "ok" {
-            return Response::builder().status(Sc::OK).body(Body::empty()).unwrap();
+            return Response::builder()
+                .status(Sc::OK)
+                .body(Body::empty())
+                .unwrap();
         }
-        return Response::builder().status(Sc::NOT_FOUND).body(Body::empty()).unwrap();
+        return Response::builder()
+            .status(Sc::NOT_FOUND)
+            .body(Body::empty())
+            .unwrap();
     }
     // GET — decode base64 + return as PNG.
     use base64::Engine;
-    let png = match base64::engine::general_purpose::STANDARD.decode(out.stdout.iter().copied().filter(|b| !b.is_ascii_whitespace()).collect::<Vec<_>>()) {
+    let png = match base64::engine::general_purpose::STANDARD.decode(
+        out.stdout
+            .iter()
+            .copied()
+            .filter(|b| !b.is_ascii_whitespace())
+            .collect::<Vec<_>>(),
+    ) {
         Ok(b) => b,
-        Err(_) => return Response::builder().status(Sc::BAD_GATEWAY).body(Body::empty()).unwrap(),
+        Err(_) => {
+            return Response::builder()
+                .status(Sc::BAD_GATEWAY)
+                .body(Body::empty())
+                .unwrap();
+        }
     };
     Response::builder()
         .status(Sc::OK)
@@ -617,10 +747,14 @@ esac
     let probe = tokio::task::spawn_blocking(move || {
         Command::new("ssh")
             .args([
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=5",
-                "-o", "StrictHostKeyChecking=accept-new",
-                "-p", &entry_for_run.ssh_port.to_string(),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-p",
+                &entry_for_run.ssh_port.to_string(),
                 &entry_for_run.ssh_target,
                 &script,
             ])
@@ -756,17 +890,20 @@ pub async fn get_remote_ls(
     // here because the only remotes we support are Linux containers /
     // Linux VPSes. Cap with `-maxdepth 1` so we never recurse — the
     // tree expands lazily one dir at a time.
-    let script = format!(
-        r#"find {quoted} -mindepth 1 -maxdepth 1 -printf '%y\t%s\t%T@\t%f\n' 2>/dev/null"#
-    );
+    let script =
+        format!(r#"find {quoted} -mindepth 1 -maxdepth 1 -printf '%y\t%s\t%T@\t%f\n' 2>/dev/null"#);
     let entry_for_run = entry.clone();
     let probe = tokio::task::spawn_blocking(move || {
         Command::new("ssh")
             .args([
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=5",
-                "-o", "StrictHostKeyChecking=accept-new",
-                "-p", &entry_for_run.ssh_port.to_string(),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-p",
+                &entry_for_run.ssh_port.to_string(),
                 &entry_for_run.ssh_target,
                 &script,
             ])
@@ -827,7 +964,10 @@ pub async fn get_remote_ls(
             _ => a["name"].as_str().cmp(&b["name"].as_str()),
         }
     });
-    (StatusCode::OK, Json(json!({ "path": path, "entries": entries })))
+    (
+        StatusCode::OK,
+        Json(json!({ "path": path, "entries": entries })),
+    )
 }
 
 /// `GET /api/v1/remotes/{name}/paste-image?path=<abs>` — fetch a
@@ -848,13 +988,15 @@ pub async fn get_remote_paste_image(
     query: axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> axum::response::Response {
     use axum::body::Body;
-    use axum::http::{header, StatusCode as Sc};
+    use axum::http::{StatusCode as Sc, header};
     use axum::response::Response;
 
     let Some(entry) = lookup_remote(&name) else {
         return Response::builder()
             .status(Sc::NOT_FOUND)
-            .body(Body::from(format!(r#"{{"error":"no remote named '{name}'"}}"#)))
+            .body(Body::from(format!(
+                r#"{{"error":"no remote named '{name}'"}}"#
+            )))
             .unwrap();
     };
     let Some(path) = query.get("path").cloned() else {
@@ -869,7 +1011,9 @@ pub async fn get_remote_paste_image(
     if path.contains("..") || !path.contains("/.immorterm/paste/") || !path.ends_with(".png") {
         return Response::builder()
             .status(Sc::FORBIDDEN)
-            .body(Body::from(r#"{"error":"path must be under ~/.immorterm/paste/ and end .png"}"#))
+            .body(Body::from(
+                r#"{"error":"path must be under ~/.immorterm/paste/ and end .png"}"#,
+            ))
             .unwrap();
     }
     let is_head = method == axum::http::Method::HEAD;
@@ -886,10 +1030,14 @@ pub async fn get_remote_paste_image(
     let probe = tokio::task::spawn_blocking(move || {
         Command::new("ssh")
             .args([
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=5",
-                "-o", "StrictHostKeyChecking=accept-new",
-                "-p", &entry_for_run.ssh_port.to_string(),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-p",
+                &entry_for_run.ssh_port.to_string(),
                 &entry_for_run.ssh_target,
                 &cmd_str,
             ])
@@ -898,27 +1046,47 @@ pub async fn get_remote_paste_image(
     .await;
     let out = match probe {
         Ok(Ok(o)) => o,
-        _ => return Response::builder()
-            .status(Sc::BAD_GATEWAY)
-            .body(Body::empty())
-            .unwrap(),
+        _ => {
+            return Response::builder()
+                .status(Sc::BAD_GATEWAY)
+                .body(Body::empty())
+                .unwrap();
+        }
     };
     if !out.status.success() {
-        return Response::builder().status(Sc::NOT_FOUND).body(Body::empty()).unwrap();
+        return Response::builder()
+            .status(Sc::NOT_FOUND)
+            .body(Body::empty())
+            .unwrap();
     }
     if is_head {
         let body = String::from_utf8_lossy(&out.stdout);
         if body.trim() == "ok" {
-            return Response::builder().status(Sc::OK).body(Body::empty()).unwrap();
+            return Response::builder()
+                .status(Sc::OK)
+                .body(Body::empty())
+                .unwrap();
         }
-        return Response::builder().status(Sc::NOT_FOUND).body(Body::empty()).unwrap();
+        return Response::builder()
+            .status(Sc::NOT_FOUND)
+            .body(Body::empty())
+            .unwrap();
     }
     use base64::Engine;
     let png = match base64::engine::general_purpose::STANDARD.decode(
-        out.stdout.iter().copied().filter(|b| !b.is_ascii_whitespace()).collect::<Vec<_>>(),
+        out.stdout
+            .iter()
+            .copied()
+            .filter(|b| !b.is_ascii_whitespace())
+            .collect::<Vec<_>>(),
     ) {
         Ok(b) => b,
-        Err(_) => return Response::builder().status(Sc::BAD_GATEWAY).body(Body::empty()).unwrap(),
+        Err(_) => {
+            return Response::builder()
+                .status(Sc::BAD_GATEWAY)
+                .body(Body::empty())
+                .unwrap();
+        }
     };
     Response::builder()
         .status(Sc::OK)
@@ -989,17 +1157,27 @@ async fn proxy_remote_registry_inner(
     body: axum::body::Bytes,
 ) -> (StatusCode, Json<Value>) {
     let Some(entry) = lookup_remote(&name) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("no remote named '{name}'") })));
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("no remote named '{name}'") })),
+        );
     };
     let qs = query.map(|s| format!("?{s}")).unwrap_or_default();
-    let rest_path = if rest.is_empty() { String::new() } else { format!("/{rest}") };
+    let rest_path = if rest.is_empty() {
+        String::new()
+    } else {
+        format!("/{rest}")
+    };
     let method_str = method.as_str().to_string();
     let body_str = String::from_utf8_lossy(&body).to_string();
     let body_esc = body_str.replace('\'', "'\\''");
 
     // URL is shell-quoted: `rest_path` and `qs` are caller-controlled and
     // would otherwise be interpreted by the remote shell.
-    let url = shell_quote(&format!("{}/api/v1/registry{rest_path}{qs}", remote_hub_base(&entry)));
+    let url = shell_quote(&format!(
+        "{}/api/v1/registry{rest_path}{qs}",
+        remote_hub_base(&entry)
+    ));
     let curl_cmd = if matches!(method_str.as_str(), "POST" | "PUT" | "DELETE") {
         format!(
             "curl -sS -f --max-time 8 -X {method_str} -H 'content-type: application/json' \
@@ -1012,10 +1190,14 @@ async fn proxy_remote_registry_inner(
     let probe = tokio::task::spawn_blocking(move || {
         Command::new("ssh")
             .args([
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=5",
-                "-o", "StrictHostKeyChecking=accept-new",
-                "-p", &entry_clone.ssh_port.to_string(),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-p",
+                &entry_clone.ssh_port.to_string(),
                 &entry_clone.ssh_target,
                 &curl_cmd,
             ])
@@ -1024,13 +1206,21 @@ async fn proxy_remote_registry_inner(
     .await;
     let out = match probe {
         Ok(Ok(o)) => o,
-        _ => return (StatusCode::BAD_GATEWAY, Json(json!({ "error": "ssh proxy failed" }))),
+        _ => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "ssh proxy failed" })),
+            );
+        }
     };
     if !out.status.success() {
-        return (StatusCode::BAD_GATEWAY, Json(json!({
-            "error": "remote registry endpoint failed",
-            "stderr": String::from_utf8_lossy(&out.stderr),
-        })));
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "error": "remote registry endpoint failed",
+                "stderr": String::from_utf8_lossy(&out.stderr),
+            })),
+        );
     }
     let raw = String::from_utf8_lossy(&out.stdout);
     let v: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({ "raw": raw }));
@@ -1045,16 +1235,26 @@ async fn proxy_remote_tasks_inner(
     body: axum::body::Bytes,
 ) -> (StatusCode, Json<Value>) {
     let Some(entry) = lookup_remote(&name) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("no remote named '{name}'") })));
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("no remote named '{name}'") })),
+        );
     };
     let qs = query.map(|s| format!("?{s}")).unwrap_or_default();
-    let rest_path = if rest.is_empty() { String::new() } else { format!("/{rest}") };
+    let rest_path = if rest.is_empty() {
+        String::new()
+    } else {
+        format!("/{rest}")
+    };
     let method_str = method.as_str().to_string();
     let body_str = String::from_utf8_lossy(&body).to_string();
     let body_esc = body_str.replace('\'', "'\\''");
 
     // URL is shell-quoted — see proxy_remote_registry_inner.
-    let url = shell_quote(&format!("{}/api/v1/tasks{rest_path}{qs}", remote_hub_base(&entry)));
+    let url = shell_quote(&format!(
+        "{}/api/v1/tasks{rest_path}{qs}",
+        remote_hub_base(&entry)
+    ));
     let curl_cmd = if matches!(method_str.as_str(), "POST" | "PUT" | "DELETE") {
         format!(
             "curl -sS -f --max-time 8 -X {method_str} -H 'content-type: application/json' \
@@ -1067,10 +1267,14 @@ async fn proxy_remote_tasks_inner(
     let probe = tokio::task::spawn_blocking(move || {
         Command::new("ssh")
             .args([
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=5",
-                "-o", "StrictHostKeyChecking=accept-new",
-                "-p", &entry_clone.ssh_port.to_string(),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-p",
+                &entry_clone.ssh_port.to_string(),
                 &entry_clone.ssh_target,
                 &curl_cmd,
             ])
@@ -1079,13 +1283,21 @@ async fn proxy_remote_tasks_inner(
     .await;
     let out = match probe {
         Ok(Ok(o)) => o,
-        _ => return (StatusCode::BAD_GATEWAY, Json(json!({ "error": "ssh proxy failed" }))),
+        _ => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "ssh proxy failed" })),
+            );
+        }
     };
     if !out.status.success() {
-        return (StatusCode::BAD_GATEWAY, Json(json!({
-            "error": "remote tasks endpoint failed",
-            "stderr": String::from_utf8_lossy(&out.stderr),
-        })));
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "error": "remote tasks endpoint failed",
+                "stderr": String::from_utf8_lossy(&out.stderr),
+            })),
+        );
     }
     let raw = String::from_utf8_lossy(&out.stdout);
     let v: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({ "raw": raw }));
@@ -1133,7 +1345,10 @@ async fn proxy_remote_get(
     axum::extract::RawQuery(query): axum::extract::RawQuery,
 ) -> (StatusCode, Json<Value>) {
     let Some(entry) = lookup_remote(&name) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("no remote named '{name}'") })));
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("no remote named '{name}'") })),
+        );
     };
     let qs = query.map(|s| format!("?{s}")).unwrap_or_default();
     // URL is shell-quoted: the query string is caller-controlled (e.g. the
@@ -1146,10 +1361,14 @@ async fn proxy_remote_get(
     let probe = tokio::task::spawn_blocking(move || {
         Command::new("ssh")
             .args([
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=5",
-                "-o", "StrictHostKeyChecking=accept-new",
-                "-p", &entry_clone.ssh_port.to_string(),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-p",
+                &entry_clone.ssh_port.to_string(),
                 &entry_clone.ssh_target,
                 &curl_cmd,
             ])
@@ -1158,13 +1377,21 @@ async fn proxy_remote_get(
     .await;
     let out = match probe {
         Ok(Ok(o)) => o,
-        _ => return (StatusCode::BAD_GATEWAY, Json(json!({ "error": "ssh proxy failed" }))),
+        _ => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "ssh proxy failed" })),
+            );
+        }
     };
     if !out.status.success() {
-        return (StatusCode::BAD_GATEWAY, Json(json!({
-            "error": "remote files endpoint failed",
-            "stderr": String::from_utf8_lossy(&out.stderr),
-        })));
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "error": "remote files endpoint failed",
+                "stderr": String::from_utf8_lossy(&out.stderr),
+            })),
+        );
     }
     let raw = String::from_utf8_lossy(&out.stdout);
     let v: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({ "raw": raw }));
@@ -1207,7 +1434,9 @@ pub async fn list_ssh_config_hosts() -> (StatusCode, Json<Value>) {
         let lower = trimmed.to_ascii_lowercase();
         if let Some(rest) = lower.strip_prefix("host ") {
             // Aliases are on the original-case line after "Host "; reparse.
-            let original_rest = trimmed.split_once(char::is_whitespace).map(|x| x.1)
+            let original_rest = trimmed
+                .split_once(char::is_whitespace)
+                .map(|x| x.1)
                 .unwrap_or("")
                 .trim();
             for alias in original_rest.split_ascii_whitespace() {
@@ -1227,23 +1456,31 @@ pub async fn list_ssh_config_hosts() -> (StatusCode, Json<Value>) {
 /// Returns `{ok, latency_ms, session_count, error?}`. Used by the
 /// Remotes Manager modal to render liveness + a session-count badge
 /// per row.
-pub async fn test_remote(
-    Path(name): Path<String>,
-) -> (StatusCode, Json<Value>) {
+pub async fn test_remote(Path(name): Path<String>) -> (StatusCode, Json<Value>) {
     let Some(entry) = lookup_remote(&name) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("no remote named '{name}'") })));
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("no remote named '{name}'") })),
+        );
     };
     let started = std::time::Instant::now();
     let entry_for_probe = entry.clone();
     let probe = tokio::task::spawn_blocking(move || {
         Command::new("ssh")
             .args([
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=5",
-                "-o", "StrictHostKeyChecking=accept-new",
-                "-p", &entry_for_probe.ssh_port.to_string(),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-p",
+                &entry_for_probe.ssh_port.to_string(),
                 &entry_for_probe.ssh_target,
-                &format!("cat {}/registry.json 2>/dev/null || echo NO_REGISTRY", entry_for_probe.immorterm_home),
+                &format!(
+                    "cat {}/registry.json 2>/dev/null || echo NO_REGISTRY",
+                    entry_for_probe.immorterm_home
+                ),
             ])
             .output()
     })
@@ -1252,26 +1489,35 @@ pub async fn test_remote(
     let out = match probe {
         Ok(Ok(o)) => o,
         Ok(Err(e)) => {
-            return (StatusCode::OK, Json(json!({
-                "ok": false,
-                "latency_ms": latency_ms,
-                "error": format!("ssh: {e}"),
-            })));
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": false,
+                    "latency_ms": latency_ms,
+                    "error": format!("ssh: {e}"),
+                })),
+            );
         }
         Err(e) => {
-            return (StatusCode::OK, Json(json!({
-                "ok": false,
-                "latency_ms": latency_ms,
-                "error": format!("join: {e}"),
-            })));
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": false,
+                    "latency_ms": latency_ms,
+                    "error": format!("join: {e}"),
+                })),
+            );
         }
     };
     if !out.status.success() {
-        return (StatusCode::OK, Json(json!({
-            "ok": false,
-            "latency_ms": latency_ms,
-            "error": String::from_utf8_lossy(&out.stderr).to_string(),
-        })));
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "ok": false,
+                "latency_ms": latency_ms,
+                "error": String::from_utf8_lossy(&out.stderr).to_string(),
+            })),
+        );
     }
     // Count sessions + project_dirs from the registry response.
     let mut session_count = 0usize;
@@ -1280,17 +1526,24 @@ pub async fn test_remote(
         if let Some(arr) = v.get("sessions").and_then(|s| s.as_array()) {
             session_count = arr.len();
             for s in arr {
-                let pd = s.get("project_dir").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let pd = s
+                    .get("project_dir")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 project_dirs.insert(pd);
             }
         }
     }
-    (StatusCode::OK, Json(json!({
-        "ok": true,
-        "latency_ms": latency_ms,
-        "session_count": session_count,
-        "project_count": project_dirs.len(),
-    })))
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "latency_ms": latency_ms,
+            "session_count": session_count,
+            "project_count": project_dirs.len(),
+        })),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -1312,22 +1565,32 @@ pub async fn get_remote_registry(
     Query(q): Query<RegistryQuery>,
 ) -> (StatusCode, Json<Value>) {
     let Some(entry) = lookup_remote(&name) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("no remote named '{name}'") })));
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("no remote named '{name}'") })),
+        );
     };
 
-    // SSH + cat. BatchMode=yes keeps auth non-interactive — relies on
-    // ssh-agent or pre-loaded keys. ConnectTimeout caps the picker
-    // hang to 5s when the remote is down.
-    let remote_registry_path = format!("{}/registry.json", entry.immorterm_home);
+    // Curl the remote hub's OWN /api/v1/registry, which UNIONs the daemon's
+    // registry.d over the global file (get_registry → load_registry_unioned) and
+    // enriches alive/ws_port. `cat registry.json` alone misses AI sessions that
+    // live only in registry.d. BatchMode=yes keeps auth non-interactive;
+    // ConnectTimeout caps the picker hang to 5s when the remote is down.
+    let url = shell_quote(&format!("{}/api/v1/registry", remote_hub_base(&entry)));
+    let curl_cmd = format!("curl -sf --max-time 5 {url}");
     let out = tokio::task::spawn_blocking(move || {
         Command::new("ssh")
             .args([
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=5",
-                "-o", "StrictHostKeyChecking=accept-new",
-                "-p", &entry.ssh_port.to_string(),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-p",
+                &entry.ssh_port.to_string(),
                 &entry.ssh_target,
-                &format!("cat {remote_registry_path}"),
+                &curl_cmd,
             ])
             .output()
     })
@@ -1337,11 +1600,17 @@ pub async fn get_remote_registry(
         Ok(Ok(o)) => o,
         Ok(Err(e)) => {
             warn!("ssh spawn failed for '{name}': {e}");
-            return (StatusCode::BAD_GATEWAY, Json(json!({ "error": e.to_string() })));
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": e.to_string() })),
+            );
         }
         Err(e) => {
             warn!("join error fetching remote '{name}': {e}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })));
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            );
         }
     };
 
@@ -1363,7 +1632,10 @@ pub async fn get_remote_registry(
         Ok(v) => v,
         Err(e) => {
             warn!("remote '{name}' registry.json was not valid JSON: {e}");
-            return (StatusCode::BAD_GATEWAY, Json(json!({ "error": e.to_string() })));
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": e.to_string() })),
+            );
         }
     };
 
@@ -1487,7 +1759,10 @@ pub async fn attach_remote(
     Json(req): Json<AttachRequest>,
 ) -> (StatusCode, Json<Value>) {
     let Some(entry) = lookup_remote(&name) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("no remote named '{name}'") })));
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("no remote named '{name}'") })),
+        );
     };
 
     // Reuse an existing tunnel if one is already open for the same
@@ -1495,18 +1770,32 @@ pub async fn attach_remote(
     {
         let map = tunnels().lock().unwrap();
         if let Some(h) = map.get(&(name.clone(), req.ws_port)) {
-            info!("reusing tunnel {} :{} → {}:{}", name, h.local_port, entry.ssh_target, req.ws_port);
-            return (StatusCode::OK, Json(serde_json::to_value(&AttachResponse {
-                local_port: h.local_port,
-                remote: name.clone(),
-                remote_ws_port: req.ws_port,
-            }).unwrap()));
+            info!(
+                "reusing tunnel {} :{} → {}:{}",
+                name, h.local_port, entry.ssh_target, req.ws_port
+            );
+            return (
+                StatusCode::OK,
+                Json(
+                    serde_json::to_value(&AttachResponse {
+                        local_port: h.local_port,
+                        remote: name.clone(),
+                        remote_ws_port: req.ws_port,
+                    })
+                    .unwrap(),
+                ),
+            );
         }
     }
 
     let local_port = match pick_free_port() {
         Ok(p) => p,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            );
+        }
     };
 
     // `-N` skip remote command, `-T` no pty, `-o ExitOnForwardFailure=yes`
@@ -1514,14 +1803,22 @@ pub async fn attach_remote(
     // silently hand back a port pointing nowhere). Run in background.
     let mut cmd = Command::new("ssh");
     cmd.args([
-        "-N", "-T",
-        "-o", "BatchMode=yes",
-        "-o", "ConnectTimeout=5",
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", "ExitOnForwardFailure=yes",
-        "-o", "ServerAliveInterval=30",
-        "-p", &entry.ssh_port.to_string(),
-        "-L", &format!("127.0.0.1:{local_port}:127.0.0.1:{}", req.ws_port),
+        "-N",
+        "-T",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-o",
+        "ServerAliveInterval=30",
+        "-p",
+        &entry.ssh_port.to_string(),
+        "-L",
+        &format!("127.0.0.1:{local_port}:127.0.0.1:{}", req.ws_port),
         &entry.ssh_target,
     ]);
 
@@ -1534,7 +1831,10 @@ pub async fn attach_remote(
         Ok(c) => c,
         Err(e) => {
             warn!("ssh tunnel spawn failed: {e}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })));
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            );
         }
     };
 
@@ -1542,29 +1842,41 @@ pub async fn attach_remote(
     // a fixed sleep. Returns in ~25ms on a fast LAN, waits up to 5s on a
     // cold/slow SSH, and reports ssh's stderr on auth/forward failure.
     if let Err(e) = wait_for_tunnel(&mut child, local_port, std::time::Duration::from_secs(5)) {
-        warn!("tunnel {} :{} → {}:{} failed: {e}", name, local_port, entry.ssh_target, req.ws_port);
+        warn!(
+            "tunnel {} :{} → {}:{} failed: {e}",
+            name, local_port, entry.ssh_target, req.ws_port
+        );
         let _ = child.kill();
         return (StatusCode::BAD_GATEWAY, Json(json!({ "error": e })));
     }
 
-    info!("opened tunnel {} :{} → {}:{} (ssh pid {})",
-          name, local_port, entry.ssh_target, req.ws_port, child.id());
+    info!(
+        "opened tunnel {} :{} → {}:{} (ssh pid {})",
+        name,
+        local_port,
+        entry.ssh_target,
+        req.ws_port,
+        child.id()
+    );
 
     {
         let mut map = tunnels().lock().unwrap();
-        map.insert((name.clone(), req.ws_port), TunnelHandle {
-            local_port,
-            child,
-        });
+        map.insert(
+            (name.clone(), req.ws_port),
+            TunnelHandle { local_port, child },
+        );
     }
 
     (
         StatusCode::OK,
-        Json(serde_json::to_value(&AttachResponse {
-            local_port,
-            remote: name,
-            remote_ws_port: req.ws_port,
-        }).unwrap()),
+        Json(
+            serde_json::to_value(&AttachResponse {
+                local_port,
+                remote: name,
+                remote_ws_port: req.ws_port,
+            })
+            .unwrap(),
+        ),
     )
 }
 
@@ -1608,7 +1920,10 @@ pub async fn spawn_remote_session(
     Json(req): Json<SpawnRequest>,
 ) -> (StatusCode, Json<Value>) {
     let Some(entry) = lookup_remote(&name) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("no remote named '{name}'") })));
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("no remote named '{name}'") })),
+        );
     };
 
     // Derive a session name client-side so we can immediately look it up
@@ -1706,8 +2021,18 @@ pub async fn spawn_remote_session(
 
     let out = match spawn_cmd {
         Ok(Ok(o)) => o,
-        Ok(Err(e)) => return (StatusCode::BAD_GATEWAY, Json(json!({ "error": format!("ssh: {e}") }))),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+        Ok(Err(e)) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("ssh: {e}") })),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            );
+        }
     };
     if !out.status.success() {
         return (
@@ -1724,18 +2049,30 @@ pub async fn spawn_remote_session(
     // daemon writes it after double-fork; usually visible within a second
     // but we give it up to 5 polling attempts at 300ms each.
     let mut ws_port: Option<u16> = None;
+    // Poll the remote hub's OWN unioned /api/v1/registry (not `cat registry.json`)
+    // so a daemon that only wrote its registry.d file — and the live ws_port the
+    // hub enriches for alive sessions — is visible. cat misses both and can hand
+    // back a stale ws_port that tunnels to a dead port.
+    let poll_cmd = format!(
+        "curl -sf --max-time 5 {}",
+        shell_quote(&format!("{}/api/v1/registry", remote_hub_base(&entry))),
+    );
     for _ in 0..15 {
         let entry_for_poll = entry.clone();
-        let path = format!("{}/registry.json", entry_for_poll.immorterm_home);
+        let poll_cmd = poll_cmd.clone();
         let probe = tokio::task::spawn_blocking(move || {
             Command::new("ssh")
                 .args([
-                    "-o", "BatchMode=yes",
-                    "-o", "ConnectTimeout=5",
-                    "-o", "StrictHostKeyChecking=accept-new",
-                    "-p", &entry_for_poll.ssh_port.to_string(),
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ConnectTimeout=5",
+                    "-o",
+                    "StrictHostKeyChecking=accept-new",
+                    "-p",
+                    &entry_for_poll.ssh_port.to_string(),
                     &entry_for_poll.ssh_target,
-                    &format!("cat {path}"),
+                    &poll_cmd,
                 ])
                 .output()
         })
@@ -1777,26 +2114,36 @@ pub async fn spawn_remote_session(
     // path by calling it inline — same in-process tunnel cache.
     let local_port = match attach_inner(&entry, ws_port).await {
         Ok(p) => p,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e })),
+            );
+        }
     };
 
-    info!("spawned remote session {session_name} on {} → ws_port={ws_port}, local_port={local_port}",
-          entry.ssh_target);
+    info!(
+        "spawned remote session {session_name} on {} → ws_port={ws_port}, local_port={local_port}",
+        entry.ssh_target
+    );
 
     (
         StatusCode::OK,
-        Json(serde_json::to_value(&SpawnResponse {
-            session_name,
-            ws_port,
-            local_port,
-        }).unwrap()),
+        Json(
+            serde_json::to_value(&SpawnResponse {
+                session_name,
+                ws_port,
+                local_port,
+            })
+            .unwrap(),
+        ),
     )
 }
 
 /// Inline attach used by `spawn_remote_session` to avoid a second HTTP
 /// round-trip back through the hub. Same logic as `attach_remote` body
 /// but works against a `RemoteEntry` directly.
-async fn attach_inner(entry: &RemoteEntry, ws_port: u16) -> Result<u16, String> {
+pub(crate) async fn attach_inner(entry: &RemoteEntry, ws_port: u16) -> Result<u16, String> {
     {
         let map = tunnels().lock().unwrap();
         if let Some(h) = map.get(&(entry.name.clone(), ws_port)) {
@@ -1806,20 +2153,34 @@ async fn attach_inner(entry: &RemoteEntry, ws_port: u16) -> Result<u16, String> 
     let local_port = pick_free_port().map_err(|e| e.to_string())?;
     let mut cmd = Command::new("ssh");
     cmd.args([
-        "-N", "-T",
-        "-o", "BatchMode=yes",
-        "-o", "ConnectTimeout=5",
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", "ExitOnForwardFailure=yes",
-        "-o", "ServerAliveInterval=30",
-        "-p", &entry.ssh_port.to_string(),
-        "-L", &format!("127.0.0.1:{local_port}:127.0.0.1:{ws_port}"),
+        "-N",
+        "-T",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-o",
+        "ServerAliveInterval=30",
+        "-p",
+        &entry.ssh_port.to_string(),
+        "-L",
+        &format!("127.0.0.1:{local_port}:127.0.0.1:{ws_port}"),
         &entry.ssh_target,
     ]);
     let child = cmd.spawn().map_err(|e| e.to_string())?;
     std::thread::sleep(std::time::Duration::from_millis(400));
-    info!("opened tunnel (via spawn) {} :{} → {}:{} (ssh pid {})",
-          entry.name, local_port, entry.ssh_target, ws_port, child.id());
+    info!(
+        "opened tunnel (via spawn) {} :{} → {}:{} (ssh pid {})",
+        entry.name,
+        local_port,
+        entry.ssh_target,
+        ws_port,
+        child.id()
+    );
     {
         let mut map = tunnels().lock().unwrap();
         map.insert(
@@ -1844,7 +2205,7 @@ async fn attach_inner(entry: &RemoteEntry, ws_port: u16) -> Result<u16, String> 
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
-enum RegistryEvent {
+pub(crate) enum RegistryEvent {
     #[serde(rename = "session_added")]
     SessionAdded { session: Value },
     #[serde(rename = "session_removed")]
@@ -1866,18 +2227,23 @@ struct WatcherHandle {
 }
 
 fn watchers() -> &'static tokio::sync::Mutex<StdHashMap<String, WatcherHandle>> {
-    static W: TokioOnceCell<tokio::sync::Mutex<StdHashMap<String, WatcherHandle>>> = TokioOnceCell::const_new();
+    static W: TokioOnceCell<tokio::sync::Mutex<StdHashMap<String, WatcherHandle>>> =
+        TokioOnceCell::const_new();
     // We block_on init only in a non-async context — but this getter is
     // only called from async, so use try_get_or_init() pattern via leak.
     // OnceLock works fine for Mutex<HashMap> — no async init needed.
-    static SYNC_W: std::sync::OnceLock<tokio::sync::Mutex<StdHashMap<String, WatcherHandle>>> = std::sync::OnceLock::new();
+    static SYNC_W: std::sync::OnceLock<tokio::sync::Mutex<StdHashMap<String, WatcherHandle>>> =
+        std::sync::OnceLock::new();
     let _ = &W; // silence unused
     SYNC_W.get_or_init(|| tokio::sync::Mutex::new(StdHashMap::new()))
 }
 
 /// Spawn (or return existing) a watcher for the given remote. The first
 /// caller wins; subsequent calls reuse the same broadcast channel.
-async fn ensure_watcher(name: &str, entry: RemoteEntry) -> broadcast::Sender<RegistryEvent> {
+pub(crate) async fn ensure_watcher(
+    name: &str,
+    entry: RemoteEntry,
+) -> broadcast::Sender<RegistryEvent> {
     let mut map = watchers().lock().await;
     if let Some(h) = map.get(name) {
         return h.tx.clone();
@@ -1895,11 +2261,7 @@ async fn ensure_watcher(name: &str, entry: RemoteEntry) -> broadcast::Sender<Reg
     tx
 }
 
-async fn run_watcher(
-    name: String,
-    entry: RemoteEntry,
-    tx: broadcast::Sender<RegistryEvent>,
-) {
+async fn run_watcher(name: String, entry: RemoteEntry, tx: broadcast::Sender<RegistryEvent>) {
     // Watch the global `~/.immorterm/` dir PLUS every per-project
     // `<project_dir>/.immorterm/` enumerated from the remote registry.
     // Per-project theme changes write to those files, so a watcher
@@ -1924,26 +2286,43 @@ async fn run_watcher(
         } else {
             extra.join(" ")
         };
+        // -r so the daemon's single-writer registry.d/<project_id>/<window_id>.json
+        // add/remove fires events — those live below ~/.immorterm/ and a flat watch
+        // never sees them. moved_to + delete are required: the daemon writes via
+        // tmp+rename (IN_MOVED_TO, not close_write) and removes via unlink. --exclude
+        // keeps busy per-project terminal logs and rotating registry backups from
+        // flooding us, which is why -r was originally avoided.
         format!(
-            "stdbuf -oL inotifywait -m -q -e close_write --format '%w%f' \
+            "stdbuf -oL inotifywait -m -r -q \
+                -e close_write -e moved_to -e create -e delete \
+                --exclude '(/terminals/|registry-backups/|/sockets/)' \
+                --format '%w%f' \
                 {watch_dir}/ {extra_args} \
                 2>&1 || echo WATCH_FAILED",
         )
     };
     let remote_cmd = build_cmd(&[]);
 
-    info!("[watcher:{name}] starting inotifywait on {} via ssh {}", watch_dir, entry.ssh_target);
+    info!(
+        "[watcher:{name}] starting inotifywait on {} via ssh {}",
+        watch_dir, entry.ssh_target
+    );
 
     // Need `let mut` so we can respawn the child later with a wider
     // watch set when a new project_dir shows up.
     #[allow(unused_mut)]
     let mut child = match tokio::process::Command::new("ssh")
         .args([
-            "-o", "BatchMode=yes",
-            "-o", "ConnectTimeout=5",
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "ServerAliveInterval=30",
-            "-p", &entry.ssh_port.to_string(),
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=5",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            "ServerAliveInterval=30",
+            "-p",
+            &entry.ssh_port.to_string(),
             &entry.ssh_target,
             &remote_cmd,
         ])
@@ -1974,7 +2353,11 @@ async fn run_watcher(
             if let Some(n) = s.get("name").and_then(|v| v.as_str()) {
                 last.insert(n.to_string(), s.clone());
             }
-            if let Some(pd) = s.get("project_dir").and_then(|v| v.as_str()).map(|s| s.to_string()) {
+            if let Some(pd) = s
+                .get("project_dir")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+            {
                 if !pd.is_empty() {
                     watched_project_dirs.insert(pd);
                 }
@@ -1987,11 +2370,16 @@ async fn run_watcher(
             let _ = child.kill().await;
             child = match tokio::process::Command::new("ssh")
                 .args([
-                    "-o", "BatchMode=yes",
-                    "-o", "ConnectTimeout=5",
-                    "-o", "StrictHostKeyChecking=accept-new",
-                    "-o", "ServerAliveInterval=30",
-                    "-p", &entry.ssh_port.to_string(),
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ConnectTimeout=5",
+                    "-o",
+                    "StrictHostKeyChecking=accept-new",
+                    "-o",
+                    "ServerAliveInterval=30",
+                    "-p",
+                    &entry.ssh_port.to_string(),
                     &entry.ssh_target,
                     &new_cmd,
                 ])
@@ -2010,7 +2398,10 @@ async fn run_watcher(
             };
             let stdout = child.stdout.take().expect("piped");
             reader = BufReader::new(stdout).lines();
-            info!("[watcher:{name}] expanded watch set: {} project dir(s)", watched_project_dirs.len());
+            info!(
+                "[watcher:{name}] expanded watch set: {} project dir(s)",
+                watched_project_dirs.len()
+            );
         }
         let _ = tx.send(RegistryEvent::Snapshot { sessions: initial });
     }
@@ -2041,13 +2432,20 @@ async fn run_watcher(
                             let _ = tx.send(RegistryEvent::ConfigChanged);
                             continue;
                         }
-                        if basename != "registry.json" {
+                        // registry.json (hub global) OR any
+                        // registry.d/<project_id>/<window_id>.json (daemon
+                        // single-writer) → re-diff sessions. config.json above.
+                        if basename != "registry.json" && !l.contains("/registry.d/") {
                             // Ignore other files in ~/.immorterm/ that
                             // we don't care about (logs, sockets, etc.).
                             continue;
                         }
                         // Re-fetch registry and diff
                         if let Some(now) = fetch_remote_sessions(&entry).await {
+                            // Activity/attention/heartbeat changes are updates,
+                            // not additions/removals. Always emit the fresh
+                            // snapshot so bridge subscribers stay event-driven.
+                            let _ = tx.send(RegistryEvent::Snapshot { sessions: now.clone() });
                             let now_names: HashSet<String> = now.iter()
                                 .filter_map(|s| s.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
                                 .collect();
@@ -2136,18 +2534,27 @@ async fn run_watcher(
 /// One-shot SSH fetch of the remote registry, returning the sessions
 /// array (tagged with remote name + alive:true to match the rest of the
 /// API). None on transport failure.
-async fn fetch_remote_sessions(entry: &RemoteEntry) -> Option<Vec<Value>> {
-    let path = format!("{}/registry.json", entry.immorterm_home);
+pub(crate) async fn fetch_remote_sessions(entry: &RemoteEntry) -> Option<Vec<Value>> {
+    // Curl the remote hub's unioned /api/v1/registry (see get_remote_registry)
+    // rather than `cat registry.json`, which misses registry.d-only sessions.
+    let curl_cmd = format!(
+        "curl -sf --max-time 5 {}",
+        shell_quote(&format!("{}/api/v1/registry", remote_hub_base(entry))),
+    );
     let entry_clone = entry.clone();
     let out = tokio::task::spawn_blocking(move || {
         Command::new("ssh")
             .args([
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=5",
-                "-o", "StrictHostKeyChecking=accept-new",
-                "-p", &entry_clone.ssh_port.to_string(),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-p",
+                &entry_clone.ssh_port.to_string(),
                 &entry_clone.ssh_target,
-                &format!("cat {path}"),
+                &curl_cmd,
             ])
             .output()
     })
@@ -2172,14 +2579,178 @@ async fn fetch_remote_sessions(entry: &RemoteEntry) -> Option<Vec<Value>> {
     Some(sessions)
 }
 
+pub(crate) async fn configured_remote_sessions() -> Vec<Value> {
+    let mut all = Vec::new();
+    let remotes = load_remotes().unwrap_or_default().remotes;
+    for remote in remotes {
+        if let Some(mut sessions) = fetch_remote_sessions(&remote).await {
+            all.append(&mut sessions);
+        }
+    }
+    all
+}
+
+pub(crate) fn configured_remotes() -> Vec<RemoteEntry> {
+    load_remotes().unwrap_or_default().remotes
+}
+
+/// Deliver through the remote host's own authenticated bridge. The only
+/// selectable destination is a configured RemoteEntry; the remote command is
+/// fixed and the JSON body is single-quote escaped. The bearer secret never
+/// crosses back to the local hub.
+pub(crate) async fn post_remote_bridge_message(name: &str, body: &Value) -> Result<Value, String> {
+    let entry =
+        lookup_remote(name).ok_or_else(|| format!("no configured remote named '{name}'"))?;
+    let project_id = body["project_id"]
+        .as_str()
+        .ok_or("remote bridge message is missing canonical project_id")?;
+    let token = provision_remote_bridge_credential(&entry, project_id, &["message:send"]).await?;
+    let port = attach_inner(&entry, entry.hub_port).await?;
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/api/v1/bridge/messages"))
+        .bearer_auth(token)
+        .json(body)
+        .send()
+        .await
+        .map_err(|error| format!("remote bridge transport failed: {error}"))?;
+    let status = response.status();
+    let payload: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("invalid remote bridge response: {error}"))?;
+    if !status.is_success() {
+        return Err(format!("remote bridge rejected message ({status}): {payload}"));
+    }
+    Ok(payload)
+}
+
+#[derive(Clone)]
+struct CachedBridgeCredential {
+    token: String,
+    expires_at: u64,
+}
+
+fn remote_bridge_credentials(
+) -> &'static tokio::sync::Mutex<StdHashMap<String, CachedBridgeCredential>> {
+    static CREDENTIALS: OnceLock<
+        tokio::sync::Mutex<StdHashMap<String, CachedBridgeCredential>>,
+    > = OnceLock::new();
+    CREDENTIALS.get_or_init(|| tokio::sync::Mutex::new(StdHashMap::new()))
+}
+
+/// Use the remote deployment credential only to mint a short-lived,
+/// project-bound relay installation credential. Directory/message/event
+/// traffic never runs with deployment authority.
+pub(crate) async fn provision_remote_bridge_credential(
+    entry: &RemoteEntry,
+    project_id: &str,
+    operations: &[&str],
+) -> Result<String, String> {
+    let mut canonical_operations = operations.to_vec();
+    canonical_operations.sort_unstable();
+    let cache_key = format!(
+        "{}:{project_id}:{}",
+        entry.name,
+        canonical_operations.join(",")
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    if let Some(cached) = remote_bridge_credentials()
+        .lock()
+        .await
+        .get(&cache_key)
+        .filter(|cached| cached.expires_at > now.saturating_add(60_000))
+        .cloned()
+    {
+        return Ok(cached.token);
+    }
+    let admin_token = fetch_remote_bridge_token(entry).await?;
+    let port = attach_inner(entry, entry.hub_port).await?;
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{port}/api/v1/bridge/installations/credentials"
+        ))
+        .bearer_auth(admin_token)
+        .json(&json!({
+            "installation_id":"immorterm-hub-relay",
+            "project_id":project_id,
+            "audience":"immorterm-remote-hub",
+            "operations":canonical_operations,
+            "ttl_seconds":3600,
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("remote bridge provisioning failed: {error}"))?;
+    let status = response.status();
+    let payload: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("invalid remote credential response: {error}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "remote bridge credential rejected ({status}): {payload}"
+        ));
+    }
+    let token = payload["token"]
+        .as_str()
+        .filter(|token| token.len() >= 32)
+        .map(str::to_string)
+        .ok_or_else(|| "remote bridge credential response omitted token".to_string())?;
+    let expires_at = payload["expires_at"]
+        .as_u64()
+        .ok_or("remote bridge credential response omitted expires_at")?;
+    remote_bridge_credentials().lock().await.insert(
+        cache_key,
+        CachedBridgeCredential {
+            token: token.clone(),
+            expires_at,
+        },
+    );
+    Ok(token)
+}
+
+pub(crate) async fn fetch_remote_bridge_token(entry: &RemoteEntry) -> Result<String, String> {
+    let entry = entry.clone();
+    tokio::task::spawn_blocking(move || {
+        let output = Command::new("ssh")
+            .args([
+                "-T",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                strict_flag(&entry),
+                "-p",
+                &entry.ssh_port.to_string(),
+                &entry.ssh_target,
+                "cat ~/.immorterm/bridge-token",
+            ])
+            .output()
+            .map_err(|e| format!("cannot read remote bridge credential: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "remote bridge credential unavailable: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if token.len() < 32 {
+            return Err("remote bridge credential is invalid".into());
+        }
+        Ok(token)
+    })
+    .await
+    .map_err(|e| format!("remote credential task failed: {e}"))?
+}
+
 /// `GET /api/v1/remotes/{name}/events` — WebSocket upgrade. Each connected
 /// webview receives a `snapshot` event first, then `session_added` /
 /// `session_removed` per change. Connection stays open until the webview
 /// closes it or the watcher dies.
-pub async fn remote_events_ws(
-    Path(name): Path<String>,
-    ws: WebSocketUpgrade,
-) -> impl IntoResponse {
+pub async fn remote_events_ws(Path(name): Path<String>, ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_remote_events(name, socket))
 }
 

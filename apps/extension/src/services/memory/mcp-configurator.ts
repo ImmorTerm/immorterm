@@ -443,10 +443,31 @@ export function migrateFromGlobalConfig(): void {
  */
 export function refreshMcpConfig(projectPath: string): void {
   try {
-    const config = readMCPConfig(projectPath);
-    (config as Record<string, unknown>)._reconnect_ts = Date.now();
     const configPath = getMCPConfigPath(projectPath);
+    const originalRaw = fs.readFileSync(configPath, 'utf8');
+    const config = JSON.parse(originalRaw) as Record<string, unknown>;
+    // .mcp.json is committed to git, so the reconnect nonce must never REST in
+    // the file — agents in the repo see it as perpetual dirt. Write the nonce
+    // to fire Claude Code's file watcher, then restore the canonical bytes.
+    // Self-heal: if a previous run died mid-window, strip its stale nonce so
+    // the restored content is nonce-free rather than the crashed snapshot.
+    const hadStaleNonce = '_reconnect_ts' in config;
+    if (hadStaleNonce) delete config._reconnect_ts;
+    const canonicalRaw = hadStaleNonce ? JSON.stringify(config, null, 2) : originalRaw;
+    config._reconnect_ts = Date.now();
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
+    setTimeout(() => {
+      try {
+        const current = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        // Restore only if our nonce is still the last write — a concurrent
+        // user/agent edit within the window wins over the restore.
+        if (current && typeof current === 'object' && '_reconnect_ts' in current) {
+          fs.writeFileSync(configPath, canonicalRaw, 'utf8');
+        }
+      } catch {
+        // File unreadable/edited mid-window — leave it alone.
+      }
+    }, 2000);
     console.log('[mcp] Refreshed config to trigger MCP reconnect');
   } catch (error) {
     console.error('[mcp] Failed to refresh MCP config:', error);

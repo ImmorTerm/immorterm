@@ -400,6 +400,92 @@ function normalizeRegistryKeys(data: RegistryJson): void {
     }
 }
 
+// Per-project session directory the daemon dual-writes: one full RegistryEntry
+// per file at registry.d/<project_id>/<window_id>.json. Phase 2 cutover reads
+// this in preference to the global registry.json when the dir is populated.
+const REGISTRY_DIR = path.join(os.homedir(), '.immorterm', 'registry.d');
+
+/** Read this project's per-session files from registry.d/<ownProjectId>/*.json.
+ *  Each file is a full RegistryEntry dual-writing BOTH ai_session_id and the
+ *  legacy claude_session_id, so we run the SAME normalizeRegistryKeys (drop the
+ *  legacy key when the modern one is present) as the global-file read does.
+ *  Returns null when the dir is absent or yields no usable entries — the signal
+ *  for callers to fall back to the global registry.json unchanged. */
+export function readSessionsFromDir(ownProjectId: string | null): RegistryEntryJson[] | null {
+    if (!ownProjectId) return null;
+    const dir = path.join(REGISTRY_DIR, ownProjectId);
+    let files: string[];
+    try {
+        files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
+    } catch {
+        return null; // dir missing → fall back to global file
+    }
+    if (files.length === 0) return null;
+    const sessions: RegistryEntryJson[] = [];
+    for (const f of files) {
+        try {
+            sessions.push(JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')) as RegistryEntryJson);
+        } catch { /* malformed/partial file mid-write — skip it */ }
+    }
+    if (sessions.length === 0) return null;
+    normalizeRegistryKeys({ sessions });
+    return sessions;
+}
+
+/** Fields the Rust daemon is the SINGLE writer of. When a window exists in
+ *  BOTH registry.json and its per-session registry.d file, the registry.d
+ *  value is authoritative for these. Everything else on the entry
+ *  (display_name, title, title_locked, theme, session_status, shelved_at,
+ *  claude_resume_id, session order…) is extension-owned and only lives fresh
+ *  in registry.json + pendingWriteData, so it is kept from the global side. */
+const DAEMON_OWNED_FIELDS = [
+    // `name` is the screen-session identity: the extension creates entries with
+    // name:'' and the daemon fills the real value, so it is daemon-owned. It
+    // must overlay from registry.d — a stale/empty `name` on the global side
+    // otherwise trips `if (!session.name) continue` in restore and drops the tab.
+    'name', 'pid', 'ws_port', 'session_type',
+    'ai_session_id', 'ai_transcript_path', 'ai_stats',
+    'structured_log_dir',
+    'owner_project_dir', 'owner_project_id', 'owner_project_name',
+    'worktree',
+] as const;
+
+/** Field-level UNION of the global registry.json view and the partial,
+ *  AI-only per-session registry.d view, keyed by window_id.
+ *
+ *  registry.d is written ONLY by session_type="ai" daemons (one file each) and
+ *  never carries the extension's own field-writes, so it can never REPLACE
+ *  registry.json — only overlay its daemon-owned fields onto it:
+ *    - window in BOTH: start from the global entry (extension-fresh), overlay
+ *      ONLY DAEMON_OWNED_FIELDS from the dir entry.
+ *    - window only in registry.d: added as-is (a daemon the global file hasn't
+ *      persisted yet).
+ *    - window only in registry.json: kept untouched.
+ *
+ *  Global entries are shallow-cloned before overlay so the read cache is never
+ *  mutated. Empty/absent dir → the global sessions unchanged (fully reversible). */
+export function mergeRegistryDOverGlobal(
+    globalSessions: RegistryEntryJson[],
+    dirSessions: RegistryEntryJson[] | null,
+): RegistryEntryJson[] {
+    normalizeRegistryKeys({ sessions: globalSessions });
+    if (!dirSessions || dirSessions.length === 0) return globalSessions;
+
+    const byWindow = new Map<string, RegistryEntryJson>();
+    for (const e of globalSessions) byWindow.set(e.window_id, { ...e });
+
+    for (const d of dirSessions) {
+        const g = byWindow.get(d.window_id);
+        if (!g) { byWindow.set(d.window_id, d); continue; }
+        const dr = d as unknown as Record<string, unknown>;
+        const gr = g as unknown as Record<string, unknown>;
+        for (const f of DAEMON_OWNED_FIELDS) {
+            if (dr[f] !== undefined) gr[f] = dr[f];
+        }
+    }
+    return [...byWindow.values()];
+}
+
 function readRegistry(): RegistryJson | null {
     // CRITICAL: If we have unflushed pending writes, return them.
     // Without this guard, a daemon write during the 100ms coalescing window
@@ -434,6 +520,11 @@ function readRegistry(): RegistryJson | null {
 
         normalizeRegistryKeys(data);
         cache = { data, mtime: currentMtime };
+        // Snapshot what disk actually said, before any caller mutates `data`
+        // in place. flushRegistryToDisk() diffs against this to work out which
+        // entries WE changed, so it can impose only those instead of stamping
+        // our whole (possibly stale) view over everyone else's.
+        diskBaseline = structuredClone(data);
         return data;
     } catch (err) {
         // ROOT CAUSE FIX #2: Instead of returning null (which leads to empty overwrites),
@@ -454,6 +545,13 @@ function readRegistry(): RegistryJson | null {
 // (so reads always see fresh data), but disk I/O is deferred by 100ms.
 let writeTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingWriteData: RegistryJson | null = null;
+
+/**
+ * The registry exactly as last read from (or written to) disk, before any
+ * in-place mutation by callers. `flushRegistryToDisk()` diffs the pending data
+ * against this to identify which entries this process actually changed.
+ */
+let diskBaseline: RegistryJson | null = null;
 
 /**
  * Copy of `data` with each vendor-neutral key mirrored back under its legacy
@@ -483,12 +581,113 @@ function withLegacyKeyMirror(data: RegistryJson): RegistryJson {
     };
 }
 
+// ── Cross-process write serialization ─────────────────────────────
+//
+// registry.json has ~90 daemon writers plus one extension host per VS Code
+// window plus the hub, and every one of them does read → modify → write.
+// Nothing serialized them, so a writer's snapshot silently erased entries that
+// appeared after its read — measured at 87 live sessions with only 28
+// registered, and worst during a multi-window restore when every host flushes
+// at once.
+//
+// Two changes fix it together: this advisory lock and the three-way merge
+// below. The lock is what makes the re-read inside the merge meaningful.
+//
+// THE lock is flock(2) on ~/.immorterm/registry.lock — the SAME advisory lock
+// the Rust daemon takes (`nix::fcntl::Flock`, registry.rs `lock_registry`) and
+// the hub takes (`libc::flock`, hub routes/registry.rs `lock_registry`). All
+// three interoperate ONLY because all three are flock(2) on this one path. The
+// previous `O_CREAT|O_EXCL` lockfile did NOT interlock with the daemon's
+// flock — two orthogonal locking domains on the same file — so daemon and
+// extension could write concurrently. flock releases automatically when the fd
+// closes (incl. process death), so there is no stale lockfile to reclaim.
+const REGISTRY_LOCK_PATH = path.join(os.homedir(), '.immorterm', 'registry.lock');
+
+// Node has no stdlib flock; on macOS/BSD open(O_EXLOCK) takes an exclusive
+// flock(2) lock as part of open, interlocking with the daemon and hub.
+// ponytail: macOS/BSD only — O_EXLOCK is undefined on Linux, where we degrade
+// to unlocked (the merge below still guards whole-file clobber). Add a native
+// flock addon if the extension is ever run on a Linux host. Upstream is macOS.
+const O_EXLOCK: number | undefined = (fs.constants as Record<string, number | undefined>).O_EXLOCK;
+
+/**
+ * Run `fn` holding an exclusive flock(2) lock on the registry — the same lock
+ * the daemon and hub take, so all writers actually interlock. Blocks in
+ * `openSync` until the lock is granted (matching the daemon's blocking
+ * `LockExclusive`; holders keep it only microseconds). Released on fd close.
+ * On a platform without O_EXLOCK, or any lock error, we run unlocked — the
+ * three-way merge still prevents whole-file clobbering, the damaging half.
+ */
+function withRegistryLock<T>(fn: () => T): T {
+    try { fs.mkdirSync(path.dirname(REGISTRY_LOCK_PATH), { recursive: true }); } catch { /* exists */ }
+    if (O_EXLOCK === undefined) return fn(); // no flock-on-open here → merge-only
+    let fd: number | undefined;
+    try {
+        fd = fs.openSync(REGISTRY_LOCK_PATH, fs.constants.O_CREAT | fs.constants.O_WRONLY | O_EXLOCK);
+    } catch (e) {
+        logFn(`[registry] lock error (${e}) — writing unserialized`);
+    }
+    try {
+        return fn();
+    } finally {
+        if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* ignore */ } }
+    }
+}
+
+/** Identity for merge purposes — mirrors the Rust side: name, else window_id. */
+function mergeKey(e: RegistryEntryJson): string {
+    return (e.name as string) || (e.window_id as string) || '';
+}
+
+/**
+ * Apply only OUR changes on top of whatever is on disk right now:
+ *   - in baseline, gone from ours    → we deleted it        → drop
+ *   - ours differs from baseline     → we changed it        → write ours
+ *   - unchanged since baseline       → someone else owns it → keep disk's
+ *   - on disk, never in our baseline → arrived after we read → keep
+ */
+function mergeRegistry(
+    disk: RegistryEntryJson[],
+    baseline: RegistryEntryJson[],
+    mine: RegistryEntryJson[],
+): RegistryEntryJson[] {
+    const baseMap = new Map(baseline.map(e => [mergeKey(e), JSON.stringify(e)]));
+    const mineMap = new Map(mine.map(e => [mergeKey(e), e]));
+    const out: RegistryEntryJson[] = [];
+
+    for (const diskEntry of disk) {
+        const key = mergeKey(diskEntry);
+        const ours = mineMap.get(key);
+        if (ours) {
+            const base = baseMap.get(key);
+            out.push(base === undefined || base !== JSON.stringify(ours) ? ours : diskEntry);
+        } else if (!baseMap.has(key)) {
+            out.push(diskEntry);   // appeared after our read — not ours to delete
+        }
+    }
+    const seen = new Set(out.map(mergeKey));
+    for (const e of mine) {
+        if (!seen.has(mergeKey(e))) out.push(e);
+    }
+    return out;
+}
+
+/** Read the registry straight from disk, bypassing the in-memory cache. */
+function readRegistryFromDisk(): RegistryEntryJson[] {
+    try {
+        const parsed = JSON.parse(fs.readFileSync(REGISTRY_PATH, 'utf8')) as RegistryJson;
+        if (!parsed.sessions || !Array.isArray(parsed.sessions)) return [];
+        normalizeRegistryKeys(parsed);
+        return parsed.sessions;
+    } catch {
+        return [];
+    }
+}
+
 function flushRegistryToDisk(): void {
     if (!pendingWriteData) return;
     const data = pendingWriteData;
     pendingWriteData = null;
-
-    const entryCount = data.sessions?.length ?? 0;
 
     try {
         const dir = path.dirname(REGISTRY_PATH);
@@ -496,12 +695,25 @@ function flushRegistryToDisk(): void {
             fs.mkdirSync(dir, { recursive: true });
         }
 
-        // LAYER 1: Backup current file before overwriting
-        backupRegistry();
+        withRegistryLock(() => {
+            // Re-read under the lock: our snapshot may be up to 100ms stale,
+            // and during a multi-window restore that is exactly when other
+            // hosts and daemons are registering.
+            data.sessions = mergeRegistry(
+                readRegistryFromDisk(),
+                diskBaseline?.sessions ?? data.sessions,
+                data.sessions ?? [],
+            );
 
-        const tmp = REGISTRY_PATH + '.tmp';
-        fs.writeFileSync(tmp, JSON.stringify(withLegacyKeyMirror(data), null, 2) + '\n');
-        fs.renameSync(tmp, REGISTRY_PATH);
+            // LAYER 1: Backup current file before overwriting
+            backupRegistry();
+
+            const tmp = REGISTRY_PATH + '.tmp';
+            fs.writeFileSync(tmp, JSON.stringify(withLegacyKeyMirror(data), null, 2) + '\n');
+            fs.renameSync(tmp, REGISTRY_PATH);
+        });
+        diskBaseline = structuredClone(data);
+        const entryCount = data.sessions?.length ?? 0;
 
         // Update cache with actual mtime from disk
         try {
@@ -514,7 +726,7 @@ function flushRegistryToDisk(): void {
         logFn(`[registry] flushed ${entryCount} entries to disk`);
     } catch (err) {
         cache = { data: null, mtime: 0 };
-        logFn(`[registry] flush FAILED (${entryCount} entries): ${err}`);
+        logFn(`[registry] flush FAILED (${data.sessions?.length ?? 0} entries): ${err}`);
     }
 }
 
@@ -842,10 +1054,15 @@ export function flushRegistryWrites(): void {
 // ── Terminal CRUD ─────────────────────────────────────────────────
 
 export function getAllTerminalsFromRegistry(): TerminalEntry[] {
+    // registry.json ONLY. This function returns NON-AI terminals (it filters
+    // session_type !== 'ai' below), but registry.d holds only AI entries — so
+    // reading registry.d here would yield [] and stop regular terminals from
+    // restoring. Regular terminals + the extension's own field-writes live in
+    // registry.json + pendingWriteData, which readRegistry() covers.
     const data = readRegistry();
-    if (!data) return [];
+    const allSessions = data?.sessions;
+    if (!allSessions) return [];
 
-    const allSessions = data.sessions;
     const afterProject = allSessions.filter(matchesProject);
     const afterAi = afterProject.filter(e => e.session_type !== 'ai');
     const afterShelved = afterAi.filter(e => sessionStatusMap.get(e.window_id)?.status !== 'shelved');
@@ -878,11 +1095,18 @@ export function getAllTerminalsFromRegistry(): TerminalEntry[] {
  * preserving AI daemon directories that are still being written to.
  */
 export function getAllActiveWindowIds(): Set<string> {
-    const data = readRegistry();
-    if (!data) return new Set();
+    // UNION of registry.json (complete) and the partial AI-only registry.d, so
+    // cleanup never archives dirs for AI sessions that live only in registry.d
+    // AND never loses the 42 sessions without a dir file yet the moment one
+    // session writes its file (registry.d must merge, not replace).
+    const sessions = mergeRegistryDOverGlobal(
+        readRegistry()?.sessions ?? [],
+        readSessionsFromDir(ownProjectIdCached()),
+    );
+    if (sessions.length === 0) return new Set();
 
     return new Set(
-        data.sessions
+        sessions
             .filter(matchesProject)
             .filter(e => sessionStatusMap.get(e.window_id)?.status !== 'shelved')
             .filter(e => e.pid > 0)

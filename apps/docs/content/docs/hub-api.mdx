@@ -17,14 +17,25 @@ curl http://localhost:1440/api/v1/registry
 
 ## Security model
 
-There is no authentication on any endpoint. The trust boundary is the
+Most endpoints have no authentication. The trust boundary is the
 loopback interface: the hub binds `127.0.0.1` unless you set
 `IMMORTERM_HUB_HOST` (e.g. to `0.0.0.0`), and anything that can reach the
 socket can spawn sessions, read your file index, and grep your source.
 Don't bind it to a routable interface. Remote access goes through the SSH
 tunneling built into the hub's remote endpoints, not through an exposed port.
 
-Handlers report failures as `200` with an `{ "error": "..." }` body rather
+The Session Bridge is the exception. Its deployment administrator credential
+provisions short-lived installation credentials bound to one project and a
+limited operation set. Normal directory, message, contract, and event-stream
+operations require those scoped bearer credentials; host credentials cannot
+acknowledge or reply for an agent. See [Session Bridge](/docs/session-bridge).
+
+Consumers should preflight `GET /api/v1/bridge/identity`; it exposes only the
+authenticated credential's non-secret claims. Agent acknowledgement and reply
+use a separate opaque receipt bound to one message and one receiving daemon,
+never an administrator or installation credential.
+
+Legacy handlers report failures as `200` with an `{ "error": "..." }` body rather
 than HTTP error codes — check for the `error` key.
 
 ## Registry
@@ -153,6 +164,19 @@ working directory.
 ```json
 { "sessionName": "myproject-ai-abc123", "windowId": "abc123", "wsPort": 51234, "displayName": "Terminal 1" }
 ```
+
+## Session Bridge
+
+The authenticated `/api/v1/bridge/*` surface provides stable project/session
+discovery, durable correlated delivery, explicit agent acknowledgement, replies,
+and a resumable event WebSocket. It uses ordinary HTTP status codes, including
+`201`, `202`, `401`, `403`, `409`, `429`, and `503`. Hosted integrations use
+`@immorterm/session-bridge` with scoped installation credentials; the deployment
+credential is only an administrative provisioning secret. The complete contract
+is documented in [Session Bridge](/docs/session-bridge).
+The local UI control plane also exposes `GET /bridge/status`,
+`PUT /bridge/settings`, and `POST /bridge/rotate-token`; these endpoints never
+return the administrator bearer token.
 
 ## Everything else
 

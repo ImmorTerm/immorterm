@@ -38,6 +38,28 @@ const PLAN_URL_ATTRS = [
   'data', 'background', 'poster', 'ping',
 ];
 const PLAN_SAFE_DATA_IMG = /^data:image\/(png|jpe?g|gif|webp)[;,]/;
+/** Strip agent-authoring wrappers that corrupt HTML parsing BEFORE the parser
+ *  sees them — the fix must precede parseFromString, not sanitizePlanDoc (by
+ *  then the damage is done). Two seen in the wild:
+ *   • XML CDATA (`<![CDATA[ … ]]>`) — HTML has no CDATA in the html namespace,
+ *     so `<!` opens a bogus comment that runs to the first `>` and EATS the
+ *     leading `<style>` tag, dumping the CSS as visible body text.
+ *   • Markdown code fences (```html … ```) — an agent pasting a fenced block.
+ *  Returns cleaned html. Idempotent + safe on already-clean input. */
+export function unwrapPlanHtml(html) {
+  let s = String(html == null ? '' : html).trim();
+  // Markdown code fence: ```html\n … \n```  (language tag optional)
+  const fm = /^```[a-zA-Z-]*\s*\n([\s\S]*?)\n?```$/.exec(s);
+  if (fm) s = fm[1].trim();
+  // XML CDATA wrapper (leading; trailing ]]> stripped only if present)
+  if (s.startsWith('<![CDATA[')) {
+    s = s.slice(9);
+    if (s.endsWith(']]>')) s = s.slice(0, -3);
+    s = s.trim();
+  }
+  return s;
+}
+
 export function sanitizePlanDoc(doc) {
   // Whole document (head + body): a leading <style> is routed to <head> and
   // carried across, so head must be scrubbed too.
@@ -85,7 +107,13 @@ const COMMENT_SLOT_CSS =
   + '.plan-comment-add:hover{color:var(--sidebar-text,#cdd6f4)}'
   + '.plan-comment-input{width:100%;box-sizing:border-box;background:var(--sidebar-hover,#1e1e2e);'
   + 'border:1px solid var(--sidebar-border,#313244);border-radius:6px;color:var(--sidebar-text,#cdd6f4);'
-  + 'font:inherit;font-size:12px;padding:6px;resize:vertical;min-height:40px}';
+  + 'font:inherit;font-size:12px;padding:6px;resize:vertical;min-height:40px}'
+  // Persisted comments shown on open (thread above the input slot).
+  + '.plan-comment-prior{background:var(--sidebar-hover,#1e1e2e);border:1px solid var(--sidebar-border,#313244);'
+  + 'border-radius:8px;padding:7px 9px;margin-bottom:6px}'
+  + '.plan-comment-prior-meta{font-size:10px;color:var(--sidebar-muted,#a6adc8);margin-bottom:3px;'
+  + 'font-family:ui-monospace,Menlo,monospace}'
+  + '.plan-comment-prior-text{font-size:12.5px;color:var(--sidebar-text,#cdd6f4);white-space:pre-wrap;line-height:1.45}';
 
 // Scrollbar rules duplicated from the draw_html shadow-DOM path
 // (gpu-terminal.html ~9228-9231) — shadow DOM can't see page styles.
@@ -139,6 +167,72 @@ export function renderPlanBodyInto(shadowHost, doc) {
   return bodyShadow;
 }
 
+/** Render a plan's html as a SANDBOXED IFRAME artifact — the claude.ai model:
+ *  a real document with full CSS + JS, isolated in an opaque origin
+ *  (sandbox=allow-scripts, NO allow-same-origin → it cannot reach the parent
+ *  webview or Tauri's native IPC). A strict in-frame CSP blocks ALL external
+ *  network (default-src 'none', no connect-src) so an untrusted artifact stays
+ *  self-contained and can't exfiltrate — no script-stripping needed. The frame
+ *  auto-sizes to its content via a postMessage height bridge (capped, so a tall
+ *  plan scrolls internally). The optional `onWake({action,label})` fires when a
+ *  real user clicks an element carrying `data-plan-action` inside the artifact
+ *  — the interactivity bridge — so plan authors can add buttons that wake the
+ *  agent. Returns the iframe. */
+export function renderPlanArtifactIframe(host, html, onWake) {
+  const body = unwrapPlanHtml(html) || '<p style="font-family:system-ui;opacity:.6;padding:16px">(empty plan)</p>';
+  const csp = "default-src 'none'; img-src data: blob:; media-src data: blob:; "
+    + "style-src 'unsafe-inline'; script-src 'unsafe-inline'; font-src data:;";
+  // In-frame bridge: (1) height reporting, (2) wake — forward ONLY genuine
+  // user clicks (ev.isTrusted, so a hostile artifact can't synthesize a click
+  // to spam-wake the agent) on [data-plan-action] elements, with the author's
+  // action verb + a short label. The panel scrubs + throttles on receipt.
+  const bridge =
+    '<script>(function(){'
+    + 'function p(){try{parent.postMessage({__immPlanFrame:1,h:document.documentElement.scrollHeight},"*")}catch(e){}}'
+    + 'addEventListener("load",p);setTimeout(p,60);setTimeout(p,350);'
+    + 'if(window.ResizeObserver){new ResizeObserver(p).observe(document.documentElement)}'
+    + 'document.addEventListener("click",function(ev){'
+    + 'if(!ev.isTrusted)return;'
+    + 'var t=ev.target&&ev.target.closest?ev.target.closest("[data-plan-action]"):null;if(!t)return;'
+    + 'var a=String(t.getAttribute("data-plan-action")||"").slice(0,80);'
+    + 'var l=String(t.getAttribute("data-plan-label")||t.textContent||"").replace(/\\s+/g," ").trim().slice(0,120);'
+    + 'try{parent.postMessage({__immPlanFrame:1,wake:{action:a,label:l}},"*")}catch(e){}'
+    + '},true);})();<\/script>';
+  const srcdoc = '<!doctype html><html><head><meta charset="utf-8">'
+    + '<meta http-equiv="Content-Security-Policy" content="' + csp + '">'
+    + '<meta name="color-scheme" content="dark light">'
+    + '<style>html,body{margin:0}body{overflow:auto}[data-plan-action]{cursor:pointer}</style></head><body>'
+    + body + bridge + '</body></html>';
+
+  const iframe = document.createElement('iframe');
+  iframe.className = 'plan-artifact-frame';
+  iframe.setAttribute('sandbox', 'allow-scripts');
+  iframe.setAttribute('referrerpolicy', 'no-referrer');
+  iframe.style.cssText = 'width:100%;border:0;display:block;background:transparent;min-height:140px';
+  iframe.srcdoc = srcdoc;
+
+  // Message bridge — self-cleans once the overlay (and iframe) are gone.
+  let lastWake = 0;
+  const onMsg = (e) => {
+    if (!iframe.isConnected) { window.removeEventListener('message', onMsg); return; }
+    if (e.source !== iframe.contentWindow || !e.data || e.data.__immPlanFrame !== 1) return;
+    if (e.data.wake) {
+      // A wake submits a prompt to the agent — throttle so a runaway or
+      // rapid-fire artifact can't spam-submit. ~1.2s is invisible to a human.
+      const now = Date.now();
+      if (typeof onWake !== 'function' || now - lastWake < 1200) return;
+      lastWake = now;
+      onWake(e.data.wake);
+      return;
+    }
+    const cap = Math.round((window.innerHeight || 800) * 0.78);
+    iframe.style.height = Math.max(140, Math.min(Number(e.data.h) || 0, cap)) + 'px';
+  };
+  window.addEventListener('message', onMsg);
+  host.appendChild(iframe);
+  return iframe;
+}
+
 /** Compact wake summary typed into the agent's input box — cap ~300 chars;
  *  comment texts are referenced by count, the agent reads the record. */
 // Security: planId, decision ids, and option labels are free-form MCP args
@@ -148,6 +242,26 @@ export function renderPlanBodyInto(shadowHost, doc) {
 function scrubForPty(str) {
   return String(str).replace(/[\x00-\x1f\x7f]/g, ' ');
 }
+/** Transient toast confirming an artifact-button wake — the button lives in a
+ *  sandboxed frame that may target a session whose tile isn't visible, so the
+ *  user needs feedback that the click did something. Auto-removes. */
+function flashWake(overlay, ok, label) {
+  if (!overlay) return;
+  const toast = document.createElement('div');
+  toast.textContent = ok
+    ? '▶ Sent to your agent' + (label ? ' · ' + label : '')
+    : 'No live session to wake';
+  toast.style.cssText = 'position:fixed;left:50%;bottom:26px;transform:translateX(-50%);'
+    + 'z-index:5;pointer-events:none;border-radius:9px;padding:8px 15px;'
+    + 'font:600 12px -apple-system,BlinkMacSystemFont,system-ui,sans-serif;'
+    + 'box-shadow:0 8px 22px rgba(0,0,0,.45);'
+    + (ok
+      ? 'background:#16311f;color:#7fe0b0;border:1px solid #2e7d5b'
+      : 'background:#2a2a3d;color:#a6adc8;border:1px solid #3a3a4d');
+  overlay.appendChild(toast);
+  setTimeout(() => toast.remove(), 2300);
+}
+
 function buildWakeSummary(planId, selections, nComments) {
   const parts = [];
   for (const [id, opt] of selections) parts.push(scrubForPty(id) + '→' + scrubForPty(opt));
@@ -175,6 +289,9 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
   let _plans = [];
   const _submittedIds = new Set(); // plans submitted with no live agent to wake
   let _pendingSubmit = null;       // { planId, onResult } for the open overlay
+  // Unsubmitted comment drafts, kept across overlay close/reopen so typing is
+  // never lost. Key: `${planId} ${slotKey}`. Cleared on successful submit.
+  const _planDrafts = new Map();
 
   // ── Plan consume-drag (body, not the grip) ──────────────────────────
   // Grip = spatial drag into the Spaces grid (native PLAN_MIME, §6B). Body =
@@ -312,12 +429,6 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
     shadow.appendChild(style);
 
     const wrapper = el('div', 'ai-html-content');
-    const doc = new DOMParser().parseFromString(plan.html || '<p>(empty plan)</p>', 'text/html');
-    // Plan html is untrusted (any vendor/agent authors it) — neutralize ALL
-    // active content, not just <script>: inline on*= handlers and
-    // javascript:/data: URLs execute even with scripts removed, and the hub
-    // (standalone/Tauri) has no CSP backstop like the VS Code webview does.
-    sanitizePlanDoc(doc);
 
     // ── Local form state — plain in-memory, discarded on close. Selecting
     //    and typing never wakes anyone; only Submit persists. ──
@@ -325,6 +436,18 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
       selections: new Map(), // decisionId -> chosen option text
       comments: new Map(),   // 'section:<id>' | 'decision:<id>' | 'general' -> text
     };
+
+    // Persisted comments render on OPEN so a user always sees what they (and
+    // the agent) previously wrote — plan comments are durable, not ephemeral.
+    // decision:<id> → that decision's slot; everything else (general + section-
+    // anchored) → the general slot for now, so nothing a user wrote is hidden
+    // (section-anchored ones move inline once the geometry bridge lands).
+    const priorComments = Array.isArray(plan.comments) ? plan.comments : [];
+    function priorFor(key) {
+      return priorComments.filter(c => key.startsWith('decision:')
+        ? c.decisionId === key.slice(9)
+        : (key === 'general' ? !c.decisionId : c.sectionId === key.slice(8)));
+    }
 
     function commentCount() {
       let n = 0;
@@ -334,34 +457,65 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
 
     function makeCommentSlot(key, placeholder, addLabel) {
       const slot = el('div', 'plan-comment-slot');
+      // Existing thread first — so reopening a plan shows prior comments.
+      for (const c of priorFor(key)) {
+        const bubble = el('div', 'plan-comment-prior');
+        const who = (c.author && String(c.author).split('@')[0]) || 'user';
+        let metaText = who + ' · ' + relativeTime(c.ts || 0);
+        if (key === 'general' && c.sectionId) metaText += ' · on ' + c.sectionId;
+        bubble.appendChild(el('div', 'plan-comment-prior-meta', metaText));
+        bubble.appendChild(el('div', 'plan-comment-prior-text', c.text || ''));
+        slot.appendChild(bubble);
+      }
       const input = el('textarea', 'plan-comment-input');
       input.placeholder = placeholder;
+      // Restore an unsubmitted draft (kept across close/reopen) so typing is
+      // never lost. Seed formState so Submit reflects it immediately on open.
+      const draftKey = plan.id + ' ' + key;
+      const draftVal = _planDrafts.get(draftKey) || '';
+      if (draftVal) { input.value = draftVal; formState.comments.set(key, draftVal); }
       if (addLabel) {
         const add = el('button', 'plan-comment-add', addLabel);
         add.type = 'button';
-        input.hidden = true;
+        if (draftVal) { add.hidden = true; } else { input.hidden = true; } // a draft forces the box open
         add.addEventListener('click', () => { add.hidden = true; input.hidden = false; input.focus(); });
         slot.appendChild(add);
       }
-      input.addEventListener('input', () => { formState.comments.set(key, input.value); updateSubmitBar(); });
+      input.addEventListener('input', () => {
+        formState.comments.set(key, input.value);
+        if (input.value.trim()) _planDrafts.set(draftKey, input.value);
+        else _planDrafts.delete(draftKey);
+        updateSubmitBar();
+      });
       // Keep terminal keybindings out of the textarea (Escape still closes).
       input.addEventListener('keydown', (e) => { if (e.key !== 'Escape') e.stopPropagation(); });
       slot.appendChild(input);
       return slot;
     }
 
-    // Comment affordance under every data-plan-section anchor (agent-authored
-    // per the discipline hook).
-    for (const sectionEl of doc.body.querySelectorAll('[data-plan-section]')) {
-      const sectionId = sectionEl.getAttribute('data-plan-section') || '';
-      sectionEl.insertAdjacentElement('afterend', makeCommentSlot('section:' + sectionId, 'Comment on this section…', '+ comment'));
-    }
-    // The plan BODY renders in its OWN shadow root, in the PROJECT's brand
-    // (repo tokens/fonts) — isolated so its CSS can neither clobber nor be
-    // clobbered by the ImmorTerm decision-form chrome below. The design
-    // contract: body = project brand, chrome = ImmorTerm frame.
+    // The plan BODY renders as a SANDBOXED IFRAME — a real document with full
+    // JS, isolated in an opaque origin (no allow-same-origin), the claude.ai
+    // artifact model. A strict per-frame CSP keeps it self-contained. The
+    // decision + general-comment + submit chrome below is native and unchanged.
+    // (Section-anchored comments move to a geometry bridge next — a sandboxed
+    // frame can't be injected into.)
     const bodyHost = el('div', 'plan-body-host');
-    renderPlanBodyInto(bodyHost, doc); // doc sanitized above; section comment slots already inserted
+    renderPlanArtifactIframe(bodyHost, plan.html, (w) => {
+      // A user clicked a [data-plan-action] element inside the artifact →
+      // wake the plan's agent with the action. All values are author-
+      // controlled DOM text: scrub for the PTY and cap before it's typed.
+      if (typeof wakeAgent !== 'function') return;
+      const label = scrubForPty(String(w.label || '')).trim().slice(0, 120);
+      const action = scrubForPty(String(w.action || '')).trim().slice(0, 80);
+      const shown = label || action || 'a button';
+      let msg = 'Plan ' + scrubForPty(plan.id) + ': the user clicked "' + shown + '"'
+        + (action && action !== label ? ' [action=' + action + ']' : '')
+        + ' in the plan artifact. Open it with immorterm_list_plans id=' + scrubForPty(plan.id)
+        + ' and act on it.';
+      if (msg.length > 300) msg = msg.slice(0, 297) + '…';
+      const woke = wakeAgent(plan.sessionName, msg);
+      flashWake(overlay, woke, shown);
+    });
     wrapper.appendChild(bodyHost);
 
     // ── Decision form (from structured decisions[], never plan html) ──
@@ -429,6 +583,7 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
     // Mount the fully-built content into the card's shadow root. (Without
     // this the card renders empty — the form/comments live on `wrapper`.)
     shadow.appendChild(wrapper);
+    updateSubmitBar(); // reflect any restored drafts immediately on open
 
     function updateSubmitBar() {
       if (!submitBtn) return;
@@ -470,6 +625,11 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
               errorLabel.textContent = msg.error || 'Submit failed';
             }
             return;
+          }
+          // Submitted successfully → drop this plan's saved drafts (they're
+          // now persisted as real comments).
+          for (const k of [..._planDrafts.keys()]) {
+            if (k.indexOf(plan.id + ' ') === 0) _planDrafts.delete(k);
           }
           // The wake + sidebar refresh must fire even if the user closed the
           // overlay after submitting — the write already persisted, so the
