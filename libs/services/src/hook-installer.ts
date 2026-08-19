@@ -7715,6 +7715,111 @@ function buildCodexHooksConfig(projectPath: string): Record<string, unknown> {
 const CODEX_MCP_SERVERS = ['immorterm', 'immorterm-memory'] as const;
 
 /**
+ * Tools Codex loads eagerly. Everything else stays reachable through
+ * `immorterm_describe` -> `immorterm_call`, and stays discoverable through the
+ * capability index the servers carry in their MCP `instructions`.
+ *
+ * WHY THIS EXISTS: Codex fetches the tool schema once at startup and never
+ * re-fetches it, and it has no client-side deferral (`tool_search` is stage
+ * "removed"), so all 124 of our tools cost ~25k tokens of context in EVERY
+ * Codex session — and past ~40 tools models measurably start picking the wrong
+ * one. Claude Code is unaffected because it defers tools itself.
+ *
+ * HOW THIS LIST WAS CHOSEN: from 3,388 real tool calls across 5,248 local
+ * transcripts, not taste. It covers ~90% of observed calls in 38 tools. Two
+ * caveats worth keeping in mind before editing:
+ *   - the sample is dominated by ImmorTerm's own development, so
+ *     `immorterm_app_eval_in_webview` ranked 6th purely from webview debugging
+ *     and is deliberately EXCLUDED;
+ *   - 49 tools were never called once, which says more about this workload than
+ *     about the tools — a user building dashboards would want `show_chart` on
+ *     day one. That case is exactly what describe/call protects.
+ *
+ * `immorterm_describe` and `immorterm_call` MUST stay in this list; without
+ * them everything omitted becomes unreachable rather than merely unlisted.
+ */
+const CODEX_ENABLED_TOOLS: Readonly<Record<string, readonly string[]>> = {
+  immorterm: [
+    // escape hatches — non-negotiable
+    'immorterm_describe',
+    'immorterm_call',
+    // tasks
+    'immorterm_update_task', 'immorterm_create_task', 'immorterm_list_tasks', 'immorterm_delete_task',
+    // browser — 18% of all observed calls
+    'immorterm_browser_open', 'immorterm_browser_screenshot', 'immorterm_browser_click',
+    'immorterm_browser_scroll', 'immorterm_browser_close', 'immorterm_browser_read_page',
+    'immorterm_browser_wait_for_human', 'immorterm_browser_wait_for', 'immorterm_browser_find',
+    'immorterm_browser_console', 'immorterm_browser_key',
+    // terminal
+    'immorterm_execute', 'immorterm_read_screen', 'immorterm_poll_events', 'immorterm_wait_for_event',
+    // visual
+    'immorterm_draw_html', 'immorterm_clear_ai_layer', 'immorterm_open_workshop',
+    'immorterm_eval_in_workshop', 'immorterm_list_workshops', 'immorterm_close_workshop',
+    // plans + sessions
+    'immorterm_plan', 'immorterm_list_sessions',
+  ],
+  'immorterm-memory': [
+    'search_memory', 'add_memories', 'get_session_context', 'get_memory_context',
+    'list_code_changes', 'list_sessions', 'list_tasks', 'get_plan',
+    'explain_change', 'search_entities', 'enrich_pr',
+  ],
+};
+
+/**
+ * Write `enabled_tools` into an existing `[mcp_servers.<name>]` table in
+ * `~/.codex/config.toml`.
+ *
+ * `enabled_tools` is a real Codex key — a server exposing five tools with two
+ * allow-listed reported "no such tool" for the rest — but there is no
+ * `codex mcp add` flag and no `codex config` subcommand for it, so we edit the
+ * file ourselves.
+ *
+ * Deliberately LINE-BASED rather than parse-and-reserialize: this file also
+ * holds the user's auth-adjacent settings, `[projects.*]` trust levels and
+ * `[hooks.state.*]` fingerprints, and round-tripping it through a TOML library
+ * would reformat or drop what we do not model. We only ever touch a single line
+ * inside one table we created. Same lesson as the gateway config-destruction
+ * bug: never rewrite a config you do not fully own.
+ *
+ * No-ops if the table is missing (nothing to scope) or the file is unreadable.
+ */
+function writeCodexEnabledTools(serverName: string, tools: readonly string[]): void {
+  const configPath = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'config.toml');
+  let raw: string;
+  try {
+    raw = fs.readFileSync(configPath, 'utf8');
+  } catch {
+    return; // no config yet — `codex mcp add` would have created one, so nothing to do
+  }
+
+  const header = `[mcp_servers.${serverName}]`;
+  const start = raw.indexOf(header);
+  if (start === -1) return;
+
+  // The table runs to the next top-level `[` at column 0, or EOF.
+  const after = start + header.length;
+  const nextTable = raw.slice(after).search(/\n\[/);
+  const end = nextTable === -1 ? raw.length : after + nextTable + 1;
+
+  const body = raw.slice(after, end);
+  const line = `enabled_tools = ${JSON.stringify(tools)}\n`;
+  const existing = /^enabled_tools\s*=.*$/m;
+  // Append inside the table, keeping the blank line that separates it from the
+  // next `[table]` — TOML does not care, but a config a human may open should
+  // not come back looking mangled.
+  const updated = existing.test(body)
+    ? body.replace(existing, line.trimEnd())
+    : `${body.replace(/\n*$/, '\n')}${line}\n`;
+
+  if (updated === body) return; // already correct — don't churn the file
+  const next = raw.slice(0, after) + updated + raw.slice(end);
+
+  const tmp = `${configPath}.immorterm.tmp`;
+  fs.writeFileSync(tmp, next);
+  fs.renameSync(tmp, configPath);
+}
+
+/**
  * Register (or unregister) ImmorTerm's MCP servers with Codex.
  *
  * Codex reads MCP servers **only** from `~/.codex/config.toml` and never sees
@@ -7769,7 +7874,13 @@ function syncCodexMcpServers(enabled: boolean): void {
   const register = (name: string, argv: string[], env: string[] = []) => {
     run(['mcp', 'remove', name]);
     const flags = env.flatMap((e) => ['--env', e]);
-    return run(['mcp', 'add', name, ...flags, '--', ...argv]);
+    const ok = run(['mcp', 'add', name, ...flags, '--', ...argv]);
+    if (!ok) return false;
+    const allow = CODEX_ENABLED_TOOLS[name];
+    if (allow?.length) {
+      writeCodexEnabledTools(name, allow);
+    }
+    return true;
   };
 
   const okTerminal = register('immorterm', [bin('immorterm-ai'), 'mcp', 'serve']);
