@@ -4,9 +4,9 @@
 //! reasoning, error}. Turns are bounded by `step_finish{reason:"stop"}`.
 //! Tool names are mapped into Claude-style for cross-vendor consistency.
 
+use crate::ConversationAdapter;
 use crate::shared::filter_empty_turns;
 use crate::turn::{AssistantBlock, ToolCall, Turn};
-use crate::ConversationAdapter;
 use once_cell::sync::Lazy;
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -15,7 +15,14 @@ pub struct OpenCode;
 
 static VALID_TYPES: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     let mut s = HashSet::new();
-    for t in ["step_start", "step_finish", "tool_use", "text", "reasoning", "error"] {
+    for t in [
+        "step_start",
+        "step_finish",
+        "tool_use",
+        "text",
+        "reasoning",
+        "error",
+    ] {
         s.insert(t);
     }
     s
@@ -40,7 +47,9 @@ static TOOL_MAP: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
 });
 
 impl ConversationAdapter for OpenCode {
-    fn tool_name(&self) -> &'static str { "opencode" }
+    fn tool_name(&self) -> &'static str {
+        "opencode"
+    }
 
     fn detect(&self, obj: &Value) -> bool {
         let has_session = obj.get("sessionID").is_some();
@@ -52,8 +61,12 @@ impl ConversationAdapter for OpenCode {
         let mut events: Vec<Value> = Vec::new();
         for line in text.lines() {
             let trimmed = line.trim();
-            if trimmed.is_empty() { continue; }
-            if let Ok(v) = serde_json::from_str(trimmed) { events.push(v); }
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str(trimmed) {
+                events.push(v);
+            }
         }
 
         let mut turns: Vec<Turn> = Vec::new();
@@ -63,26 +76,53 @@ impl ConversationAdapter for OpenCode {
 
         for evt in &events {
             let etype = evt.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            let part = evt.get("part").cloned().unwrap_or(Value::Object(Map::new()));
+            let part = evt
+                .get("part")
+                .cloned()
+                .unwrap_or(Value::Object(Map::new()));
             let ts = epoch_ms_to_iso(evt.get("timestamp"));
 
             match etype {
                 "step_start" => {
                     if timestamp.is_empty() {
-                        if let Some(t) = &ts { timestamp = t.clone(); }
+                        if let Some(t) = &ts {
+                            timestamp = t.clone();
+                        }
                     }
                 }
                 "tool_use" => {
-                    let raw_name = part.get("tool").and_then(|s| s.as_str()).unwrap_or("unknown");
-                    let mapped_name = TOOL_MAP.get(raw_name).copied().unwrap_or(raw_name).to_string();
-                    let state = part.get("state").cloned().unwrap_or(Value::Object(Map::new()));
-                    let input = state.get("input").cloned().unwrap_or(Value::Object(Map::new()));
-                    let output = state.get("output").cloned().unwrap_or(Value::String(String::new()));
+                    let raw_name = part
+                        .get("tool")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("unknown");
+                    let mapped_name = TOOL_MAP
+                        .get(raw_name)
+                        .copied()
+                        .unwrap_or(raw_name)
+                        .to_string();
+                    let state = part
+                        .get("state")
+                        .cloned()
+                        .unwrap_or(Value::Object(Map::new()));
+                    let input = state
+                        .get("input")
+                        .cloned()
+                        .unwrap_or(Value::Object(Map::new()));
+                    let output = state
+                        .get("output")
+                        .cloned()
+                        .unwrap_or(Value::String(String::new()));
 
                     let is_error = state.get("status").and_then(|s| s.as_str()) == Some("error")
-                        || state.get("metadata").and_then(|m| m.get("exit")).and_then(|e| e.as_i64())
-                            .map(|e| e != 0).unwrap_or(false);
-                    let result_ts = state.get("time").and_then(|t| t.get("end"))
+                        || state
+                            .get("metadata")
+                            .and_then(|m| m.get("exit"))
+                            .and_then(|e| e.as_i64())
+                            .map(|e| e != 0)
+                            .unwrap_or(false);
+                    let result_ts = state
+                        .get("time")
+                        .and_then(|t| t.get("end"))
                         .and_then(|t| t.as_i64().or_else(|| t.as_f64().map(|f| f as i64)))
                         .and_then(|ms| epoch_ms_value_to_iso(ms));
 
@@ -94,7 +134,11 @@ impl ConversationAdapter for OpenCode {
 
                     blocks.push(AssistantBlock::tool_use(
                         ToolCall {
-                            tool_use_id: part.get("callID").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                            tool_use_id: part
+                                .get("callID")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
                             name: mapped_name,
                             input: normalized_input,
                             result: Some(result_text),
@@ -105,13 +149,21 @@ impl ConversationAdapter for OpenCode {
                     ));
                 }
                 "reasoning" => {
-                    let content = part.get("text").and_then(|t| t.as_str()).unwrap_or("").trim();
+                    let content = part
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .trim();
                     if !content.is_empty() {
                         blocks.push(AssistantBlock::thinking(content.to_string(), ts.clone()));
                     }
                 }
                 "text" => {
-                    let content = part.get("text").and_then(|t| t.as_str()).unwrap_or("").trim();
+                    let content = part
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .trim();
                     if !content.is_empty() {
                         blocks.push(AssistantBlock::text(content.to_string(), ts.clone()));
                     }
@@ -124,10 +176,16 @@ impl ConversationAdapter for OpenCode {
                 }
                 "error" => {
                     let err_data = evt.get("error").cloned().unwrap_or(Value::Null);
-                    let err_msg = err_data.get("data").and_then(|d| d.get("message")).and_then(|m| m.as_str())
+                    let err_msg = err_data
+                        .get("data")
+                        .and_then(|d| d.get("message"))
+                        .and_then(|m| m.as_str())
                         .or_else(|| err_data.get("name").and_then(|n| n.as_str()))
                         .unwrap_or("Unknown error");
-                    blocks.push(AssistantBlock::text(format!("Error: {}", err_msg), ts.clone()));
+                    blocks.push(AssistantBlock::text(
+                        format!("Error: {}", err_msg),
+                        ts.clone(),
+                    ));
                     finalize(&mut turns, &mut turn_index, &mut blocks, &mut timestamp);
                 }
                 _ => {}
@@ -147,7 +205,9 @@ fn finalize(
     blocks: &mut Vec<AssistantBlock>,
     timestamp: &mut String,
 ) {
-    if blocks.is_empty() { return; }
+    if blocks.is_empty() {
+        return;
+    }
     *turn_index += 1;
     turns.push(Turn {
         index: *turn_index,
@@ -164,7 +224,9 @@ fn normalize_opencode_input(mapped_name: &str, input: &Value) -> Value {
             let mut obj = Map::new();
             let full = if let Some(wd) = input.get("workdir").and_then(|w| w.as_str()) {
                 format!("cd {} && {}", wd, cmd)
-            } else { cmd.to_string() };
+            } else {
+                cmd.to_string()
+            };
             obj.insert("command".into(), Value::String(full));
             return Value::Object(obj);
         }
@@ -175,7 +237,10 @@ fn normalize_opencode_input(mapped_name: &str, input: &Value) -> Value {
             obj.insert("file_path".into(), Value::String(fp.to_string()));
             obj.insert(
                 "content".into(),
-                input.get("content").cloned().unwrap_or(Value::String(String::new())),
+                input
+                    .get("content")
+                    .cloned()
+                    .unwrap_or(Value::String(String::new())),
             );
             return Value::Object(obj);
         }

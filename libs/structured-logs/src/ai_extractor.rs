@@ -12,7 +12,7 @@ use regex::Regex;
 use serde::Serialize;
 use tracing::{info, warn};
 
-use immorterm_core::log::{strip_runs, GridSnapshot};
+use immorterm_core::log::{GridSnapshot, strip_runs};
 
 /// Marks a grid row that is entirely DIM — a composer placeholder rather than
 /// real content. Uses U+0000 so it can never collide with terminal text.
@@ -702,9 +702,7 @@ pub fn format_iso_ts(ts: f64) -> String {
     let secs = ts as u64;
     let nanos = ((ts - secs as f64) * 1_000_000_000.0) as u32;
     let d = std::time::UNIX_EPOCH + std::time::Duration::new(secs, nanos);
-    let elapsed = d
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
+    let elapsed = d.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     let total_secs = elapsed.as_secs();
     let rem = total_secs % 86400;
     let hours = rem / 3600;
@@ -717,6 +715,21 @@ pub fn format_iso_ts(ts: f64) -> String {
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
         year, month, day, hours, minutes, seconds
     )
+}
+
+/// Convert days since Unix epoch to (year, month, day).
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 #[cfg(test)]
@@ -807,14 +820,23 @@ mod tests {
     fn real_prompt_still_classifies_as_user() {
         let e = claude_extractor();
         assert_eq!(e.classify_line("\u{276F} hello"), LineRole::User);
-        assert_eq!(e.classify_line("\u{276F} This is just a test"), LineRole::User);
-        assert_eq!(e.classify_line("  \u{276F} indented prompt"), LineRole::User);
+        assert_eq!(
+            e.classify_line("\u{276F} This is just a test"),
+            LineRole::User
+        );
+        assert_eq!(
+            e.classify_line("  \u{276F} indented prompt"),
+            LineRole::User
+        );
         // Unicode / emoji in prompt
         assert_eq!(e.classify_line("\u{276F} fix 🐛 bug"), LineRole::User);
         // Hebrew RTL
         assert_eq!(e.classify_line("\u{276F} בדיקה"), LineRole::User);
         // NBSP-separated prompt (matches real Claude output format)
-        assert_eq!(e.classify_line("\u{276F}\u{00A0}What if ..."), LineRole::User);
+        assert_eq!(
+            e.classify_line("\u{276F}\u{00A0}What if ..."),
+            LineRole::User
+        );
         assert_eq!(
             e.classify_line("\u{276F}\u{00A0}I agree - we need a source project"),
             LineRole::User
@@ -825,12 +847,21 @@ mod tests {
     fn chrome_rows_are_not_user() {
         let e = claude_extractor();
         // The classic offenders seen in ai.jsonl
-        assert_eq!(e.classify_line("\u{23F5}\u{23F5} accept edits on · 1 shell"), LineRole::None);
+        assert_eq!(
+            e.classify_line("\u{23F5}\u{23F5} accept edits on · 1 shell"),
+            LineRole::None
+        );
         assert_eq!(e.classify_line("★ medium · /effort"), LineRole::None);
         assert_eq!(e.classify_line("◐ medium · /effort"), LineRole::None);
-        assert_eq!(e.classify_line("✶ Cooking… (31s · ↑ 90 tokens)"), LineRole::None);
+        assert_eq!(
+            e.classify_line("✶ Cooking… (31s · ↑ 90 tokens)"),
+            LineRole::None
+        );
         assert_eq!(e.classify_line("✻ Pollinating…"), LineRole::None);
-        assert_eq!(e.classify_line("Read 1 file (ctrl+o to expand)"), LineRole::None);
+        assert_eq!(
+            e.classify_line("Read 1 file (ctrl+o to expand)"),
+            LineRole::None
+        );
     }
 
     #[test]
@@ -841,8 +872,14 @@ mod tests {
         assert_eq!(e.classify_line("\u{23FA} response"), LineRole::Assistant); // real ⏺
         assert_eq!(e.classify_line("\u{25CF} response"), LineRole::Assistant); // legacy
         assert_eq!(e.classify_line("\u{00B7} thinking"), LineRole::Assistant); // ·
-        assert_eq!(e.classify_line("\u{23BF}  tool output"), LineRole::Assistant); // real ⎿
-        assert_eq!(e.classify_line("\u{239F}  tool output"), LineRole::Assistant); // legacy
+        assert_eq!(
+            e.classify_line("\u{23BF}  tool output"),
+            LineRole::Assistant
+        ); // real ⎿
+        assert_eq!(
+            e.classify_line("\u{239F}  tool output"),
+            LineRole::Assistant
+        ); // legacy
     }
 
     #[test]
@@ -1022,9 +1059,15 @@ mod tests {
         };
 
         // Codex's placeholder: the whole visible row is DIM (log attr 16).
-        assert!(row_is_all_dim(&[run("\u{203A} ", 16), run("Implement {feature}", 16)]));
+        assert!(row_is_all_dim(&[
+            run("\u{203A} ", 16),
+            run("Implement {feature}", 16)
+        ]));
         // A real prompt is not dim, even with a dim/blank spacer alongside.
-        assert!(!row_is_all_dim(&[run("\u{203A} ", 1), run("fix the parser", 0)]));
+        assert!(!row_is_all_dim(&[
+            run("\u{203A} ", 1),
+            run("fix the parser", 0)
+        ]));
         assert!(!row_is_all_dim(&[run("   ", 16), run("real text", 0)]));
         // Nothing visible at all is not a placeholder either.
         assert!(!row_is_all_dim(&[run("    ", 0)]));
@@ -1041,7 +1084,10 @@ mod tests {
             LineRole::None
         );
         // Untagged, the same text is still a genuine prompt.
-        assert_eq!(e.classify_line("\u{203A} Implement {feature}"), LineRole::User);
+        assert_eq!(
+            e.classify_line("\u{203A} Implement {feature}"),
+            LineRole::User
+        );
     }
 
     #[test]
@@ -1052,7 +1098,10 @@ mod tests {
             e.classify_line("\u{256D}\u{2500}\u{2500}\u{2500}\u{256E}"),
             LineRole::None
         );
-        assert_eq!(e.classify_line("\u{2502} >_ OpenAI Codex (v0.145.0)"), LineRole::None);
+        assert_eq!(
+            e.classify_line("\u{2502} >_ OpenAI Codex (v0.145.0)"),
+            LineRole::None
+        );
         assert_eq!(
             e.classify_line("\u{26A0} failed to parse hooks config"),
             LineRole::None
@@ -1076,7 +1125,10 @@ mod tests {
     fn codex_menu_selection_row_is_not_a_user_turn() {
         let e = vendor_extractor(AiTool::Codex);
         assert_eq!(e.classify_line("\u{203A} 1. Yes, continue"), LineRole::None);
-        assert_eq!(e.classify_line("\u{203A} 2. Trust all and continue"), LineRole::None);
+        assert_eq!(
+            e.classify_line("\u{203A} 2. Trust all and continue"),
+            LineRole::None
+        );
         // A prompt that merely starts with a digit is still a prompt.
         assert_eq!(e.classify_line("\u{203A} 2 spaces or 4?"), LineRole::User);
     }
@@ -1189,9 +1241,7 @@ mod tests {
         }
     }
 
-    fn collect_events_for(
-        snapshots: &[Vec<&str>],
-    ) -> Vec<CollectedEvent> {
+    fn collect_events_for(snapshots: &[Vec<&str>]) -> Vec<CollectedEvent> {
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink: Box<dyn LogEventSink> = Box::new(CollectingSink {
             events: events.clone(),
@@ -1384,9 +1434,7 @@ mod tests {
             }
         }
         let bases: Vec<PathBuf> = vec![
-            PathBuf::from(
-                "/tmp/immorterm/terminals/logs",
-            ),
+            PathBuf::from("/tmp/immorterm/terminals/logs"),
             std::env::var("HOME")
                 .ok()
                 .map(|h| PathBuf::from(format!("{}/.immorterm/terminals/logs", h)))
@@ -1543,7 +1591,11 @@ mod tests {
         assert_eq!(names.len(), ALL.len(), "two variants share a name()");
 
         let displays: HashSet<&str> = ALL.iter().map(|t| t.display_name()).collect();
-        assert_eq!(displays.len(), ALL.len(), "two variants share a display_name()");
+        assert_eq!(
+            displays.len(),
+            ALL.len(),
+            "two variants share a display_name()"
+        );
 
         // `name()` is the wire value written to registry.tool and memory rows —
         // lowercase, no spaces, or cross-layer comparisons break.
@@ -1557,19 +1609,4 @@ mod tests {
         // Unknown renders generically rather than leaking the variant name.
         assert_eq!(AiTool::Unknown.display_name(), "AI");
     }
-}
-
-/// Convert days since Unix epoch to (year, month, day).
-fn days_to_ymd(days: u64) -> (u64, u64, u64) {
-    let z = days + 719468;
-    let era = z / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
 }

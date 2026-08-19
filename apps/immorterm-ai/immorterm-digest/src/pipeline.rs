@@ -96,7 +96,10 @@ pub struct LongstoryDigestOutcome {
 ///
 /// We deliberately PRE-VALIDATE that no flag value contains `--` because
 /// the bash script's mode detection uses `${1:0:2} = "--"` (F10).
-pub async fn run_digest<'a>(cfg: &PipelineConfig, req: DigestInvocation<'a>) -> Result<DigestOutcome> {
+pub async fn run_digest<'a>(
+    cfg: &PipelineConfig,
+    req: DigestInvocation<'a>,
+) -> Result<DigestOutcome> {
     if !cfg.script_path.exists() {
         anyhow::bail!(
             "digest script missing at {} (workspace not initialized?)",
@@ -222,7 +225,11 @@ pub async fn run_longstory_digest<'a>(
 
 fn validate_no_dashdash(field: &str, value: &str) -> Result<()> {
     if value.contains("--") {
-        anyhow::bail!("field '{}' contains '--' (bash parser unsafe): {}", field, value);
+        anyhow::bail!(
+            "field '{}' contains '--' (bash parser unsafe): {}",
+            field,
+            value
+        );
     }
     Ok(())
 }
@@ -311,21 +318,30 @@ exit 0
         let transcripts_dir = dir.path().join("transcripts");
         std::fs::create_dir_all(&transcripts_dir).unwrap();
         let dummy_path = transcripts_dir.join("sess-1.jsonl");
-        run_digest(&cfg, invocation("project-x", "win-7", "sess-1", &dummy_path, "milestone"))
-            .await
-            .unwrap();
+        run_digest(
+            &cfg,
+            invocation("project-x", "win-7", "sess-1", &dummy_path, "milestone"),
+        )
+        .await
+        .unwrap();
         let hook_dir = dir.path().join(".immorterm").join("hooks");
         let argv = std::fs::read_to_string(hook_dir.join("argv.txt")).unwrap();
         let env_capture = std::fs::read_to_string(hook_dir.join("env.txt")).unwrap();
         // Positional: $1=project_id, $2=jsonl_dir, $3=session_id.
-        assert!(argv.contains("project-x"), "argv missing project_id: {argv}");
+        assert!(
+            argv.contains("project-x"),
+            "argv missing project_id: {argv}"
+        );
         assert!(
             argv.contains(transcripts_dir.to_str().unwrap()),
             "argv missing jsonl_dir: {argv}"
         );
         assert!(argv.contains("sess-1"), "argv missing session_id: {argv}");
         // Trigger passed via env.
-        assert!(env_capture.contains("trigger=milestone"), "env missing trigger: {env_capture}");
+        assert!(
+            env_capture.contains("trigger=milestone"),
+            "env missing trigger: {env_capture}"
+        );
     }
 
     #[tokio::test]
@@ -386,7 +402,13 @@ printf '%s\n' "$LONGSTORY_PROJECT_ID" "$LONGSTORY_SESSION_ID" "$LONGSTORY_SESSIO
         let transcript = dir.path().join("session.jsonl");
         let outcome = run_longstory_digest(
             &cfg,
-            invocation("project-1", "window-1", "session-1", &transcript, "milestone"),
+            invocation(
+                "project-1",
+                "window-1",
+                "session-1",
+                &transcript,
+                "milestone",
+            ),
         )
         .await
         .unwrap();

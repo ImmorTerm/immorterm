@@ -95,10 +95,11 @@ impl Debouncer {
     /// Periodic tick. Checks burst-quiet first, then fallback.
     pub fn tick(&mut self, now: Instant) -> Option<Trigger> {
         if let State::Bursting { last_event_at } = self.state
-            && now.duration_since(last_event_at) >= self.cfg.quiet_period {
-                self.mark_fired(now);
-                return Some(Trigger::BurstQuiet);
-            }
+            && now.duration_since(last_event_at) >= self.cfg.quiet_period
+        {
+            self.mark_fired(now);
+            return Some(Trigger::BurstQuiet);
+        }
         if self.pending_units > 0
             && now.duration_since(self.last_digest_at) >= self.cfg.fallback_interval
         {
@@ -191,7 +192,10 @@ mod tests {
         let t0 = Instant::now();
         let mut d = Debouncer::new(cfg(), t0);
         d.on_activity(50, t0);
-        assert_eq!(d.on_milestone(t0 + Duration::from_secs(1)), Some(Trigger::Milestone));
+        assert_eq!(
+            d.on_milestone(t0 + Duration::from_secs(1)),
+            Some(Trigger::Milestone)
+        );
         assert_eq!(d.pending(), 0);
     }
 

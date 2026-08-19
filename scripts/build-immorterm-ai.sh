@@ -29,7 +29,7 @@ else
 fi
 
 STEP=0
-TOTAL=$( [[ $QUICK -eq 1 ]] && echo 4 || echo 8 )
+TOTAL=$( [[ $QUICK -eq 1 ]] && echo 5 || echo 9 )
 
 step() { STEP=$((STEP + 1)); echo "[$STEP/$TOTAL] $1"; }
 
@@ -56,6 +56,21 @@ if [[ $QUICK -eq 0 ]]; then
 fi
 
 # ── Build ────────────────────────────────────────────────────────────
+
+step "Build native transcript adapter (release)..."
+cargo build --release -p conversation-adapters --bin immorterm-adapter 2>&1 | tail -5
+mkdir -p "$REPO_ROOT/apps/extension/resources/bin" "$HOME/.immorterm/bin"
+cp "$REPO_ROOT/target/release/immorterm-adapter" \
+   "$REPO_ROOT/apps/extension/resources/bin/immorterm-adapter"
+# Executables must be replaced by inode, never overwritten in place. macOS can
+# otherwise wedge concurrent/new execs in an uninterruptible kernel state.
+ADAPTER_STAGE="$HOME/.immorterm/bin/.immorterm-adapter.$$"
+cp "$REPO_ROOT/target/release/immorterm-adapter" "$ADAPTER_STAGE"
+chmod 755 "$ADAPTER_STAGE"
+mv "$ADAPTER_STAGE" "$HOME/.immorterm/bin/immorterm-adapter"
+chmod 755 "$REPO_ROOT/apps/extension/resources/bin/immorterm-adapter" \
+          "$HOME/.immorterm/bin/immorterm-adapter"
+echo "  OK: adapter bundled + installed"
 
 step "wasm-pack build (release)..."
 # Strip local filesystem paths ($HOME) from the compiled wasm/debuginfo so
@@ -116,6 +131,8 @@ if [ -d "$EXT_DIR" ]; then
   cp "$REPO_ROOT/apps/extension/resources/"*-terminal.html "$EXT_DIR/resources/" 2>/dev/null || true
   cp "$REPO_ROOT/apps/extension/resources/"*-terminal.css "$EXT_DIR/resources/" 2>/dev/null || true
   cp "$REPO_ROOT/apps/extension/resources/gpu-terminal-"*.js "$EXT_DIR/resources/" 2>/dev/null || true
+  mkdir -p "$EXT_DIR/resources/bin"
+  cp "$REPO_ROOT/apps/extension/resources/bin/immorterm-adapter" "$EXT_DIR/resources/bin/"
   # Resolve workspace symlinks in node_modules/@immorterm/ — bun links these
   # as relative symlinks that break when copied outside the monorepo.
   DEST_NM="$EXT_DIR/node_modules/@immorterm"

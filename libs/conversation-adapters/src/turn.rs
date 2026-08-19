@@ -36,13 +36,28 @@ pub struct AssistantBlock {
 
 impl AssistantBlock {
     pub fn text(text: impl Into<String>, ts: Option<String>) -> Self {
-        Self { kind: BlockKind::Text, text: text.into(), tool_call: None, timestamp: ts }
+        Self {
+            kind: BlockKind::Text,
+            text: text.into(),
+            tool_call: None,
+            timestamp: ts,
+        }
     }
     pub fn thinking(text: impl Into<String>, ts: Option<String>) -> Self {
-        Self { kind: BlockKind::Thinking, text: text.into(), tool_call: None, timestamp: ts }
+        Self {
+            kind: BlockKind::Thinking,
+            text: text.into(),
+            tool_call: None,
+            timestamp: ts,
+        }
     }
     pub fn tool_use(call: ToolCall, ts: Option<String>) -> Self {
-        Self { kind: BlockKind::ToolUse, text: String::new(), tool_call: Some(call), timestamp: ts }
+        Self {
+            kind: BlockKind::ToolUse,
+            text: String::new(),
+            tool_call: Some(call),
+            timestamp: ts,
+        }
     }
 }
 
@@ -79,7 +94,9 @@ pub fn turns_to_events(
                 role: Role::User,
                 message_id: String::new(),
                 parent_id: String::new(),
-                content: vec![ContentBlock::Text { text: turn.user_text.clone() }],
+                content: vec![ContentBlock::Text {
+                    text: turn.user_text.clone(),
+                }],
                 usage: Default::default(),
             });
         }
@@ -89,8 +106,12 @@ pub fn turns_to_events(
         let mut tool_results = Vec::new();
         for b in &turn.blocks {
             match b.kind {
-                BlockKind::Text => a_blocks.push(ContentBlock::Text { text: b.text.clone() }),
-                BlockKind::Thinking => a_blocks.push(ContentBlock::Thinking { text: b.text.clone() }),
+                BlockKind::Text => a_blocks.push(ContentBlock::Text {
+                    text: b.text.clone(),
+                }),
+                BlockKind::Thinking => a_blocks.push(ContentBlock::Thinking {
+                    text: b.text.clone(),
+                }),
                 BlockKind::ToolUse => {
                     if let Some(tc) = &b.tool_call {
                         a_blocks.push(ContentBlock::ToolUse {
@@ -157,7 +178,9 @@ mod chrono_like {
     pub fn parse_rfc3339_seconds(s: &str) -> Option<f64> {
         // Extract Y-M-DTH:M:S and optional fractional seconds.
         let s = s.trim();
-        if s.len() < 19 { return None; }
+        if s.len() < 19 {
+            return None;
+        }
         let year: i64 = s[0..4].parse().ok()?;
         let month: u32 = s[5..7].parse().ok()?;
         let day: u32 = s[8..10].parse().ok()?;
@@ -170,7 +193,9 @@ mod chrono_like {
         if s.as_bytes().get(i) == Some(&b'.') {
             i += 1;
             let start = i;
-            while i < s.len() && s.as_bytes()[i].is_ascii_digit() { i += 1; }
+            while i < s.len() && s.as_bytes()[i].is_ascii_digit() {
+                i += 1;
+            }
             let digits = &s[start..i];
             if let Ok(n) = digits.parse::<u64>() {
                 frac = n as f64 / 10f64.powi(digits.len() as i32);
@@ -188,8 +213,8 @@ mod chrono_like {
         let y = if m <= 2 { y - 1 } else { y };
         let era = (if y >= 0 { y } else { y - 399 }) / 400;
         let yoe = (y - era * 400) as u64;
-        let doy = ((153 * (if m > 2 { m - 3 } else { m + 9 }) as u64 + 2) / 5
-            + d as u64 - 1) as u64;
+        let doy =
+            ((153 * (if m > 2 { m - 3 } else { m + 9 }) as u64 + 2) / 5 + d as u64 - 1) as u64;
         let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
         era * 146_097 + doe as i64 - 719_468
     }

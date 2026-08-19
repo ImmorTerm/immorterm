@@ -1860,6 +1860,19 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "immorterm_send_message",
+            "description": "Send text to the live session currently connected through ImmorTerm Interactive sharing. The active share determines the recipient; arbitrary targets are rejected. Defaults to submitting with Enter.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session": { "type": "string", "description": "The sending session; normally auto-resolved." },
+                    "message": { "type": "string", "description": "Exact text to deliver." },
+                    "submit": { "type": "boolean", "default": true, "description": "Append Enter to submit immediately." }
+                },
+                "required": ["message"]
+            }
+        }),
+        json!({
             "name": "immorterm_acknowledge_message",
             "description": "Acknowledge an external bridge message only after you have actually received and understood it. This is the explicit agent acknowledgement; terminal/PTY write success never counts. The message must have been presented to this exact project session.",
             "inputSchema": {
@@ -1882,6 +1895,19 @@ fn tool_definitions() -> Vec<Value> {
                     "message": { "type": "string", "description": "Correlated reply text." }
                 },
                 "required": ["message_id", "message"]
+            }
+        }),
+        json!({
+            "name": "immorterm_send_file",
+            "description": "Send a local file to the live session currently connected through ImmorTerm Interactive sharing. The active share determines the recipient. ImmorTerm prefers a zero-copy canonical path and transfers bounded bytes only when the receiver cannot access it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session": { "type": "string", "description": "The sending session; normally auto-resolved." },
+                    "path": { "type": "string", "description": "Absolute path to a readable local file." },
+                    "message": { "type": "string", "description": "Optional note delivered with the attachment." }
+                },
+                "required": ["path"]
             }
         }),
         // ── Agent Teams tools ──
@@ -2781,9 +2807,11 @@ fn handle_tool_call(
         "immorterm_poll_events" => handle_poll_events(&arguments, rt),
         "immorterm_wait_for_event" => handle_wait_for_event(&arguments, rt),
         "immorterm_connect_stream" => handle_connect_stream(&arguments, rt),
+        "immorterm_send_message" => handle_send_message(&arguments, rt),
         "immorterm_project_sessions" => handle_project_sessions(&arguments),
         "immorterm_acknowledge_message" => handle_acknowledge_message(&arguments, rt),
         "immorterm_reply_to_message" => handle_reply_to_message(&arguments, rt),
+        "immorterm_send_file" => handle_send_file(&arguments, rt),
         // Agent Teams tools
         "immorterm_list_primitives" => handle_list_primitives(&arguments, rt),
         "immorterm_update_primitive" => handle_update_primitive(&arguments, rt),
@@ -5161,6 +5189,30 @@ fn prepare_session_message(message: &str, submit: bool) -> Result<String, String
     Ok(data)
 }
 
+fn handle_send_message(args: &Value, rt: &tokio::runtime::Runtime) -> Result<String, String> {
+    let session = resolve_session(args)?;
+    let message = args
+        .get("message")
+        .and_then(|v| v.as_str())
+        .ok_or("'message' is required")?;
+    let submit = args.get("submit").and_then(|v| v.as_bool()).unwrap_or(true);
+    let data = prepare_session_message(message, submit)?;
+    let bytes_sent = data.len();
+
+    match raw_ipc_query(&session, Request::SendSharedMessage { data }, rt)? {
+        Response::Ok(detail) => serde_json::to_string_pretty(&json!({
+            "status": "sent",
+            "sharing_session": session,
+            "submitted": submit,
+            "bytes_sent": bytes_sent,
+            "detail": detail
+        }))
+        .map_err(|e| e.to_string()),
+        Response::Error(e) => Err(e),
+        _ => Err("Unexpected response type".to_string()),
+    }
+}
+
 fn is_raster_image_name(name: &str) -> bool {
     matches!(
         std::path::Path::new(name)
@@ -5377,6 +5429,70 @@ fn handle_reply_to_message(
     ))
 }
 
+fn handle_send_file(args: &Value, rt: &tokio::runtime::Runtime) -> Result<String, String> {
+    let session = resolve_session(args)?;
+    let path_arg = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.is_empty())
+        .ok_or("'path' is required")?;
+    let requested_path = std::path::Path::new(path_arg);
+    if !requested_path.is_absolute() {
+        return Err("'path' must be absolute".into());
+    }
+    let path = requested_path
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve shared file '{}': {}", path_arg, e))?;
+    let metadata = path
+        .metadata()
+        .map_err(|e| format!("Cannot inspect shared file '{}': {}", path.display(), e))?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "Shared path is not a regular file: {}",
+            path.display()
+        ));
+    }
+    let original_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or("Shared file has no valid UTF-8 filename")?;
+    let is_image = is_raster_image_name(original_name);
+    let file_name = original_name.to_string();
+    let message = args
+        .get("message")
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    if message.as_ref().is_some_and(|text| text.len() > 16 * 1024) {
+        return Err("'message' must not exceed 16384 bytes".into());
+    }
+    let media_type = inferred_media_type(&file_name, is_image).to_string();
+
+    match raw_ipc_query(
+        &session,
+        Request::SendSharedFile {
+            source_path: path.to_string_lossy().into_owned(),
+            file_name: file_name.clone(),
+            media_type: media_type.clone(),
+            is_image,
+            message,
+        },
+        rt,
+    )? {
+        Response::Ok(detail) => serde_json::to_string_pretty(&json!({
+            "status": "sent",
+            "sharing_session": session,
+            "file_name": file_name,
+            "media_type": media_type,
+            "zero_copy_preferred": true,
+            "detail": detail
+        }))
+        .map_err(|e| e.to_string()),
+        Response::Error(e) => Err(e),
+        _ => Err("Unexpected response type".to_string()),
+    }
+}
 // ─── Agent Teams tool implementations ────────────────────────────────
 
 fn home_dir() -> String {
@@ -6986,6 +7102,34 @@ mod tests {
         assert_eq!(prepare_session_message("hello", true).unwrap(), "hello\r");
         assert_eq!(prepare_session_message("hello\r", true).unwrap(), "hello\r");
         assert_eq!(prepare_session_message("hello", false).unwrap(), "hello");
+    }
+
+    #[test]
+    fn session_message_tool_does_not_accept_an_arbitrary_target() {
+        let tools = tool_definitions();
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == "immorterm_send_message")
+            .expect("send-message tool definition");
+        let properties = tool["inputSchema"]["properties"].as_object().unwrap();
+        assert!(!properties.contains_key("target_session"));
+        assert!(properties.contains_key("session"));
+        assert_eq!(tool["inputSchema"]["required"], json!(["message"]));
+    }
+
+    #[test]
+    fn shared_file_tool_is_share_scoped_and_detects_raster_images() {
+        let tools = tool_definitions();
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == "immorterm_send_file")
+            .expect("send-file tool definition");
+        let properties = tool["inputSchema"]["properties"].as_object().unwrap();
+        assert!(!properties.contains_key("target_session"));
+        assert!(properties.contains_key("session"));
+        assert_eq!(tool["inputSchema"]["required"], json!(["path"]));
+        assert!(is_raster_image_name("shot.webp"));
+        assert!(!is_raster_image_name("notes.md"));
     }
 
     #[test]

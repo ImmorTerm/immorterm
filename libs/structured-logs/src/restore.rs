@@ -79,10 +79,12 @@ pub fn restore_session(log_dir: &Path, session_name: &str) -> Option<RestoreData
             }
         }
         // Try parsing as scrollback dump (has "lines" and "hash" fields)
-        else if line.contains("\"hash\"") && line.contains("\"lines\"")
-            && let Ok(dump) = serde_json::from_str::<ScrollbackDump>(&line) {
-                last_scrollback = Some(dump);
-            }
+        else if line.contains("\"hash\"")
+            && line.contains("\"lines\"")
+            && let Ok(dump) = serde_json::from_str::<ScrollbackDump>(&line)
+        {
+            last_scrollback = Some(dump);
+        }
     }
 
     let snapshot = last_snapshot?;
