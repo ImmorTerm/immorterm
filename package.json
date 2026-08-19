@@ -23,6 +23,7 @@
     "lint:immorterm-ai:wasm": "cargo clippy -p immorterm-wasm --target wasm32-unknown-unknown -- -D warnings",
     "test:rust": "cargo test --workspace --exclude immorterm-wasm",
     "lint:rust": "cargo clippy --workspace --exclude immorterm-wasm -- -D warnings",
+    "check:image-size": "bun scripts/check-image-size.ts",
     "test:ai": "./scripts/test-immorterm-ai.sh",
     "test:ai:quick": "./scripts/test-immorterm-ai.sh --quick",
     "test:ai:e2e": "./scripts/test-immorterm-ai.sh --e2e",

@@ -137,3 +137,10 @@ immorterm-render = { path = "apps/immorterm-ai/immorterm-render" }
 structured-logs = { path = "libs/structured-logs" }
 conversation-schema = { path = "libs/conversation-schema" }
 conversation-adapters = { path = "libs/conversation-adapters" }
+
+# Strip symbols from release binaries. The headless image ships three release
+# binaries (immorterm-ai/hub/digest, ~49 MB total unstripped); stripping takes
+# them to ~15 MB. No consumer of a release binary reads its symbol table, and
+# the wasm build already remaps/strips its own debug paths.
+[profile.release]
+strip = true

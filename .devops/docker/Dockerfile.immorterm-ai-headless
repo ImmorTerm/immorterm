@@ -174,12 +174,12 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     npm install -g @anthropic-ai/claude-code && \
     rm -rf /var/lib/apt/lists/* /root/.npm
 
-COPY --from=builder /src/target/release/immorterm-ai     /usr/local/bin/immorterm-ai
-COPY --from=builder /src/target/release/immorterm-hub    /usr/local/bin/immorterm-hub
-COPY --from=builder /src/target/release/immorterm-digest /usr/local/bin/immorterm-digest
-RUN chmod +x /usr/local/bin/immorterm-ai \
-             /usr/local/bin/immorterm-hub \
-             /usr/local/bin/immorterm-digest
+# --chmod sets the mode in the COPY layer itself. A separate `RUN chmod`
+# rewrites every byte of the three binaries into a NEW layer — a ~49 MB
+# duplicate stacked on top of the originals for a permission bit.
+COPY --chmod=755 --from=builder /src/target/release/immorterm-ai     /usr/local/bin/immorterm-ai
+COPY --chmod=755 --from=builder /src/target/release/immorterm-hub    /usr/local/bin/immorterm-hub
+COPY --chmod=755 --from=builder /src/target/release/immorterm-digest /usr/local/bin/immorterm-digest
 
 # immorterm-memory is NOT built from source here — its engine lives in a
 # separate repo. Download the prebuilt binary from the public release, using
