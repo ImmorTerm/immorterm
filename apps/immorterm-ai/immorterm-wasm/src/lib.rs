@@ -162,6 +162,14 @@ struct BackgroundState {
     comments: Comments,
 }
 
+#[derive(Clone)]
+struct ContentRowAnchor {
+    line_id: i64,
+    text: String,
+}
+
+type SelectionRowAnchors = (ContentRowAnchor, ContentRowAnchor);
+
 /// Internal state — holds the live terminal, renderer, GPU, and all cached
 /// settings. Not exposed to JS directly; the JS-facing wrapper `WasmTerminal`
 /// below owns a `RefCell<WasmTerminalInner>` and delegates every method call
@@ -868,13 +876,147 @@ impl WasmTerminalInner {
 
     /// Process raw bytes (ANSI escape sequences) through the terminal emulator.
     pub fn process(&mut self, data: &[u8]) {
+        // Codex redraws its live grid in place while streaming. Numeric row
+        // coordinates survive normal scrollback growth, but not rows inserted
+        // or replaced above the content the user is viewing or selecting.
+        let codex_viewport = if self.ai_dialect == AiDialect::Codex && self.scroll_offset > 0 {
+            self.capture_viewport_anchor()
+        } else {
+            None
+        };
+        let codex_selections = if self.ai_dialect == AiDialect::Codex
+            && (self.selection.is_active || !self.pseudo_cursors.is_empty())
+        {
+            self.capture_codex_selection_anchors()
+        } else {
+            (None, Vec::new())
+        };
         self.terminal.process(data);
+        if self.ai_dialect == AiDialect::Codex {
+            if let Some((display_row, anchor)) = codex_viewport {
+                self.restore_viewport_anchor(display_row, &anchor);
+            }
+            self.restore_codex_selection_anchors(codex_selections.0, codex_selections.1);
+            self.reanchor_codex_comments();
+        }
         self.last_activity_ms = js_sys::Date::now();
+    }
+
+    fn content_row_count(&self) -> usize {
+        self.terminal.scrollback.len() + self.terminal.grid.row_count()
+    }
+
+    fn capture_content_row_anchor(&self, content_idx: usize) -> ContentRowAnchor {
+        ContentRowAnchor {
+            line_id: self.content_idx_to_line_id(content_idx),
+            text: self.read_content_row_text(content_idx),
+        }
+    }
+
+    fn capture_viewport_anchor(&self) -> Option<(usize, ContentRowAnchor)> {
+        // Prefer meaningful text near the top of the viewport. Empty and box
+        // rows are common in Codex's live UI and make ambiguous fingerprints.
+        (0..self.rows).find_map(|display_row| {
+            let content_idx = self.display_to_content(display_row);
+            let anchor = self.capture_content_row_anchor(content_idx);
+            (!anchor.text.trim().is_empty()).then_some((display_row, anchor))
+        })
+    }
+
+    fn resolve_content_row_anchor(&self, anchor: &ContentRowAnchor) -> Option<usize> {
+        comments::resolve_row_anchor(
+            self.content_row_count(),
+            self.terminal.scrollback.net_shift(),
+            anchor.line_id,
+            &anchor.text,
+            |idx| self.read_content_row_text(idx),
+        )
+    }
+
+    fn restore_viewport_anchor(&mut self, display_row: usize, anchor: &ContentRowAnchor) {
+        let Some(content_idx) = self.resolve_content_row_anchor(anchor) else {
+            return;
+        };
+        // content_idx = scrollback_len + display_row - scroll_offset
+        let desired = self
+            .terminal
+            .scrollback
+            .len()
+            .saturating_add(display_row)
+            .saturating_sub(content_idx);
+        self.scroll_offset = desired.min(self.terminal.scrollback.len());
+    }
+
+    fn reanchor_codex_comments(&mut self) {
+        if self.comments.len() == 0 {
+            return;
+        }
+        let count = self.content_row_count();
+        let net_shift = self.terminal.scrollback.net_shift();
+        // Move comments out so the lookup callback can borrow terminal rows.
+        let mut staged = std::mem::take(&mut self.comments);
+        staged.reanchor_by_text(count, net_shift, |idx| self.read_content_row_text(idx));
+        self.comments = staged;
+    }
+
+    fn selection_row_anchors(&self, selection: &Selection) -> SelectionRowAnchors {
+        (
+            self.capture_content_row_anchor(selection.anchor.1),
+            self.capture_content_row_anchor(selection.active.1),
+        )
+    }
+
+    fn capture_codex_selection_anchors(
+        &self,
+    ) -> (Option<SelectionRowAnchors>, Vec<SelectionRowAnchors>) {
+        let regular = self
+            .selection
+            .is_active
+            .then(|| self.selection_row_anchors(&self.selection));
+        let pseudo = self
+            .pseudo_cursors
+            .iter()
+            .map(|selection| self.selection_row_anchors(selection))
+            .collect();
+        (regular, pseudo)
+    }
+
+    fn restore_codex_selection_anchors(
+        &mut self,
+        regular: Option<SelectionRowAnchors>,
+        pseudo: Vec<SelectionRowAnchors>,
+    ) {
+        if let Some((anchor, active)) = regular {
+            let rows = (
+                self.resolve_content_row_anchor(&anchor),
+                self.resolve_content_row_anchor(&active),
+            );
+            if let (Some(anchor_row), Some(active_row)) = rows {
+                self.selection.anchor.1 = anchor_row;
+                self.selection.active.1 = active_row;
+            }
+        }
+
+        let resolved = pseudo
+            .iter()
+            .map(|(anchor, active)| {
+                (
+                    self.resolve_content_row_anchor(anchor),
+                    self.resolve_content_row_anchor(active),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (selection, (anchor_row, active_row)) in self.pseudo_cursors.iter_mut().zip(resolved) {
+            if let (Some(anchor_row), Some(active_row)) = (anchor_row, active_row) {
+                selection.anchor.1 = anchor_row;
+                selection.active.1 = active_row;
+            }
+        }
     }
 
     /// Process a string (convenience wrapper for process).
     pub fn process_str(&mut self, text: &str) {
-        self.terminal.process(text.as_bytes());
+        self.process(text.as_bytes());
     }
 
     /// Enable or disable the status bar.

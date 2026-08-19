@@ -711,6 +711,23 @@ describe('GPU Terminal — Render Loop Safety', () => {
   });
 });
 
+describe('GPU Terminal — Codex Viewport Anchoring', () => {
+  const html = readHtml();
+  const js = extractInlineScript(html);
+
+  it('does not double-compensate after WASM relocates a Codex viewport', () => {
+    expect(js).toContain('const offsetBefore = userScrollLock ? terminal.scroll_offset() : 0');
+    expect(js).toContain('terminal.scroll_offset() === offsetBefore');
+  });
+
+  it('retains legacy scrollback compensation when WASM leaves the offset unchanged', () => {
+    const start = js.indexOf('const sbGrown = terminal.scrollback_len() - sbBefore');
+    const body = js.slice(start, start + 500);
+    expect(body).toContain('if (sbGrown > 0 && terminal.scroll_offset() === offsetBefore)');
+    expect(body).toContain('terminal.scroll(sbGrown)');
+  });
+});
+
 describe('GPU Terminal — Shared Activity', () => {
   const html = readHtml();
   const js = extractInlineScript(html);

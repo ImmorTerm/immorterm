@@ -10918,6 +10918,7 @@
       // separate WS messages are processed atomically in the same frame.
       if (terminal && pendingPtyChunks.length > 0) {
         const sbBefore = userScrollLock ? terminal.scrollback_len() : 0;
+        const offsetBefore = userScrollLock ? terminal.scroll_offset() : 0;
         if (pendingPtyChunks.length === 1) {
           terminal.process(pendingPtyChunks[0]);
         } else {
@@ -10934,7 +10935,12 @@
         pendingPtyLen = 0;
         if (userScrollLock) {
           const sbGrown = terminal.scrollback_len() - sbBefore;
-          if (sbGrown > 0) terminal.scroll(sbGrown);
+          // Codex-aware WASM may already have relocated the viewport by its
+          // content anchor. Apply legacy append compensation only when the
+          // processor left the numeric offset unchanged.
+          if (sbGrown > 0 && terminal.scroll_offset() === offsetBefore) {
+            terminal.scroll(sbGrown);
+          }
         } else if (!(termInput && termInput.isMouseDown()) && terminal.scroll_offset() > 0) {
           terminal.scroll_to_bottom();
         }
