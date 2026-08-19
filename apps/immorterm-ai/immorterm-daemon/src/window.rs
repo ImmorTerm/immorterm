@@ -1014,7 +1014,7 @@ impl ApplicationHandler for App {
                                         self.ai_stats_mode = self.ai_stats_mode.next();
                                         return;
                                     }
-                                    StatusBarTarget::Title | StatusBarTarget::ThemeArea | StatusBarTarget::Project | StatusBarTarget::Scratch | StatusBarTarget::None => {
+                                    StatusBarTarget::Title | StatusBarTarget::ThemeArea | StatusBarTarget::Project | StatusBarTarget::Scratch | StatusBarTarget::SharedActivity | StatusBarTarget::None => {
                                         // No action for title, theme area, project click, or
                                         // empty space. Scratch toggle is webview-only — the
                                         // native window has no second-terminal surface.
