@@ -6,6 +6,7 @@ license.workspace = true
 description = "Per-vendor AI transcript adapters — Claude Code, Cursor, Codex, Gemini CLI, opencode"
 
 [dependencies]
+clap = { workspace = true }
 conversation-schema = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

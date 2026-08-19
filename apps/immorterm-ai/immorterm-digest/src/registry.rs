@@ -11,9 +11,9 @@ use std::time::SystemTime;
 
 use crate::debouncer::Debouncer;
 use crate::key::AiSessionKey;
-use crate::lifecycle::{LifecycleState, SessionStatus};
 #[cfg(test)]
 use crate::lifecycle::LifecycleModel;
+use crate::lifecycle::{LifecycleState, SessionStatus};
 
 pub struct SessionTrack {
     pub key: AiSessionKey,
@@ -59,7 +59,10 @@ impl SessionRegistry {
         let path = canonicalize_or_self(&track.transcript_path);
         let window = key.window_id.clone();
 
-        self.by_transcript.entry(path).or_default().push(key.clone());
+        self.by_transcript
+            .entry(path)
+            .or_default()
+            .push(key.clone());
         self.by_window.entry(window).or_default().push(key.clone());
         self.by_session.insert(key, track);
     }

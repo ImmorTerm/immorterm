@@ -20,23 +20,29 @@
 //! whole-text adapter pass elsewhere falls through; we additionally accept the
 //! array via `parse()` (best-effort) so callers don't have to pre-flatten.
 
-use crate::shared::{filter_empty_turns, clean_system_tags};
-use crate::turn::{AssistantBlock, ToolCall, Turn};
 use crate::ConversationAdapter;
+use crate::shared::{clean_system_tags, filter_empty_turns};
+use crate::turn::{AssistantBlock, ToolCall, Turn};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
 pub struct Cline;
 
 impl ConversationAdapter for Cline {
-    fn tool_name(&self) -> &'static str { "cline" }
+    fn tool_name(&self) -> &'static str {
+        "cline"
+    }
 
     fn detect(&self, obj: &Value) -> bool {
         // Reject anything that looks like Claude Code (`type` field present).
-        if obj.get("type").is_some() { return false; }
+        if obj.get("type").is_some() {
+            return false;
+        }
         // Cline messages always carry numeric `ts` (ms since epoch).
         let has_ts = obj.get("ts").map(|v| v.is_number()).unwrap_or(false);
-        if !has_ts { return false; }
+        if !has_ts {
+            return false;
+        }
         let role = obj.get("role").and_then(|r| r.as_str());
         matches!(role, Some("user") | Some("assistant"))
     }
@@ -54,7 +60,9 @@ impl ConversationAdapter for Cline {
             let mut out = Vec::new();
             for line in text.lines() {
                 let t = line.trim();
-                if t.is_empty() { continue; }
+                if t.is_empty() {
+                    continue;
+                }
                 if let Ok(v) = serde_json::from_str::<Value>(t) {
                     out.push(v);
                 }
@@ -83,11 +91,14 @@ impl ConversationAdapter for Cline {
                             if b.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
                                 continue;
                             }
-                            let tid = b.get("tool_use_id").and_then(|v| v.as_str())
+                            let tid = b
+                                .get("tool_use_id")
+                                .and_then(|v| v.as_str())
                                 .unwrap_or("")
                                 .to_string();
                             let result_text = stringify_tool_result_content(b.get("content"));
-                            let is_err = b.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let is_err =
+                                b.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
                             if let Some(&bidx) = pending_tool.get(&tid) {
                                 if let Some(tc) = current_blocks[bidx].tool_call.as_mut() {
                                     tc.result = Some(result_text);
@@ -120,14 +131,17 @@ impl ConversationAdapter for Cline {
             }
 
             if role == "assistant" {
-                if !have_turn { have_turn = true; }
+                if !have_turn {
+                    have_turn = true;
+                }
                 let content = entry.get("content").cloned().unwrap_or(Value::Null);
                 let blocks_arr = match content {
                     Value::Array(arr) => arr,
                     Value::String(s) => {
                         let trimmed = s.trim();
                         if !trimmed.is_empty() {
-                            current_blocks.push(AssistantBlock::text(trimmed.to_string(), ts_iso.clone()));
+                            current_blocks
+                                .push(AssistantBlock::text(trimmed.to_string(), ts_iso.clone()));
                         }
                         continue;
                     }
@@ -137,21 +151,44 @@ impl ConversationAdapter for Cline {
                     let btype = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
                     match btype {
                         "text" => {
-                            let txt = block.get("text").and_then(|t| t.as_str()).unwrap_or("").trim();
+                            let txt = block
+                                .get("text")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("")
+                                .trim();
                             if !txt.is_empty() {
-                                current_blocks.push(AssistantBlock::text(txt.to_string(), ts_iso.clone()));
+                                current_blocks
+                                    .push(AssistantBlock::text(txt.to_string(), ts_iso.clone()));
                             }
                         }
                         "thinking" => {
-                            let txt = block.get("thinking").and_then(|t| t.as_str()).unwrap_or("").trim();
+                            let txt = block
+                                .get("thinking")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("")
+                                .trim();
                             if !txt.is_empty() {
-                                current_blocks.push(AssistantBlock::thinking(txt.to_string(), ts_iso.clone()));
+                                current_blocks.push(AssistantBlock::thinking(
+                                    txt.to_string(),
+                                    ts_iso.clone(),
+                                ));
                             }
                         }
                         "tool_use" => {
-                            let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let input = block.get("input").cloned().unwrap_or(Value::Object(Map::new()));
+                            let id = block
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let name = block
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let input = block
+                                .get("input")
+                                .cloned()
+                                .unwrap_or(Value::Object(Map::new()));
                             current_blocks.push(AssistantBlock::tool_use(
                                 ToolCall {
                                     tool_use_id: id.clone(),
@@ -193,11 +230,14 @@ fn extract_user_text(content: &Value) -> String {
     match content {
         Value::String(s) => s.clone(),
         Value::Array(blocks) => {
-            let parts: Vec<String> = blocks.iter()
+            let parts: Vec<String> = blocks
+                .iter()
                 .filter_map(|b| {
                     if b.get("type")?.as_str()? == "text" {
                         Some(b.get("text")?.as_str()?.to_string())
-                    } else { None }
+                    } else {
+                        None
+                    }
                 })
                 .collect();
             parts.join("\n")
@@ -208,22 +248,30 @@ fn extract_user_text(content: &Value) -> String {
 
 fn is_pure_tool_result(content: &Value) -> bool {
     match content {
-        Value::Array(blocks) => !blocks.is_empty() && blocks.iter().all(|b| {
-            b.get("type").and_then(|t| t.as_str()) == Some("tool_result")
-        }),
+        Value::Array(blocks) => {
+            !blocks.is_empty()
+                && blocks
+                    .iter()
+                    .all(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+        }
         _ => false,
     }
 }
 
 fn stringify_tool_result_content(content: Option<&Value>) -> String {
-    let Some(c) = content else { return String::new(); };
+    let Some(c) = content else {
+        return String::new();
+    };
     match c {
         Value::String(s) => s.clone(),
-        Value::Array(parts) => parts.iter()
+        Value::Array(parts) => parts
+            .iter()
             .filter_map(|p| {
                 if p.get("type")?.as_str()? == "text" {
                     Some(p.get("text")?.as_str()?.to_string())
-                } else { None }
+                } else {
+                    None
+                }
             })
             .collect::<Vec<_>>()
             .join("\n"),
@@ -269,7 +317,8 @@ mod tests {
 
     #[test]
     fn detects_cline_by_ts_and_role() {
-        let a: Value = serde_json::from_str(r#"{"role":"user","ts":1700000000000,"content":"hi"}"#).unwrap();
+        let a: Value =
+            serde_json::from_str(r#"{"role":"user","ts":1700000000000,"content":"hi"}"#).unwrap();
         assert!(Cline.detect(&a));
         // No ts → not Cline.
         let b: Value = serde_json::from_str(r#"{"role":"user","content":"hi"}"#).unwrap();

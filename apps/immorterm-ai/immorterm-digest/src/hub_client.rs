@@ -43,7 +43,11 @@ impl HubClient {
     }
 
     pub async fn get_window(&self, window_id: &str) -> Result<Option<Value>> {
-        let url = format!("{}/api/v1/registry/window/{}", self.base_url, urlenc(window_id));
+        let url = format!(
+            "{}/api/v1/registry/window/{}",
+            self.base_url,
+            urlenc(window_id)
+        );
         let resp = self.http.get(&url).send().await.context("hub get_window")?;
         match resp.status().as_u16() {
             200 => Ok(Some(resp.json().await.context("decode window")?)),
@@ -58,7 +62,12 @@ impl HubClient {
             self.base_url,
             urlenc(path)
         );
-        let resp = self.http.get(&url).send().await.context("hub by_transcript")?;
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .context("hub by_transcript")?;
         match resp.status().as_u16() {
             200 => Ok(Some(resp.json().await.context("decode by_transcript")?)),
             404 => Ok(None),
@@ -208,7 +217,9 @@ impl Wal {
 
     pub fn default_path() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        PathBuf::from(home).join(".immorterm").join("digest-queue.jsonl")
+        PathBuf::from(home)
+            .join(".immorterm")
+            .join("digest-queue.jsonl")
     }
 
     /// Append a request to the WAL. Each entry is one JSON object per line.

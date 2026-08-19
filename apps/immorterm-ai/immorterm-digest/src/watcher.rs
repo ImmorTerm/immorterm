@@ -68,7 +68,14 @@ impl WatcherHub {
             })
             .context("spawn fs bridge thread")?;
 
-        Ok((Self { sync_tx, by_dir: HashMap::new(), _bridge: bridge }, async_rx))
+        Ok((
+            Self {
+                sync_tx,
+                by_dir: HashMap::new(),
+                _bridge: bridge,
+            },
+            async_rx,
+        ))
     }
 
     /// Acquire a watch on `dir`. Idempotent — refcount++ if already watched.
@@ -84,7 +91,13 @@ impl WatcherHub {
         watcher
             .watch(&key, RecursiveMode::NonRecursive)
             .with_context(|| format!("watch {}", key.display()))?;
-        self.by_dir.insert(key, DirWatch { watcher, refcount: 1 });
+        self.by_dir.insert(
+            key,
+            DirWatch {
+                watcher,
+                refcount: 1,
+            },
+        );
         Ok(true)
     }
 

@@ -12,8 +12,8 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use immorterm_core::log::{self, PromptEvent, SnapshotTrigger};
 use immorterm_core::Terminal;
+use immorterm_core::log::{self, PromptEvent, SnapshotTrigger};
 use tracing::{debug, error, info, warn};
 
 use crate::ai_extractor::{AiExtractor, AiTool, LogEventSink};
@@ -187,9 +187,10 @@ impl StructuredLogger {
     /// Called on terminal resize.
     pub fn on_resize(&mut self, cols: usize, rows: usize) {
         if let Some(ref mut writer) = self.asciicast_writer
-            && let Err(e) = writer.write_resize(cols, rows) {
-                warn!("Asciicast resize write error: {}", e);
-            }
+            && let Err(e) = writer.write_resize(cols, rows)
+        {
+            warn!("Asciicast resize write error: {}", e);
+        }
     }
 
     /// Take a manual snapshot (triggered via IPC).

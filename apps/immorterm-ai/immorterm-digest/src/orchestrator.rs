@@ -16,7 +16,7 @@ use tokio::time::interval;
 use crate::debouncer::Trigger;
 use crate::hub_client::{HubClient, SessionEndRequest, Wal, WalEntry};
 use crate::lifecycle::{LifecycleState, SessionStatus};
-use crate::pipeline::{run_digest, run_longstory_digest, DigestInvocation, PipelineConfig};
+use crate::pipeline::{DigestInvocation, PipelineConfig, run_digest, run_longstory_digest};
 use crate::registry::SessionRegistry;
 use crate::watcher::FsSignal;
 
@@ -65,7 +65,10 @@ pub async fn handle_fs_signal(sig: FsSignal, registry: &Arc<Mutex<SessionRegistr
     for key in keys {
         if let Some(track) = reg.get_mut(&key) {
             let delta = match &mut track.lifecycle {
-                LifecycleState::JsonlAppend { last_seen_size, last_seen_mtime } => {
+                LifecycleState::JsonlAppend {
+                    last_seen_size,
+                    last_seen_mtime,
+                } => {
                     let d = new_size.saturating_sub(*last_seen_size);
                     *last_seen_size = new_size;
                     *last_seen_mtime = mtime;
@@ -85,7 +88,9 @@ pub async fn handle_fs_signal(sig: FsSignal, registry: &Arc<Mutex<SessionRegistr
                     *last_seen_mtime = mtime;
                     if changed { 1 } else { 0 }
                 }
-                LifecycleState::SharedFilePidLiveness { last_extraction_at, .. } => {
+                LifecycleState::SharedFilePidLiveness {
+                    last_extraction_at, ..
+                } => {
                     *last_extraction_at = Some(std::time::SystemTime::now());
                     1
                 }
@@ -153,15 +158,22 @@ pub async fn gc_stale_sessions(
             // Read last-modified mtime via lifecycle state (JsonlAppend +
             // RewriteHash both carry it; SharedFile uses last_extraction_at).
             let last_seen = match &track.lifecycle {
-                LifecycleState::JsonlAppend { last_seen_mtime, .. } => *last_seen_mtime,
-                LifecycleState::RewriteHash { last_seen_mtime, .. } => *last_seen_mtime,
-                LifecycleState::SharedFilePidLiveness { last_extraction_at, .. } => *last_extraction_at,
+                LifecycleState::JsonlAppend {
+                    last_seen_mtime, ..
+                } => *last_seen_mtime,
+                LifecycleState::RewriteHash {
+                    last_seen_mtime, ..
+                } => *last_seen_mtime,
+                LifecycleState::SharedFilePidLiveness {
+                    last_extraction_at, ..
+                } => *last_extraction_at,
             };
             if let Some(t) = last_seen
                 && let Ok(elapsed) = now.duration_since(t)
-                    && elapsed >= cfg.idle_grace {
-                        to_end.push((key.clone(), "idle_timeout".to_string()));
-                    }
+                && elapsed >= cfg.idle_grace
+            {
+                to_end.push((key.clone(), "idle_timeout".to_string()));
+            }
         }
     }
     for (key, reason) in to_end {
@@ -301,7 +313,12 @@ mod tests {
     use std::time::SystemTime;
     use tempfile::tempdir;
 
-    fn mk_track(window: &str, sid: &str, transcript: PathBuf, project_dir: PathBuf) -> SessionTrack {
+    fn mk_track(
+        window: &str,
+        sid: &str,
+        transcript: PathBuf,
+        project_dir: PathBuf,
+    ) -> SessionTrack {
         SessionTrack {
             key: AiSessionKey::new(window, sid, "h1"),
             tool: "claude-code".into(),
@@ -368,7 +385,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let t = dir.path().join("a.jsonl");
         std::fs::write(&t, b"x").unwrap();
-        reg.lock().await.insert(mk_track("w1", "s1", t, dir.path().to_path_buf()));
+        reg.lock()
+            .await
+            .insert(mk_track("w1", "s1", t, dir.path().to_path_buf()));
 
         let actions = collect_tick_actions(&reg).await;
         assert!(actions.is_empty(), "fresh session should not fire");

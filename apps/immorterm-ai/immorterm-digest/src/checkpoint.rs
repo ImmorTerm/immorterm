@@ -48,7 +48,9 @@ pub struct FileCheckpoint {
 impl DigestCheckpoints {
     pub fn default_path() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        PathBuf::from(home).join(".immorterm").join("digest-checkpoints.json")
+        PathBuf::from(home)
+            .join(".immorterm")
+            .join("digest-checkpoints.json")
     }
 
     /// Read with 50ms retry on parse failure (per v4 §3.6 atomic-write
@@ -148,7 +150,10 @@ mod tests {
         let mut cp = DigestCheckpoints::default();
         cp.files.insert(
             "/a.jsonl".into(),
-            FileCheckpoint { byte_offset: 17, ..Default::default() },
+            FileCheckpoint {
+                byte_offset: 17,
+                ..Default::default()
+            },
         );
         assert_eq!(
             cp.lookup(Path::new("/a.jsonl")).map(|e| e.byte_offset),

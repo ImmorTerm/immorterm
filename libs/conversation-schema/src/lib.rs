@@ -21,8 +21,12 @@ pub enum Role {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    Text { text: String },
-    Thinking { text: String },
+    Text {
+        text: String,
+    },
+    Thinking {
+        text: String,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -50,8 +54,12 @@ pub struct Usage {
     pub cost_usd: f64,
 }
 
-fn is_zero_u64(v: &u64) -> bool { *v == 0 }
-fn is_zero_f64(v: &f64) -> bool { *v == 0.0 }
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+fn is_zero_f64(v: &f64) -> bool {
+    *v == 0.0
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NormalizedEvent {
@@ -111,7 +119,9 @@ mod tests {
             role: Role::User,
             message_id: "msg_01".into(),
             parent_id: String::new(),
-            content: vec![ContentBlock::Text { text: "hello".into() }],
+            content: vec![ContentBlock::Text {
+                text: "hello".into(),
+            }],
             usage: Usage::default(),
         };
         let s = serde_json::to_string(&e).unwrap();
@@ -146,7 +156,9 @@ mod tests {
 
     #[test]
     fn thinking_block_serializes_as_thinking_type() {
-        let b = ContentBlock::Thinking { text: "reasoning".into() };
+        let b = ContentBlock::Thinking {
+            text: "reasoning".into(),
+        };
         let s = serde_json::to_string(&b).unwrap();
         assert!(s.contains("\"type\":\"thinking\""), "got {}", s);
     }

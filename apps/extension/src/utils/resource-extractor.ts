@@ -45,6 +45,7 @@ const BUNDLED_SCRIPTS = [
 ] as const;
 const BUNDLED_TEMPLATES = ['screenrc.template'] as const;
 const BUNDLED_SHELL_CONFIG = ['.zshrc', 'shell-init.zsh'] as const;
+const BUNDLED_BINARIES = ['immorterm-adapter'] as const;
 
 /**
  * Result of resource extraction
@@ -119,6 +120,20 @@ export function extractResources(
 
   // Get path to bundled resources
   const resourcesPath = path.join(context.extensionPath, 'resources');
+
+  // Native transcript adapters are bundled per extension build and installed
+  // globally so every project's digest hook can normalize Codex and the other
+  // non-Claude transcript formats. Missing resources are non-fatal for old
+  // extension packages; the digest hook now preserves its checkpoint safely.
+  const binaryInstallDir = path.join(IMMORTERM_GLOBAL_DIR, 'bin');
+  fs.mkdirSync(binaryInstallDir, { recursive: true });
+  for (const binaryName of BUNDLED_BINARIES) {
+    const sourcePath = path.join(resourcesPath, 'bin', binaryName);
+    const targetPath = path.join(binaryInstallDir, binaryName);
+    const result = extractFile(sourcePath, targetPath, true, forceUpdate);
+    if (result === 'extracted') extracted.push('bin/' + binaryName);
+    else skipped.push('bin/' + binaryName);
+  }
 
   // Extract scripts → ~/.immorterm/scripts/
   for (const scriptName of BUNDLED_SCRIPTS) {

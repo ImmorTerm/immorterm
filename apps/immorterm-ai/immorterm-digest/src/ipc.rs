@@ -59,7 +59,9 @@ pub enum Response {
     Kicked {
         state: KickState,
     },
-    Err { message: String },
+    Err {
+        message: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -70,7 +72,10 @@ pub enum KickState {
     Done,
     /// Per v4 §6.1 (F8): kick arrived before transcript exists. Daemon
     /// retries via stat-poll at next tick.
-    Deferred { ttl_s: u64, reason: String },
+    Deferred {
+        ttl_s: u64,
+        reason: String,
+    },
     Unknown,
 }
 
@@ -136,7 +141,12 @@ pub fn bind_exclusive(path: &std::path::Path) -> Result<UnixListener> {
 /// Peer authentication. macOS / BSD use `getpeereid`; Linux uses
 /// `SO_PEERCRED` via `getsockopt`. Same semantics either way: returns
 /// true iff the connecting peer UID matches the daemon's UID.
-#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd"
+))]
 fn peer_uid_ok(stream: &UnixStream) -> bool {
     use std::os::fd::AsRawFd;
     let fd = stream.as_raw_fd();
@@ -196,7 +206,9 @@ pub async fn serve(listener: UnixListener, handle: Handle) {
             let mut s = stream;
             let _ = write_response(
                 &mut s,
-                &Response::Err { message: "peer-uid mismatch".to_string() },
+                &Response::Err {
+                    message: "peer-uid mismatch".to_string(),
+                },
             )
             .await;
             continue;
@@ -213,7 +225,10 @@ pub async fn serve(listener: UnixListener, handle: Handle) {
 
 async fn handle_connection(mut stream: UnixStream, handle: Handle) -> Result<()> {
     let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await.context("read length prefix")?;
+    stream
+        .read_exact(&mut len_buf)
+        .await
+        .context("read length prefix")?;
     let len = u32::from_le_bytes(len_buf) as usize;
     if len > 1 << 20 {
         anyhow::bail!("payload too large: {len}");
@@ -268,7 +283,9 @@ async fn dispatch(req: Request, handle: &Handle) -> Response {
         Request::Kick { .. } => {
             // Full kick mechanics live in orchestrator; for now we ack
             // Queued. Phase B will wire the kick channel.
-            Response::Kicked { state: KickState::Queued }
+            Response::Kicked {
+                state: KickState::Queued,
+            }
         }
         Request::Pause { .. } => Response::Ok,
         Request::Shutdown => {
@@ -280,7 +297,9 @@ async fn dispatch(req: Request, handle: &Handle) -> Response {
 
 /// Client-side helper for unit/integration tests + future CLI subcommands.
 pub async fn send_request(socket: &std::path::Path, req: &Request) -> Result<Value> {
-    let mut stream = UnixStream::connect(socket).await.context("connect socket")?;
+    let mut stream = UnixStream::connect(socket)
+        .await
+        .context("connect socket")?;
     let body = serde_json::to_vec(req).context("encode request")?;
     let len = (body.len() as u32).to_le_bytes();
     stream.write_all(&len).await?;
