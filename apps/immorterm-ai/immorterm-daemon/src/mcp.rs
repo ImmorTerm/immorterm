@@ -421,7 +421,16 @@ struct JsonRpcError {
 
 const SERVER_NAME: &str = "immorterm";
 const SERVER_VERSION: &str = "0.1.0";
-const PROTOCOL_VERSION: &str = "2024-11-05";
+// The revision Codex 0.147 requests in `initialize` and that Claude Code
+// speaks. Deliberately NOT the newest spec (2026-07-28): that revision removes
+// the `initialize` handshake entirely in favour of a stateless core plus
+// `server/discover`, and every client here still sends `initialize`.
+//
+// Codex does not validate this value — a probe answering "2026-07-28" to a
+// client asking for "2025-06-18" was accepted and worked end to end — so
+// claiming a newer number would be free and meaningless. This states the shape
+// we actually speak.
+const PROTOCOL_VERSION: &str = "2025-06-18";
 
 /// Non-configurable ceilings for anything entering an agent's context through
 /// MCP. Browser output must never consume a session by accident.
@@ -806,8 +815,94 @@ fn resolve_session(args: &Value) -> Result<String, String> {
 
 // ─── Tool definitions ───────────────────────────────────────────────
 
+// ─── Capability index (T31) ──────────────────────────────────────────
+//
+// Codex loads the tool schema once at startup and never re-fetches it (it
+// ignores notifications/tools/list_changed — verified), and it has no
+// client-side deferral, so every listed tool costs context in every session.
+// Past ~40 tools models also measurably start choosing the wrong one.
+//
+// The answer is three layers, and only the middle one is withheld:
+//   1. KNOW IT EXISTS  — this index, carried in the server `instructions`,
+//                        which are sent regardless of any client allow-list.
+//   2. KNOW HOW TO CALL — the schema, fetched on demand via immorterm_describe.
+//   3. CALL IT          — immorterm_call dispatches by name, listed or not.
+//
+// Verified against Codex 0.147: told only by `instructions` that a capability
+// existed, it called describe, read the schema, and invoked the tool correctly
+// on the first try — including an argument it could not have guessed.
+
+/// One line per tool: `- name — first sentence of its description`.
+///
+/// Built FROM `tool_definitions()` so it cannot drift from the real surface.
+/// ~10KB for everything, against ~72KB of full schemas.
+fn capability_index() -> String {
+    let mut out = String::from(
+        "\n\n## Full capability index\n\n\
+         Every ImmorTerm tool is listed below. Some may not be loaded as individual \
+         tools in this session — that is a context optimization, not a limitation. \
+         To use one that is absent from your tool list: call `immorterm_describe` \
+         with its name to get its schema, then `immorterm_call` with that name and \
+         arguments. Prefer a directly-loaded tool when one fits.\n\n",
+    );
+    for t in sorted_tool_definitions() {
+        let Some(name) = t.get("name").and_then(|v| v.as_str()) else { continue };
+        // The hatches are described in the preamble; listing them as
+        // capabilities invites describing the describer.
+        if name == "immorterm_describe" || name == "immorterm_call" {
+            continue;
+        }
+        let desc = t.get("description").and_then(|v| v.as_str()).unwrap_or("");
+        let first = desc.split(". ").next().unwrap_or(desc).trim();
+        let first = first.strip_suffix('.').unwrap_or(first);
+        out.push_str("- `");
+        out.push_str(name);
+        out.push_str("` — ");
+        out.push_str(first);
+        out.push('\n');
+    }
+    out
+}
+
+/// `tool_definitions()` in a stable, name-sorted order.
+///
+/// The definitions themselves are assembled in whatever order the code happens
+/// to build them, which is fine for correctness and bad for caching. Sorting
+/// here rather than reordering the source keeps the authoring order readable.
+fn sorted_tool_definitions() -> Vec<Value> {
+    let mut defs = tool_definitions();
+    defs.sort_by(|a, b| {
+        let name = |v: &Value| v.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+        name(a).cmp(&name(b))
+    });
+    defs
+}
+
 fn tool_definitions() -> Vec<Value> {
     let mut defs = vec![
+        json!({
+            "name": "immorterm_describe",
+            "description": "Get the full JSON schema for any ImmorTerm tool by name, including tools not loaded in this session. The server instructions carry a complete capability index; use this to get exact parameters for anything listed there, then invoke it with immorterm_call.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tool": { "type": "string", "description": "Exact tool name, e.g. 'immorterm_show_chart'." }
+                },
+                "required": ["tool"]
+            }
+        }),
+        json!({
+            "name": "immorterm_call",
+            "description": "Invoke any ImmorTerm tool by name, including tools not loaded in this session. Get the argument shape from immorterm_describe first. Prefer a directly-loaded tool when one fits.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tool": { "type": "string", "description": "Exact tool name to invoke." },
+                    "args": { "type": "object", "description": "Arguments for that tool, as described by immorterm_describe." }
+                },
+                "required": ["tool", "args"]
+            }
+        }),
         json!({
             "name": "immorterm_list_sessions",
             "description": "List ImmorTerm terminal sessions with their status, PID, name, and structured log directory. Each session may have structured logs: .grid.jsonl (searchable terminal snapshots), .cast (asciinema replay), and .ai.jsonl (AI conversation events).",
@@ -2455,14 +2550,26 @@ fn handle_request(req: &JsonRpcRequest, rt: &tokio::runtime::Runtime) -> JsonRpc
                 // Safe to inject now: the new `im-html` fence requires SOL anchoring
                 // on both opener and closer, so example blocks inside MCP JSON
                 // strings or terminal prose can no longer false-fire the parser.
-                "instructions": MCP_INSTRUCTIONS
+                "instructions": format!("{}{}", MCP_INSTRUCTIONS, capability_index())
             })),
             ..base
         },
 
         "tools/list" => JsonRpcResponse {
             result: Some(json!({
-                "tools": tool_definitions()
+                // Cache hints from MCP 2026-07-28's CacheableResult. Clients on
+                // 2025-06-18 ignore unknown fields, so this is free today and
+                // honoured the moment one understands it. Our tool surface only
+                // changes when the binary does, hence a long TTL; "public"
+                // because the list carries nothing user-specific.
+                "ttlMs": 3_600_000,
+                "cacheScope": "public",
+                // Sorted by name. MCP 2026-07-28 asks servers to return tools
+                // in a deterministic order so clients can cache the list and
+                // LLM prompt caches actually hit; an order that shifts between
+                // calls invalidates the cached prefix for no reason. Cheap to
+                // honour now even though we speak an earlier revision.
+                "tools": sorted_tool_definitions()
             })),
             ..base
         },
@@ -2509,6 +2616,78 @@ fn handle_tool_call(
         .and_then(|p| p.get("arguments"))
         .cloned()
         .unwrap_or(json!({}));
+
+    // ── Escape hatches (T31) ────────────────────────────────────────
+    // A client may load only a subset of our tools — Codex does, via
+    // `enabled_tools` in its config.toml. These keep the rest discoverable
+    // (the capability index in `instructions` names them) and reachable,
+    // without the client needing to re-list anything.
+    if tool_name == "immorterm_describe" {
+        let want = arguments.get("tool").and_then(|v| v.as_str()).unwrap_or("");
+        let found = tool_definitions()
+            .into_iter()
+            .find(|t| t.get("name").and_then(|n| n.as_str()) == Some(want));
+        return match found {
+            Some(def) => JsonRpcResponse {
+                result: Some(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": serde_json::to_string_pretty(&def)
+                            .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e))
+                    }]
+                })),
+                ..base
+            },
+            None => {
+                // Suggest near-misses rather than a bare "unknown": the model
+                // reached for something it read in the index, so a typo or a
+                // renamed tool should be recoverable in one more turn.
+                let near: Vec<String> = tool_definitions()
+                    .iter()
+                    .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+                    .filter(|n| want.len() >= 4 && (n.contains(want) || want.contains(n.as_str())))
+                    .take(8)
+                    .collect();
+                let hint = if near.is_empty() {
+                    String::from("No tool by that name. See the capability index in the server instructions.")
+                } else {
+                    format!("No tool named `{}`. Did you mean: {}?", want, near.join(", "))
+                };
+                JsonRpcResponse {
+                    result: Some(json!({
+                        "content": [{ "type": "text", "text": hint }],
+                        "isError": true
+                    })),
+                    ..base
+                }
+            }
+        };
+    }
+
+    if tool_name == "immorterm_call" {
+        let inner = arguments.get("tool").and_then(|v| v.as_str()).unwrap_or("");
+        // Guard the self-referential case, which would loop the dispatcher.
+        if inner.is_empty() || inner == "immorterm_call" {
+            return JsonRpcResponse {
+                result: Some(json!({
+                    "content": [{ "type": "text", "text":
+                        "immorterm_call needs a `tool` name, and it cannot call itself." }],
+                    "isError": true
+                })),
+                ..base
+            };
+        }
+        let inner_args = arguments.get("args").cloned().unwrap_or(json!({}));
+        // Built explicitly rather than deriving Clone on JsonRpcRequest for one
+        // call site: only `params` differs, and the response id rides on `base`.
+        let forwarded = JsonRpcRequest {
+            jsonrpc: req.jsonrpc.clone(),
+            id: req.id.clone(),
+            method: req.method.clone(),
+            params: Some(json!({ "name": inner, "arguments": inner_args })),
+        };
+        return handle_tool_call(&forwarded, base, rt);
+    }
 
     // Screenshot returns image content; all others return text content.
     if tool_name == "immorterm_screenshot" {
@@ -7392,5 +7571,116 @@ mod tests {
         assert_eq!(project_id_from_file(&none), None);
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// T31: the index is what keeps a tool DISCOVERABLE when a client loads only
+    /// a subset of our surface. Codex does exactly that (`enabled_tools`) and
+    /// never re-fetches the list, so if the index drifts from the real tool set
+    /// a capability goes invisible with no error anywhere. Building it from
+    /// tool_definitions() is what prevents that — this asserts the wiring.
+    #[test]
+    fn capability_index_covers_every_tool_except_the_hatches() {
+        let idx = capability_index();
+        let defs = tool_definitions();
+        let mut listed = 0usize;
+
+        for t in &defs {
+            let name = t.get("name").and_then(|n| n.as_str()).unwrap();
+            let entry = format!("- `{}` —", name);
+            if name == "immorterm_describe" || name == "immorterm_call" {
+                assert!(!idx.contains(&entry), "{name} is a hatch and must not be indexed");
+            } else {
+                assert!(idx.contains(&entry), "{name} missing from the capability index");
+                listed += 1;
+            }
+        }
+        assert_eq!(listed, defs.len() - 2, "index/tool-set count drifted");
+
+        // Only pays for itself while far cheaper than the ~72KB of schemas it
+        // defers. A blown budget means someone inlined parameter docs into a
+        // description.
+        assert!(idx.len() < 24_000, "capability index is {}B — too fat to always send", idx.len());
+
+        // Being listed is useless without the route to actually call it.
+        assert!(idx.contains("immorterm_describe"));
+        assert!(idx.contains("immorterm_call"));
+    }
+
+    /// Hatches must be REAL tools: a client building an allow-list can only
+    /// include what `tools/list` advertises.
+    #[test]
+    fn escape_hatches_are_advertised() {
+        let names: Vec<String> = tool_definitions()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+            .collect();
+        assert!(names.iter().any(|n| n == "immorterm_describe"));
+        assert!(names.iter().any(|n| n == "immorterm_call"));
+    }
+
+    /// MCP 2026-07-28 asks for deterministic ordering so clients can cache the
+    /// list and LLM prompt caches hit. An unstable order silently invalidates
+    /// the cached prefix on every call.
+    #[test]
+    fn tools_list_order_is_stable_and_sorted() {
+        let a: Vec<String> = sorted_tool_definitions()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+            .collect();
+        let b: Vec<String> = sorted_tool_definitions()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+            .collect();
+        assert_eq!(a, b, "tools/list order is not stable across calls");
+
+        let mut sorted = a.clone();
+        sorted.sort();
+        assert_eq!(a, sorted, "tools/list is not name-sorted");
+    }
+
+    /// We answer with the revision Codex 0.147 requests. NOT 2026-07-28, which
+    /// removes the `initialize` handshake every current client still sends.
+    #[test]
+    fn protocol_version_is_the_revision_clients_actually_speak() {
+        assert_eq!(PROTOCOL_VERSION, "2025-06-18");
+    }
+
+    /// Prompt caching only pays off while the prefix is byte-identical between
+    /// sessions. Tools and instructions sit at the very front of that prefix,
+    /// so ANY volatility here — a timestamp, a session id, a HashMap iteration
+    /// order — silently destroys cache hits for every client, on every turn,
+    /// with no visible symptom. This is the guard against that.
+    #[test]
+    fn tools_and_instructions_are_byte_stable_for_prompt_caching() {
+        let a = serde_json::to_string(&sorted_tool_definitions()).unwrap();
+        let b = serde_json::to_string(&sorted_tool_definitions()).unwrap();
+        assert_eq!(a, b, "tools/list is not byte-stable — prompt caching will never hit");
+
+        let ia = format!("{}{}", MCP_INSTRUCTIONS, capability_index());
+        let ib = format!("{}{}", MCP_INSTRUCTIONS, capability_index());
+        assert_eq!(ia, ib, "instructions are not byte-stable — prompt caching will never hit");
+
+        // Cheap volatility smell-test: an ISO date or a uuid in the prefix means
+        // someone started injecting per-session state into a cached block.
+        for (what, text) in [("instructions", &ia), ("tools", &a)] {
+            assert!(
+                !regex_lite_has_iso_date(text),
+                "{what} contains what looks like a date — that breaks prompt caching"
+            );
+        }
+    }
+
+    /// Tiny helper: `\d{4}-\d{2}-\d{2}` without pulling in a regex crate.
+    /// Skips the protocol version, which is a fixed constant, not volatile.
+    fn regex_lite_has_iso_date(s: &str) -> bool {
+        let b = s.as_bytes();
+        b.windows(10).any(|w| {
+            w[4] == b'-'
+                && w[7] == b'-'
+                && w[..4].iter().all(u8::is_ascii_digit)
+                && w[5..7].iter().all(u8::is_ascii_digit)
+                && w[8..10].iter().all(u8::is_ascii_digit)
+                && std::str::from_utf8(w).map(|d| d != PROTOCOL_VERSION).unwrap_or(true)
+        })
     }
 }
