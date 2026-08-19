@@ -56,6 +56,7 @@ import type { Task, TaskContext } from './tasks/types';
 import { PlansStorage } from './plans';
 import { SpacesStorage } from './spaces';
 import { resolveRestoreIdentity } from './restore-identity';
+import { acquireGlobalRestoreSlot } from './restore-semaphore';
 
 /** Cap on a Codex rollout we will scan for an inline image. Rollouts reach
  *  megabytes and each pasted image is a large base64 blob; past this we skip
@@ -3168,14 +3169,19 @@ Return ONLY a JSON object with these fields:
               // ws_port missing — try respawning a fresh daemon instead of skipping
               logger.warn(`ImmorTerm AI: live daemon '${session.name}' has no ws_port — attempting respawn`);
               if (binary) {
-                cleanupStaleWsFiles(session.name);
-                // Preserve the session's ORIGINAL spawn dir — passing
-                // this.projectPath would reattribute a worktree-spawned daemon
-                // to the trunk on respawn, destroying its workspace identity.
-                const respawnProjDir = session.project_dir || this.projectPath;
-                const respawnPid = await spawnDaemon(binary, session.name, respawnProjDir, windowId, displayName, agentSessionId, titleLocked, false, agentTool);
-                wsPort = await waitForWsPort(session.name, wsPortTimeoutMs, respawnPid);
-                daemonPid = findDaemonPidFromWsFile(session.name);
+                const releaseGlobalSlot = await acquireGlobalRestoreSlot();
+                try {
+                  cleanupStaleWsFiles(session.name);
+                  // Preserve the session's ORIGINAL spawn dir — passing
+                  // this.projectPath would reattribute a worktree-spawned daemon
+                  // to the trunk on respawn, destroying its workspace identity.
+                  const respawnProjDir = session.project_dir || this.projectPath;
+                  const respawnPid = await spawnDaemon(binary, session.name, respawnProjDir, windowId, displayName, agentSessionId, titleLocked, false, agentTool);
+                  wsPort = await waitForWsPort(session.name, wsPortTimeoutMs, respawnPid);
+                  daemonPid = findDaemonPidFromWsFile(session.name);
+                } finally {
+                  releaseGlobalSlot();
+                }
               }
             }
             if (!wsPort) {
@@ -3189,7 +3195,9 @@ Return ONLY a JSON object with these fields:
             // don't blast the kernel at once after the worktree backfill
             // surfaces them all into one project's restore set.
             await acquireRespawnSlot();
+            let releaseGlobalSlot: (() => void) | undefined;
             try {
+              releaseGlobalSlot = await acquireGlobalRestoreSlot();
               logger.info(`ImmorTerm AI: daemon dead for '${displayName}' (pid: ${session.pid}), respawning...`);
               if (!binary) {
                 logger.warn('ImmorTerm AI: cannot resurrect — daemon binary not found');
@@ -3213,6 +3221,7 @@ Return ONLY a JSON object with these fields:
               daemonPid = findDaemonPidFromWsFile(session.name);
               logger.info(`ImmorTerm AI: resurrected '${displayName}' (daemon pid: ${daemonPid}, ws: ${wsPort})`);
             } finally {
+              releaseGlobalSlot?.();
               releaseRespawnSlot();
             }
           }
