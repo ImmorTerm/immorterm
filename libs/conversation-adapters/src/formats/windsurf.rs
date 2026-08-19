@@ -11,9 +11,9 @@
 //! Write, Read, Grep, Glob) so downstream consumers see the same shape across
 //! vendors.
 
+use crate::ConversationAdapter;
 use crate::shared::filter_empty_turns;
 use crate::turn::{AssistantBlock, ToolCall, Turn};
-use crate::ConversationAdapter;
 use once_cell::sync::Lazy;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -41,7 +41,9 @@ static TOOL_MAP: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
 });
 
 impl ConversationAdapter for Windsurf {
-    fn tool_name(&self) -> &'static str { "windsurf" }
+    fn tool_name(&self) -> &'static str {
+        "windsurf"
+    }
 
     fn detect(&self, obj: &Value) -> bool {
         let t = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -55,8 +57,12 @@ impl ConversationAdapter for Windsurf {
         let mut events: Vec<Value> = Vec::new();
         for line in text.lines() {
             let trimmed = line.trim();
-            if trimmed.is_empty() { continue; }
-            if let Ok(v) = serde_json::from_str::<Value>(trimmed) { events.push(v); }
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+                events.push(v);
+            }
         }
 
         let mut turns: Vec<Turn> = Vec::new();
@@ -69,7 +75,10 @@ impl ConversationAdapter for Windsurf {
 
         for evt in &events {
             let etype = evt.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            let ts = evt.get("timestamp").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let ts = evt
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
 
             match etype {
                 "user_input" => {
@@ -84,7 +93,9 @@ impl ConversationAdapter for Windsurf {
                         });
                         pending_tool.clear();
                     }
-                    let content = evt.get("content").and_then(|v| v.as_str())
+                    let content = evt
+                        .get("content")
+                        .and_then(|v| v.as_str())
                         .or_else(|| evt.get("text").and_then(|v| v.as_str()))
                         .or_else(|| evt.get("prompt").and_then(|v| v.as_str()))
                         .unwrap_or("")
@@ -95,34 +106,49 @@ impl ConversationAdapter for Windsurf {
                     have_turn = true;
                 }
                 "planner_response" => {
-                    if !have_turn { have_turn = true; }
+                    if !have_turn {
+                        have_turn = true;
+                    }
                     // Reasoning / thinking text.
                     if let Some(reasoning) = evt.get("reasoning").and_then(|v| v.as_str()) {
                         let trimmed = reasoning.trim();
                         if !trimmed.is_empty() {
-                            current_blocks.push(AssistantBlock::thinking(trimmed.to_string(), ts.clone()));
+                            current_blocks
+                                .push(AssistantBlock::thinking(trimmed.to_string(), ts.clone()));
                         }
                     }
                     // Visible response text.
-                    let response_text = evt.get("content").and_then(|v| v.as_str())
+                    let response_text = evt
+                        .get("content")
+                        .and_then(|v| v.as_str())
                         .or_else(|| evt.get("text").and_then(|v| v.as_str()))
                         .or_else(|| evt.get("response").and_then(|v| v.as_str()))
                         .unwrap_or("")
                         .trim();
                     if !response_text.is_empty() {
-                        current_blocks.push(AssistantBlock::text(response_text.to_string(), ts.clone()));
+                        current_blocks
+                            .push(AssistantBlock::text(response_text.to_string(), ts.clone()));
                     }
                     // Inline toolCalls[] (Cascade emits these alongside the response).
                     if let Some(calls) = evt.get("toolCalls").and_then(|v| v.as_array()) {
                         for tc in calls {
-                            let raw_name = tc.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
-                            let mapped = TOOL_MAP.get(raw_name).copied().unwrap_or(raw_name).to_string();
-                            let input = tc.get("args").cloned()
+                            let raw_name =
+                                tc.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+                            let mapped = TOOL_MAP
+                                .get(raw_name)
+                                .copied()
+                                .unwrap_or(raw_name)
+                                .to_string();
+                            let input = tc
+                                .get("args")
+                                .cloned()
                                 .or_else(|| tc.get("arguments").cloned())
                                 .or_else(|| tc.get("input").cloned())
                                 .unwrap_or(Value::Object(Map::new()));
                             let normalized = normalize_input(&mapped, &input);
-                            let call_id = tc.get("id").and_then(|v| v.as_str())
+                            let call_id = tc
+                                .get("id")
+                                .and_then(|v| v.as_str())
                                 .or_else(|| tc.get("callId").and_then(|v| v.as_str()))
                                 .unwrap_or("")
                                 .to_string();
@@ -144,29 +170,46 @@ impl ConversationAdapter for Windsurf {
                     }
                 }
                 "code_action" => {
-                    if !have_turn { have_turn = true; }
-                    let info = evt.get("tool_info").cloned()
+                    if !have_turn {
+                        have_turn = true;
+                    }
+                    let info = evt
+                        .get("tool_info")
+                        .cloned()
                         .or_else(|| evt.get("toolInfo").cloned())
                         .unwrap_or(Value::Object(Map::new()));
-                    let raw_name = info.get("name").and_then(|v| v.as_str())
+                    let raw_name = info
+                        .get("name")
+                        .and_then(|v| v.as_str())
                         .or_else(|| evt.get("agent_action_name").and_then(|v| v.as_str()))
                         .or_else(|| evt.get("action").and_then(|v| v.as_str()))
                         .unwrap_or("unknown");
-                    let mapped = TOOL_MAP.get(raw_name).copied().unwrap_or(raw_name).to_string();
-                    let call_id = evt.get("tool_call_id").and_then(|v| v.as_str())
+                    let mapped = TOOL_MAP
+                        .get(raw_name)
+                        .copied()
+                        .unwrap_or(raw_name)
+                        .to_string();
+                    let call_id = evt
+                        .get("tool_call_id")
+                        .and_then(|v| v.as_str())
                         .or_else(|| info.get("id").and_then(|v| v.as_str()))
                         .or_else(|| info.get("callId").and_then(|v| v.as_str()))
                         .unwrap_or("")
                         .to_string();
-                    let output = evt.get("output").and_then(|v| v.as_str())
+                    let output = evt
+                        .get("output")
+                        .and_then(|v| v.as_str())
                         .or_else(|| info.get("output").and_then(|v| v.as_str()))
                         .or_else(|| evt.get("result").and_then(|v| v.as_str()))
                         .unwrap_or("")
                         .to_string();
                     let status_s = evt.get("status").and_then(|v| v.as_str()).unwrap_or("");
-                    let exit_code = info.get("exit_code").and_then(|v| v.as_i64())
+                    let exit_code = info
+                        .get("exit_code")
+                        .and_then(|v| v.as_i64())
                         .or_else(|| evt.get("exit_code").and_then(|v| v.as_i64()));
-                    let is_error = status_s == "error" || status_s == "failed"
+                    let is_error = status_s == "error"
+                        || status_s == "failed"
                         || matches!(exit_code, Some(c) if c != 0);
 
                     if let Some(&bidx) = pending_tool.get(&call_id) {
@@ -178,7 +221,9 @@ impl ConversationAdapter for Windsurf {
                         pending_tool.remove(&call_id);
                     } else {
                         // Standalone code_action without a prior tool_use.
-                        let input = info.get("args").cloned()
+                        let input = info
+                            .get("args")
+                            .cloned()
                             .or_else(|| info.get("input").cloned())
                             .unwrap_or(Value::Object(Map::new()));
                         let normalized = normalize_input(&mapped, &input);
@@ -187,7 +232,11 @@ impl ConversationAdapter for Windsurf {
                                 tool_use_id: call_id,
                                 name: mapped,
                                 input: normalized,
-                                result: if output.is_empty() { None } else { Some(output) },
+                                result: if output.is_empty() {
+                                    None
+                                } else {
+                                    Some(output)
+                                },
                                 result_timestamp: ts.clone(),
                                 is_error,
                             },
@@ -218,7 +267,9 @@ fn normalize_input(mapped_name: &str, input: &Value) -> Value {
     if mapped_name == "Bash" {
         if let Some(cmd) = input.get("command").and_then(|c| c.as_str()) {
             let mut obj = Map::new();
-            let full = if let Some(wd) = input.get("cwd").and_then(|w| w.as_str())
+            let full = if let Some(wd) = input
+                .get("cwd")
+                .and_then(|w| w.as_str())
                 .or_else(|| input.get("workdir").and_then(|w| w.as_str()))
             {
                 format!("cd {} && {}", wd, cmd)
@@ -232,7 +283,9 @@ fn normalize_input(mapped_name: &str, input: &Value) -> Value {
     if mapped_name == "Write" || mapped_name == "Edit" || mapped_name == "Read" {
         if let Some(obj_in) = input.as_object() {
             let mut out = obj_in.clone();
-            if let Some(fp) = obj_in.get("path").and_then(|v| v.as_str())
+            if let Some(fp) = obj_in
+                .get("path")
+                .and_then(|v| v.as_str())
                 .or_else(|| obj_in.get("filePath").and_then(|v| v.as_str()))
                 .or_else(|| obj_in.get("file_path").and_then(|v| v.as_str()))
             {
@@ -252,7 +305,8 @@ mod tests {
     fn detects_user_input_and_planner_response() {
         let a: Value = serde_json::from_str(r#"{"type":"user_input","content":"hi"}"#).unwrap();
         assert!(Windsurf.detect(&a));
-        let b: Value = serde_json::from_str(r#"{"type":"planner_response","content":"ok"}"#).unwrap();
+        let b: Value =
+            serde_json::from_str(r#"{"type":"planner_response","content":"ok"}"#).unwrap();
         assert!(Windsurf.detect(&b));
         let c: Value = serde_json::from_str(r#"{"type":"code_action","tool_info":{}}"#).unwrap();
         assert!(Windsurf.detect(&c));
@@ -268,7 +322,11 @@ mod tests {
         let turns = Windsurf.parse(text);
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].user_text, "list files");
-        let bash = turns[0].blocks.iter().find(|b| b.tool_call.is_some()).unwrap();
+        let bash = turns[0]
+            .blocks
+            .iter()
+            .find(|b| b.tool_call.is_some())
+            .unwrap();
         let tc = bash.tool_call.as_ref().unwrap();
         assert_eq!(tc.name, "Bash");
         assert_eq!(tc.input.get("command").and_then(|v| v.as_str()), Some("ls"));

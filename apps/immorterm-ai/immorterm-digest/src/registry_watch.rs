@@ -131,22 +131,15 @@ pub(crate) fn reconcile(
             // vendor's well-known convention path, which needs the announced
             // tool to know which convention to use.
             _ => {
-                let path = convention_transcript_path_for(
-                    &announced_tool,
-                    &entry.project_dir,
-                    session_id,
-                );
+                let path =
+                    convention_transcript_path_for(&announced_tool, &entry.project_dir, session_id);
                 (announced_tool, path)
             }
         };
         // AI process must be alive. Prefer the AI tool's pid in
         // ai_stats (set by session-link); fall back to the daemon
         // registry's pid for legacy entries.
-        let ai_pid = entry
-            .ai_stats
-            .as_ref()
-            .and_then(|s| s.pid)
-            .or(entry.pid);
+        let ai_pid = entry.ai_stats.as_ref().and_then(|s| s.pid).or(entry.pid);
         let alive = match ai_pid {
             Some(p) if p > 0 => pid_alive_fn(p),
             _ => false,
@@ -248,7 +241,6 @@ fn infer_tool_from_transcript(path: &str) -> Option<&'static str> {
     }
 }
 
-
 /// Claude Code stores per-project transcripts at
 /// `$HOME/.claude/projects/<encoded>/<session_id>.jsonl` where `<encoded>`
 /// is the absolute project_dir with `/` replaced by `-`. e.g.
@@ -338,7 +330,10 @@ pub fn default_registry_path() -> PathBuf {
     PathBuf::from(home).join(".immorterm").join("registry.json")
 }
 
-fn load_registry(path: &Path) -> Option<RegistryFileView> {
+/// Load the unioned registry view plus the set of window_ids whose registry.d
+/// file was present but unreadable this tick (see `read_registry_d`). The caller
+/// must protect those windows from unregistration.
+fn load_registry(path: &Path) -> Option<(RegistryFileView, HashSet<String>)> {
     let data = std::fs::read_to_string(path).ok()?;
     let mut file = match serde_json::from_str::<RegistryFileView>(&data) {
         Ok(v) => v,
@@ -347,6 +342,7 @@ fn load_registry(path: &Path) -> Option<RegistryFileView> {
             return None;
         }
     };
+    let mut unreadable: HashSet<String> = HashSet::new();
     // Union registry.d/<project_id>/<window_id>.json (the daemon's
     // per-session files) over the global registry.json. registry.d is the
     // authoritative source for the fields the digest keys on
@@ -355,7 +351,7 @@ fn load_registry(path: &Path) -> Option<RegistryFileView> {
     // registry.d → behavior identical to reading the global file alone.
     // RegistryEntryView never deserializes the legacy claude_session_id, so
     // no unmirror is needed here — dedup by window_id is what matters.
-    if let Some(dir_entries) = read_registry_d(path) {
+    if let Some((dir_entries, unread)) = read_registry_d(path) {
         for entry in dir_entries {
             match file
                 .sessions
@@ -366,16 +362,27 @@ fn load_registry(path: &Path) -> Option<RegistryFileView> {
                 None => file.sessions.push(entry),
             }
         }
+        unreadable = unread;
     }
-    Some(file)
+    Some((file, unreadable))
 }
 
 /// Glob `<registry_dir>/registry.d/**/*.json` and parse each as a single
-/// session entry. Skips malformed/mid-write files rather than failing the
-/// whole load. Returns `None` when the dir is absent — the "no union" signal.
-fn read_registry_d(registry_path: &Path) -> Option<Vec<RegistryEntryView>> {
+/// session entry. Returns the parsed entries PLUS the set of window_ids whose
+/// file was present but could NOT be read/parsed this tick (window_id taken from
+/// the filename `<window_id>.json`, which survives even when the content can't).
+///
+/// Those windows are in an UNKNOWN state: their authoritative per-session file
+/// exists, so a live daemon still owns them, but we couldn't read it. The caller
+/// must NOT treat their (possibly stale, possibly dead-pid) global entry as
+/// authoritative — reconciling from it can prematurely session-end a live,
+/// resuming window. `do_reconcile` uses this set to suppress those unregisters.
+///
+/// Returns `None` when the dir is absent — the "no union" signal.
+fn read_registry_d(registry_path: &Path) -> Option<(Vec<RegistryEntryView>, HashSet<String>)> {
     let root = registry_path.parent()?.join("registry.d");
     let mut out = Vec::new();
+    let mut unreadable: HashSet<String> = HashSet::new();
     let mut stack = vec![root.clone()];
     let mut found_dir = false;
     while let Some(dir) = stack.pop() {
@@ -392,17 +399,34 @@ fn read_registry_d(registry_path: &Path) -> Option<Vec<RegistryEntryView>> {
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            let Ok(raw) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            match serde_json::from_str::<RegistryEntryView>(&raw) {
-                Ok(v) => out.push(v),
-                // Mid-write / malformed file — skip it, don't fail the load.
-                Err(_) => continue,
+            let window_id = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string);
+            match std::fs::read_to_string(&path) {
+                Ok(raw) => match serde_json::from_str::<RegistryEntryView>(&raw) {
+                    Ok(v) => out.push(v),
+                    // Present but unparseable → unknown, protect its window.
+                    Err(_) => {
+                        if let Some(w) = window_id {
+                            unreadable.insert(w);
+                        }
+                    }
+                },
+                // Present but unreadable → unknown, protect its window.
+                Err(_) => {
+                    if let Some(w) = window_id {
+                        unreadable.insert(w);
+                    }
+                }
             }
         }
     }
-    if found_dir { Some(out) } else { None }
+    if found_dir {
+        Some((out, unreadable))
+    } else {
+        None
+    }
 }
 
 fn real_pid_alive(pid: u32) -> bool {
@@ -559,30 +583,31 @@ pub async fn run_watch_loop(
         })
         .ok();
 
-    let mut watcher_handle: Option<RecommendedWatcher> =
-        match notify::recommended_watcher(move |res| {
+    let mut watcher_handle: Option<RecommendedWatcher> = match notify::recommended_watcher(
+        move |res| {
             let _ = sync_tx.send(res);
-        }) {
-            Ok(mut w) => {
-                if let Err(e) = w.watch(&watch_dir, RecursiveMode::NonRecursive) {
-                    tracing::error!(
-                        "watch({}) failed: {} — falling back to fallback-interval rescans only",
-                        watch_dir.display(),
-                        e
-                    );
-                    None
-                } else {
-                    Some(w)
-                }
-            }
-            Err(e) => {
+        },
+    ) {
+        Ok(mut w) => {
+            if let Err(e) = w.watch(&watch_dir, RecursiveMode::NonRecursive) {
                 tracing::error!(
-                    "create registry watcher failed: {} — falling back to fallback-interval rescans only",
+                    "watch({}) failed: {} — falling back to fallback-interval rescans only",
+                    watch_dir.display(),
                     e
                 );
                 None
+            } else {
+                Some(w)
             }
-        };
+        }
+        Err(e) => {
+            tracing::error!(
+                "create registry watcher failed: {} — falling back to fallback-interval rescans only",
+                e
+            );
+            None
+        }
+    };
 
     // Initial reconcile — pick up sessions that existed before daemon started.
     do_reconcile(&registry_path, &host_id, &registry, &watcher, &hub, &wal).await;
@@ -616,7 +641,7 @@ async fn do_reconcile(
     hub: &HubClient,
     wal: &Wal,
 ) {
-    let file = match load_registry(registry_path) {
+    let (file, unreadable) = match load_registry(registry_path) {
         Some(f) => f,
         None => return,
     };
@@ -624,7 +649,21 @@ async fn do_reconcile(
         let r = registry.lock().await;
         r.iter().map(|(k, _)| k.clone()).collect()
     };
-    let actions = reconcile(&file, &snapshot, host_id, real_pid_alive);
+    let mut actions = reconcile(&file, &snapshot, host_id, real_pid_alive);
+    // Never session-end a window whose registry.d file existed but was
+    // unreadable this tick: its state is UNKNOWN, and the stale global entry
+    // reconcile fell back to may show a dead pid for a session that is actually
+    // alive/resuming. Suppress only the unregister; a genuinely-dead session's
+    // file is either readable (dead pid → unregister stands) or self-cleaned by
+    // the daemon on real exit, so it converges on the next tick.
+    if !unreadable.is_empty() {
+        actions.retain(|a| {
+            !matches!(
+                a,
+                ReconcileAction::Unregister { key, .. } if unreadable.contains(&key.window_id)
+            )
+        });
+    }
     if !actions.is_empty() {
         tracing::info!("registry reconcile: {} action(s)", actions.len());
         apply_actions(actions, registry, watcher, hub, wal).await;
@@ -743,7 +782,6 @@ mod tests {
         assert!(actions.is_empty(), "no session_id → not yet linked, skip");
     }
 
-
     #[test]
     fn legacy_entry_without_tool_defaults_to_claude_code() {
         let mut e = entry_alive("w1", "s1", "/tmp/a.jsonl", "/tmp/p");
@@ -764,20 +802,28 @@ mod tests {
         // ai_transcript_path but often doesn't for live sessions.
         // Daemon must still pick the session up via the well-known
         // Claude Code path convention.
-        let mut e = entry_alive("w1", "abc-uuid", "/tmp/a.jsonl", "/Users/test/Development/foo");
+        let mut e = entry_alive(
+            "w1",
+            "abc-uuid",
+            "/tmp/a.jsonl",
+            "/Users/test/Development/foo",
+        );
         e.ai_transcript_path = None;
         let file = RegistryFileView { sessions: vec![e] };
         let actions = reconcile(&file, &HashSet::new(), "h1", |_| true);
         assert_eq!(actions.len(), 1);
         match &actions[0] {
-            ReconcileAction::Register { transcript_path, .. } => {
+            ReconcileAction::Register {
+                transcript_path, ..
+            } => {
                 // Production path uses real $HOME; here we just verify
                 // the convention-encoded segment is present.
                 assert!(
                     transcript_path
                         .to_string_lossy()
                         .contains("/.claude/projects/-Users-test-Development-foo/abc-uuid.jsonl"),
-                    "got: {}", transcript_path.display()
+                    "got: {}",
+                    transcript_path.display()
                 );
             }
             other => panic!("expected Register with convention path, got {other:?}"),
@@ -807,7 +853,8 @@ mod tests {
         let older = old_dir.join(format!("rollout-2026-07-26T09-00-00-{sid}.jsonl"));
         let newer = new_dir.join(format!("rollout-2026-07-27T11-46-32-{sid}.jsonl"));
         // A different session in the same shard must not be picked up.
-        let other = new_dir.join("rollout-2026-07-27T12-00-00-deadbeef-0000-0000-0000-000000000000.jsonl");
+        let other =
+            new_dir.join("rollout-2026-07-27T12-00-00-deadbeef-0000-0000-0000-000000000000.jsonl");
         std::fs::write(&older, b"{}\n").unwrap();
         std::fs::write(&other, b"{}\n").unwrap();
         std::fs::write(&newer, b"{}\n").unwrap();
@@ -855,7 +902,10 @@ mod tests {
         let a1 = reconcile(&file, &HashSet::new(), "h1", |_| true);
         let a2 = reconcile(&file, &HashSet::new(), "h2", |_| true);
         match (&a1[0], &a2[0]) {
-            (ReconcileAction::Register { key: k1, .. }, ReconcileAction::Register { key: k2, .. }) => {
+            (
+                ReconcileAction::Register { key: k1, .. },
+                ReconcileAction::Register { key: k2, .. },
+            ) => {
                 assert_ne!(k1, k2);
                 assert_eq!(k1.host_id, "h1");
                 assert_eq!(k2.host_id, "h2");
@@ -895,7 +945,13 @@ mod tests {
     fn project_id_falls_back_to_basename_when_no_mcp_json() {
         use tempfile::tempdir;
         let dir = tempdir().unwrap();
-        let base = dir.path().file_name().unwrap().to_str().unwrap().to_string();
+        let base = dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
         assert_eq!(derive_project_id(dir.path().to_str().unwrap()), base);
     }
 
@@ -937,7 +993,9 @@ mod tests {
             "/proj",
         );
         entry.tool = Some("claude-code".into()); // stale: user switched to Codex
-        let file = RegistryFileView { sessions: vec![entry] };
+        let file = RegistryFileView {
+            sessions: vec![entry],
+        };
 
         let actions = reconcile(&file, &HashSet::new(), "host", |_| true);
         match &actions[0] {
@@ -953,7 +1011,9 @@ mod tests {
         let mut entry = entry_alive("w1", "sess-1", "", "/proj");
         entry.ai_transcript_path = None;
         entry.tool = Some("codex".into());
-        let file = RegistryFileView { sessions: vec![entry] };
+        let file = RegistryFileView {
+            sessions: vec![entry],
+        };
 
         let actions = reconcile(&file, &HashSet::new(), "host", |_| true);
         match &actions[0] {
@@ -992,7 +1052,7 @@ mod tests {
         )
         .unwrap();
 
-        let file = load_registry(&reg).expect("load");
+        let (file, _unreadable) = load_registry(&reg).expect("load");
         let by_id = |id: &str| {
             file.sessions
                 .iter()
@@ -1016,9 +1076,51 @@ mod tests {
             r#"{"sessions":[{"window_id":"w1","project_dir":"/p","ai_session_id":"s1"}]}"#,
         )
         .unwrap();
-        let file = load_registry(&reg).expect("load");
+        let (file, _unreadable) = load_registry(&reg).expect("load");
         assert_eq!(file.sessions.len(), 1);
         assert_eq!(file.sessions[0].ai_session_id.as_deref(), Some("s1"));
+    }
+
+    /// #13 regression: a window whose registry.d file exists but is UNREADABLE
+    /// this tick must be reported in the `unreadable` set (window_id from the
+    /// filename) — so `do_reconcile` can refuse to session-end a live session
+    /// that only looks dead through its stale global entry.
+    #[test]
+    fn unreadable_registry_d_file_protects_its_window() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let reg = dir.path().join("registry.json");
+        // Global shows w1 with a (stale) dead-looking entry.
+        std::fs::write(
+            &reg,
+            r#"{"sessions":[{"window_id":"w1","project_dir":"/p","ai_session_id":"stale","pid":999999}]}"#,
+        )
+        .unwrap();
+        // registry.d has w1 as GARBAGE (mid-write / corrupt) and a clean w2.
+        let pd = dir.path().join("registry.d").join("proj");
+        std::fs::create_dir_all(&pd).unwrap();
+        std::fs::write(pd.join("w1.json"), b"{ this is not json").unwrap();
+        std::fs::write(
+            pd.join("w2.json"),
+            r#"{"window_id":"w2","project_dir":"/p","ai_session_id":"ok"}"#,
+        )
+        .unwrap();
+
+        let (file, unreadable) = load_registry(&reg).expect("load");
+        // w1 stayed as the stale global entry (garbage dir file skipped)…
+        assert_eq!(
+            file.sessions
+                .iter()
+                .find(|e| e.window_id == "w1")
+                .and_then(|e| e.ai_session_id.as_deref()),
+            Some("stale")
+        );
+        // …but w1 is flagged unreadable so its unregister will be suppressed.
+        assert!(
+            unreadable.contains("w1"),
+            "corrupt registry.d file must protect its window"
+        );
+        assert!(!unreadable.contains("w2"), "clean file is not protected");
     }
 
     /// An unrecognised path must not override an explicit announce.
@@ -1026,7 +1128,9 @@ mod tests {
     fn unknown_transcript_path_keeps_the_announced_tool() {
         let mut entry = entry_alive("w1", "sess-1", "/var/tmp/custom.jsonl", "/proj");
         entry.tool = Some("cursor".into());
-        let file = RegistryFileView { sessions: vec![entry] };
+        let file = RegistryFileView {
+            sessions: vec![entry],
+        };
 
         let actions = reconcile(&file, &HashSet::new(), "host", |_| true);
         match &actions[0] {

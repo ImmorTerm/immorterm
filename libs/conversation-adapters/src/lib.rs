@@ -17,7 +17,7 @@
     clippy::let_and_return,
     clippy::doc_lazy_continuation,
     clippy::redundant_closure,
-    clippy::drain_collect,
+    clippy::drain_collect
 )]
 
 use conversation_schema::NormalizedEvent;
@@ -37,7 +37,7 @@ pub mod formats {
     pub mod windsurf;
 }
 
-use turn::{turns_to_events, Turn};
+use turn::{Turn, turns_to_events};
 
 /// Common contract every per-vendor adapter implements.
 pub trait ConversationAdapter: Sync {
@@ -46,10 +46,14 @@ pub trait ConversationAdapter: Sync {
 
     /// JSONL-line detector. Return `true` if the first parseable object
     /// belongs to this format. Gemini overrides `detect_from_text` instead.
-    fn detect(&self, _first_obj: &Value) -> bool { false }
+    fn detect(&self, _first_obj: &Value) -> bool {
+        false
+    }
 
     /// Whole-text detector for non-JSONL formats (Gemini).
-    fn detect_from_text(&self, _text: &str) -> bool { false }
+    fn detect_from_text(&self, _text: &str) -> bool {
+        false
+    }
 
     /// Parse transcript text into vendor-agnostic `Turn`s.
     fn parse(&self, text: &str) -> Vec<Turn>;
@@ -85,7 +89,9 @@ pub fn detect_format_from_text(text: &str) -> &'static str {
     }
     for line in text.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() { continue; }
+        if trimmed.is_empty() {
+            continue;
+        }
         let obj: Value = match serde_json::from_str(trimmed) {
             Ok(v) => v,
             Err(_) => continue,
@@ -102,7 +108,9 @@ pub fn detect_format_from_text(text: &str) -> &'static str {
 /// Parse `text` into `Turn`s using the detected adapter. Returns empty on unknown.
 pub fn parse_turns_from_text(text: &str) -> (Vec<Turn>, &'static str) {
     let name = detect_format_from_text(text);
-    if name == "unknown" { return (Vec::new(), name); }
+    if name == "unknown" {
+        return (Vec::new(), name);
+    }
     let all: Vec<&dyn ConversationAdapter> =
         text_adapters().into_iter().chain(json_adapters()).collect();
     if let Some(a) = all.iter().find(|a| a.tool_name() == name) {
@@ -120,7 +128,9 @@ pub fn parse_events_from_text(
     immorterm_session_id: &str,
 ) -> Vec<NormalizedEvent> {
     let (turns, tool) = parse_turns_from_text(text);
-    if turns.is_empty() { return Vec::new(); }
+    if turns.is_empty() {
+        return Vec::new();
+    }
     turns_to_events(&turns, tool, session_id, immorterm_session_id)
 }
 

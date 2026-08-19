@@ -6,9 +6,9 @@
 //! Both map `apply_patch` into Edit/Write and `exec_command` into Bash so the
 //! downstream vocabulary matches Claude's.
 
+use crate::ConversationAdapter;
 use crate::shared::filter_empty_turns;
 use crate::turn::{AssistantBlock, ToolCall, Turn};
-use crate::ConversationAdapter;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::{Map, Value};
@@ -17,13 +17,30 @@ use std::collections::HashMap;
 pub struct Codex;
 
 impl ConversationAdapter for Codex {
-    fn tool_name(&self) -> &'static str { "codex" }
+    fn tool_name(&self) -> &'static str {
+        "codex"
+    }
 
     fn detect(&self, obj: &Value) -> bool {
         let t = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        if t == "session_meta" { return true; }
-        if t == "thread.started" { return true; }
-        if t == "item.completed" && obj.get("item").is_some() { return true; }
+        if t == "session_meta" || t == "response_item" {
+            return true;
+        }
+        if t == "event_msg"
+            && obj
+                .get("payload")
+                .and_then(|p| p.get("type"))
+                .and_then(|v| v.as_str())
+                .is_some()
+        {
+            return true;
+        }
+        if t == "thread.started" {
+            return true;
+        }
+        if t == "item.completed" && obj.get("item").is_some() {
+            return true;
+        }
         false
     }
 
@@ -31,15 +48,21 @@ impl ConversationAdapter for Codex {
         let mut events: Vec<Value> = Vec::new();
         for line in text.lines() {
             let trimmed = line.trim();
-            if trimmed.is_empty() { continue; }
-            if let Ok(v) = serde_json::from_str(trimmed) { events.push(v); }
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str(trimmed) {
+                events.push(v);
+            }
         }
 
         let is_new = events.iter().any(|e| {
             let t = e.get("type").and_then(|v| v.as_str()).unwrap_or("");
             t == "thread.started" || t == "item.completed"
         });
-        if is_new { return parse_new_format(&events); }
+        if is_new {
+            return parse_new_format(&events);
+        }
         parse_legacy(&events)
     }
 }
@@ -69,7 +92,9 @@ struct ParsedPatch {
 
 fn parse_codex_patch(patch_str: &str) -> ParsedPatch {
     let mut lines: Vec<&str> = patch_str.split('\n').collect();
-    while matches!(lines.last(), Some(&"")) { lines.pop(); }
+    while matches!(lines.last(), Some(&"")) {
+        lines.pop();
+    }
 
     let mut file_path = String::new();
     let mut is_new = false;
@@ -77,7 +102,9 @@ fn parse_codex_patch(patch_str: &str) -> ParsedPatch {
     let mut new_lines: Vec<String> = Vec::new();
 
     for line in lines {
-        if line.starts_with("*** Begin Patch") || line.starts_with("*** End Patch") { continue; }
+        if line.starts_with("*** Begin Patch") || line.starts_with("*** End Patch") {
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("*** Add File:") {
             file_path = rest.trim().to_string();
             is_new = true;
@@ -88,7 +115,9 @@ fn parse_codex_patch(patch_str: &str) -> ParsedPatch {
             is_new = false;
             continue;
         }
-        if line.starts_with("@@") { continue; }
+        if line.starts_with("@@") {
+            continue;
+        }
         if let Some(rest) = line.strip_prefix('+') {
             new_lines.push(rest.to_string());
         } else if let Some(rest) = line.strip_prefix('-') {
@@ -137,13 +166,18 @@ fn parse_new_format(events: &[Value]) -> Vec<Turn> {
     let mut user_text = String::new();
 
     for evt in events {
-        if evt.get("type").and_then(|t| t.as_str()) != Some("item.completed") { continue; }
+        if evt.get("type").and_then(|t| t.as_str()) != Some("item.completed") {
+            continue;
+        }
         let item = match evt.get("item") {
             Some(i) if i.is_object() => i,
             _ => continue,
         };
         let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        let ts = evt.get("timestamp").and_then(|t| t.as_str()).map(|s| s.to_string());
+        let ts = evt
+            .get("timestamp")
+            .and_then(|t| t.as_str())
+            .map(|s| s.to_string());
 
         match item_type {
             "command_execution" => {
@@ -156,12 +190,20 @@ fn parse_new_format(events: &[Value]) -> Vec<Turn> {
                 let clean = clean_bash_lc(&cmd);
                 let mut input_map = Map::new();
                 input_map.insert("command".into(), Value::String(clean));
-                let aggregated = item.get("aggregated_output").and_then(|o| o.as_str()).unwrap_or("").trim();
+                let aggregated = item
+                    .get("aggregated_output")
+                    .and_then(|o| o.as_str())
+                    .unwrap_or("")
+                    .trim();
                 let exit = item.get("exit_code").and_then(|e| e.as_i64());
                 let is_error = matches!(exit, Some(code) if code != 0);
                 blocks.push(AssistantBlock::tool_use(
                     ToolCall {
-                        tool_use_id: item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        tool_use_id: item
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                         name: "Bash".into(),
                         input: Value::Object(input_map),
                         result: Some(aggregated.to_string()),
@@ -184,40 +226,74 @@ fn parse_new_format(events: &[Value]) -> Vec<Turn> {
                 }
             }
             "function_call" => {
-                let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("unknown").to_string();
-                let args_str = item.get("arguments").and_then(|a| a.as_str()).unwrap_or("{}");
-                let mut input: Value = serde_json::from_str(args_str)
-                    .unwrap_or_else(|_| {
-                        let mut m = Map::new();
-                        m.insert("raw".into(), Value::String(args_str.to_string()));
-                        Value::Object(m)
-                    });
+                let name = item
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let args_str = item
+                    .get("arguments")
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("{}");
+                let mut input: Value = serde_json::from_str(args_str).unwrap_or_else(|_| {
+                    let mut m = Map::new();
+                    m.insert("raw".into(), Value::String(args_str.to_string()));
+                    Value::Object(m)
+                });
                 if name == "exec_command" {
                     if let Some(cmd) = input.get("cmd").and_then(|c| c.as_str()) {
                         let full = if let Some(wd) = input.get("workdir").and_then(|w| w.as_str()) {
                             format!("cd {} && {}", wd, cmd)
-                        } else { cmd.to_string() };
+                        } else {
+                            cmd.to_string()
+                        };
                         let mut obj = Map::new();
                         obj.insert("command".into(), Value::String(full));
                         input = Value::Object(obj);
                     }
                 }
                 let mut mapped_name = name.clone();
-                if name == "exec_command" { mapped_name = "Bash".into(); }
+                if name == "exec_command" {
+                    mapped_name = "Bash".into();
+                }
                 if name == "apply_patch" {
-                    let patch_src = item.get("arguments").and_then(|a| a.as_str()).map(|s| s.to_string())
-                        .or_else(|| input.get("raw").and_then(|r| r.as_str()).map(|s| s.to_string()))
+                    let patch_src = item
+                        .get("arguments")
+                        .and_then(|a| a.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| {
+                            input
+                                .get("raw")
+                                .and_then(|r| r.as_str())
+                                .map(|s| s.to_string())
+                        })
                         .unwrap_or_default();
                     let parsed = parse_codex_patch(&patch_src);
-                    mapped_name = if parsed.is_new { "Write".into() } else { "Edit".into() };
+                    mapped_name = if parsed.is_new {
+                        "Write".into()
+                    } else {
+                        "Edit".into()
+                    };
                     input = patch_to_input(&parsed);
                 }
-                let output = item.get("output").and_then(|o| o.as_str()).unwrap_or("").trim();
-                let result = if output.is_empty() { None } else { Some(output.to_string()) };
+                let output = item
+                    .get("output")
+                    .and_then(|o| o.as_str())
+                    .unwrap_or("")
+                    .trim();
+                let result = if output.is_empty() {
+                    None
+                } else {
+                    Some(output.to_string())
+                };
                 let is_error = item.get("status").and_then(|s| s.as_str()) == Some("failed");
                 blocks.push(AssistantBlock::tool_use(
                     ToolCall {
-                        tool_use_id: item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        tool_use_id: item
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                         name: mapped_name,
                         input,
                         result,
@@ -229,11 +305,14 @@ fn parse_new_format(events: &[Value]) -> Vec<Turn> {
             }
             "message" if item.get("role").and_then(|r| r.as_str()) == Some("user") => {
                 if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
-                    let parts: Vec<String> = content.iter()
+                    let parts: Vec<String> = content
+                        .iter()
                         .filter_map(|b| {
                             if b.get("type")?.as_str()? == "input_text" {
                                 Some(b.get("text")?.as_str()?.to_string())
-                            } else { None }
+                            } else {
+                                None
+                            }
                         })
                         .collect();
                     user_text = extract_codex_user_text(&parts.join("\n"));
@@ -243,8 +322,14 @@ fn parse_new_format(events: &[Value]) -> Vec<Turn> {
         }
     }
 
-    if blocks.is_empty() { return Vec::new(); }
-    let ut = if user_text.is_empty() { "Task".to_string() } else { user_text };
+    if blocks.is_empty() {
+        return Vec::new();
+    }
+    let ut = if user_text.is_empty() {
+        "Task".to_string()
+    } else {
+        user_text
+    };
     vec![Turn {
         index: 1,
         user_text: ut,
@@ -257,8 +342,10 @@ fn parse_new_format(events: &[Value]) -> Vec<Turn> {
 // Regex set for legacy function_call_output cleanup — matches the JS source.
 static RE_CHUNK_ID: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^Chunk ID:.*\n?").unwrap());
 static RE_WALL_TIME: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^Wall time:.*\n?").unwrap());
-static RE_EXIT_LINE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^Process exited with code \d+\n?").unwrap());
-static RE_ORIG_TOKENS: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^Original token count:.*\n?").unwrap());
+static RE_EXIT_LINE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?m)^Process exited with code \d+\n?").unwrap());
+static RE_ORIG_TOKENS: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?m)^Original token count:.*\n?").unwrap());
 static RE_OUTPUT_HEADER: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^Output:\n?").unwrap());
 static RE_BASH_LC: Lazy<Regex> = Lazy::new(|| Regex::new(r"^/bin/bash\s+-lc\s+").unwrap());
 
@@ -287,8 +374,14 @@ fn parse_legacy(events: &[Value]) -> Vec<Turn> {
 
     for evt in events {
         let etype = evt.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        let payload = evt.get("payload").cloned().unwrap_or(Value::Object(Map::new()));
-        let ts = evt.get("timestamp").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let payload = evt
+            .get("payload")
+            .cloned()
+            .unwrap_or(Value::Object(Map::new()));
+        let ts = evt
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         let ptype = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -314,16 +407,23 @@ fn parse_legacy(events: &[Value]) -> Vec<Turn> {
             in_turn = false;
             continue;
         }
-        if !in_turn { continue; }
-
-        if etype == "event_msg" && ptype == "user_message" {
-            let msg = payload.get("message").and_then(|m| m.as_str()).unwrap_or("");
-            current_user_text = extract_codex_user_text(msg);
-            if let Some(t) = &ts { current_timestamp = t.clone(); }
+        if !in_turn {
             continue;
         }
 
-if etype == "event_msg" && ptype == "mcp_tool_call_end" {
+        if etype == "event_msg" && ptype == "user_message" {
+            let msg = payload
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("");
+            current_user_text = extract_codex_user_text(msg);
+            if let Some(t) = &ts {
+                current_timestamp = t.clone();
+            }
+            continue;
+        }
+
+        if etype == "event_msg" && ptype == "mcp_tool_call_end" {
             // MCP calls arrive as a single completed event rather than the
             // call/output pair every other tool uses, so they were being
             // dropped entirely — losing exactly the part ImmorTerm cares
@@ -377,7 +477,11 @@ if etype == "event_msg" && ptype == "mcp_tool_call_end" {
                     tool_use_id: call_id,
                     name: format!("mcp__{server}__{tool}"),
                     input,
-                    result: if result_text.is_empty() { None } else { Some(result_text) },
+                    result: if result_text.is_empty() {
+                        None
+                    } else {
+                        Some(result_text)
+                    },
                     result_timestamp: ts.clone(),
                     is_error,
                 },
@@ -392,11 +496,14 @@ if etype == "event_msg" && ptype == "mcp_tool_call_end" {
 
             if ptype == "message" && role == "user" {
                 if let Some(content) = payload.get("content").and_then(|c| c.as_array()) {
-                    let parts: Vec<String> = content.iter()
+                    let parts: Vec<String> = content
+                        .iter()
                         .filter_map(|b| {
                             if b.get("type")?.as_str()? == "input_text" {
                                 Some(b.get("text")?.as_str()?.to_string())
-                            } else { None }
+                            } else {
+                                None
+                            }
                         })
                         .collect();
                     let raw = parts.join("\n");
@@ -407,7 +514,9 @@ if etype == "event_msg" && ptype == "mcp_tool_call_end" {
                 }
                 continue;
             }
-            if ptype == "message" && role == "developer" { continue; }
+            if ptype == "message" && role == "developer" {
+                continue;
+            }
             if ptype == "message" && role == "assistant" {
                 let mut text_parts: Vec<String> = Vec::new();
                 if let Some(content) = payload.get("content").and_then(|c| c.as_array()) {
@@ -420,7 +529,9 @@ if etype == "event_msg" && ptype == "mcp_tool_call_end" {
                     }
                 }
                 let block_text = text_parts.join("\n").trim().to_string();
-                if block_text.is_empty() { continue; }
+                if block_text.is_empty() {
+                    continue;
+                }
                 let kind_is_thinking = phase == "commentary";
                 if kind_is_thinking {
                     current_blocks.push(AssistantBlock::thinking(block_text, ts.clone()));
@@ -429,12 +540,25 @@ if etype == "event_msg" && ptype == "mcp_tool_call_end" {
                 }
                 continue;
             }
-            if ptype == "reasoning" { continue; }
+            if ptype == "reasoning" {
+                continue;
+            }
 
             if ptype == "function_call" {
-                let call_id = payload.get("call_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let fn_name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-                let args_str = payload.get("arguments").and_then(|a| a.as_str()).unwrap_or("{}");
+                let call_id = payload
+                    .get("call_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let fn_name = payload
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let args_str = payload
+                    .get("arguments")
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("{}");
                 let mut input: Value = serde_json::from_str(args_str).unwrap_or_else(|_| {
                     let mut m = Map::new();
                     m.insert("raw".into(), Value::String(args_str.to_string()));
@@ -444,13 +568,19 @@ if etype == "event_msg" && ptype == "mcp_tool_call_end" {
                     if let Some(cmd) = input.get("cmd").and_then(|c| c.as_str()) {
                         let full = if let Some(wd) = input.get("workdir").and_then(|w| w.as_str()) {
                             format!("cd {} && {}", wd, cmd)
-                        } else { cmd.to_string() };
+                        } else {
+                            cmd.to_string()
+                        };
                         let mut obj = Map::new();
                         obj.insert("command".into(), Value::String(full));
                         input = Value::Object(obj);
                     }
                 }
-                let mapped_name = if fn_name == "exec_command" { "Bash".to_string() } else { fn_name.clone() };
+                let mapped_name = if fn_name == "exec_command" {
+                    "Bash".to_string()
+                } else {
+                    fn_name.clone()
+                };
                 current_blocks.push(AssistantBlock::tool_use(
                     ToolCall {
                         tool_use_id: call_id.clone(),
@@ -467,8 +597,16 @@ if etype == "event_msg" && ptype == "mcp_tool_call_end" {
             }
 
             if ptype == "function_call_output" {
-                let call_id = payload.get("call_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let output = payload.get("output").and_then(|o| o.as_str()).unwrap_or("").to_string();
+                let call_id = payload
+                    .get("call_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let output = payload
+                    .get("output")
+                    .and_then(|o| o.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let stripped = strip_codex_output_headers(&output);
                 if let Some(&bidx) = pending.get(&call_id) {
                     if let Some(tc) = current_blocks[bidx].tool_call.as_mut() {
@@ -483,12 +621,24 @@ if etype == "event_msg" && ptype == "mcp_tool_call_end" {
             }
 
             if ptype == "custom_tool_call" {
-                let call_id = payload.get("call_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let tool_name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+                let call_id = payload
+                    .get("call_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let tool_name = payload
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
                 let (mapped_name, input) = if tool_name == "apply_patch" {
                     let src = payload.get("input").and_then(|v| v.as_str()).unwrap_or("");
                     let parsed = parse_codex_patch(src);
-                    let name = if parsed.is_new { "Write".to_string() } else { "Edit".to_string() };
+                    let name = if parsed.is_new {
+                        "Write".to_string()
+                    } else {
+                        "Edit".to_string()
+                    };
                     (name, patch_to_input(&parsed))
                 } else if tool_name == "exec" || tool_name == "shell" {
                     // 0.145 runs shell commands as a custom tool named `exec`
@@ -501,7 +651,11 @@ if etype == "event_msg" && ptype == "mcp_tool_call_end" {
                     m.insert("command".into(), Value::String(clean_bash_lc(raw)));
                     ("Bash".to_string(), Value::Object(m))
                 } else {
-                    let raw = payload.get("input").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let raw = payload
+                        .get("input")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let mut m = Map::new();
                     m.insert("raw".into(), Value::String(raw));
                     (tool_name.clone(), Value::Object(m))
@@ -522,12 +676,23 @@ if etype == "event_msg" && ptype == "mcp_tool_call_end" {
             }
 
             if ptype == "custom_tool_call_output" {
-                let call_id = payload.get("call_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let call_id = payload
+                    .get("call_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let (output_text, exit_nonzero) = match payload.get("output") {
                     Some(Value::String(s)) => (s.clone(), false),
                     Some(Value::Object(o)) => {
-                        let out = o.get("output").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let exit = o.get("metadata").and_then(|m| m.get("exit_code")).and_then(|e| e.as_i64());
+                        let out = o
+                            .get("output")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let exit = o
+                            .get("metadata")
+                            .and_then(|m| m.get("exit_code"))
+                            .and_then(|e| e.as_i64());
                         (out, matches!(exit, Some(code) if code != 0))
                     }
                     _ => (String::new(), false),
@@ -582,6 +747,18 @@ mod tests {
         assert!(Codex.detect(&c));
         let d: Value = serde_json::from_str(r#"{"type":"item.completed"}"#).unwrap();
         assert!(!Codex.detect(&d));
+    }
+
+    #[test]
+    fn detects_incremental_legacy_chunk_without_session_meta() {
+        assert!(Codex.detect(&serde_json::json!({
+            "type": "response_item",
+            "payload": {"type": "message"}
+        })));
+        assert!(Codex.detect(&serde_json::json!({
+            "type": "event_msg",
+            "payload": {"type": "task_started"}
+        })));
     }
 
     #[test]

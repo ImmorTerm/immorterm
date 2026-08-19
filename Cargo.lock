@@ -748,6 +748,7 @@ dependencies = [
 name = "conversation-adapters"
 version = "0.1.2"
 dependencies = [
+ "clap",
  "conversation-schema",
  "once_cell",
  "regex",

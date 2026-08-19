@@ -20,7 +20,11 @@ pub struct AiSessionKey {
 }
 
 impl AiSessionKey {
-    pub fn new(window_id: impl Into<String>, vendor_session_id: impl Into<String>, host_id: impl Into<String>) -> Self {
+    pub fn new(
+        window_id: impl Into<String>,
+        vendor_session_id: impl Into<String>,
+        host_id: impl Into<String>,
+    ) -> Self {
         Self {
             window_id: window_id.into(),
             vendor_session_id: vendor_session_id.into(),
@@ -32,7 +36,11 @@ impl AiSessionKey {
 impl fmt::Display for AiSessionKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // host_id intentionally first so logs sort host-cluster-aware.
-        write!(f, "{}/{}/{}", self.host_id, self.window_id, self.vendor_session_id)
+        write!(
+            f,
+            "{}/{}/{}",
+            self.host_id, self.window_id, self.vendor_session_id
+        )
     }
 }
 

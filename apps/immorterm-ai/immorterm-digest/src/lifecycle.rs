@@ -133,8 +133,14 @@ mod tests {
 
     #[test]
     fn cline_and_gemini_are_rewrite_hash() {
-        assert_eq!(LifecycleModel::for_vendor("cline"), LifecycleModel::RewriteHash);
-        assert_eq!(LifecycleModel::for_vendor("gemini"), LifecycleModel::RewriteHash);
+        assert_eq!(
+            LifecycleModel::for_vendor("cline"),
+            LifecycleModel::RewriteHash
+        );
+        assert_eq!(
+            LifecycleModel::for_vendor("gemini"),
+            LifecycleModel::RewriteHash
+        );
     }
 
     #[test]
@@ -147,7 +153,14 @@ mod tests {
 
     #[test]
     fn jsonl_vendors_are_append() {
-        for v in &["claude-code", "codex", "windsurf", "opencode", "cursor", "copilot"] {
+        for v in &[
+            "claude-code",
+            "codex",
+            "windsurf",
+            "opencode",
+            "cursor",
+            "copilot",
+        ] {
             assert_eq!(
                 LifecycleModel::for_vendor(v),
                 LifecycleModel::JsonlAppend,

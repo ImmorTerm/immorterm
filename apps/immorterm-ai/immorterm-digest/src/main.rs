@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{Mutex, watch};
 
 pub mod checkpoint;
 pub mod debouncer;
@@ -21,12 +21,16 @@ pub mod registry_watch;
 pub mod watcher;
 
 use crate::hub_client::{HubClient, Wal};
-use crate::ipc::{bind_exclusive, default_socket_path, Handle};
+use crate::ipc::{Handle, bind_exclusive, default_socket_path};
 use crate::registry::SessionRegistry;
 use crate::watcher::WatcherHub;
 
 #[derive(Parser, Debug)]
-#[command(name = "immorterm-digest", version, about = "Per-session digest daemon (v4)")]
+#[command(
+    name = "immorterm-digest",
+    version,
+    about = "Per-session digest daemon (v4)"
+)]
 struct Cli {
     /// Override socket path (defaults to ~/.immorterm/sockets/immorterm-digest.sock).
     #[arg(long, env = "IMMORTERM_DIGEST_SOCKET")]
@@ -75,10 +79,21 @@ fn main() -> Result<()> {
             Command::DebugInfo => {
                 println!("host_id: {}", key::resolve_host_id());
                 for v in &[
-                    "claude-code", "codex", "cursor", "windsurf",
-                    "cline", "opencode", "gemini", "aider", "copilot",
+                    "claude-code",
+                    "codex",
+                    "cursor",
+                    "windsurf",
+                    "cline",
+                    "opencode",
+                    "gemini",
+                    "aider",
+                    "copilot",
                 ] {
-                    println!("  {:<12} -> {:?}", v, lifecycle::LifecycleModel::for_vendor(v));
+                    println!(
+                        "  {:<12} -> {:?}",
+                        v,
+                        lifecycle::LifecycleModel::for_vendor(v)
+                    );
                 }
                 Ok(())
             }

@@ -5,9 +5,9 @@
 //! Tool names are mapped into Claude-style (`Bash`, `Read`, ...) so downstream
 //! consumers see a uniform vocabulary across vendors.
 
+use crate::ConversationAdapter;
 use crate::shared::{clean_system_tags, filter_empty_turns};
 use crate::turn::{AssistantBlock, ToolCall, Turn};
-use crate::ConversationAdapter;
 use once_cell::sync::Lazy;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -33,17 +33,20 @@ static TOOL_MAP: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
 });
 
 impl ConversationAdapter for Gemini {
-    fn tool_name(&self) -> &'static str { "gemini" }
+    fn tool_name(&self) -> &'static str {
+        "gemini"
+    }
 
     fn detect_from_text(&self, text: &str) -> bool {
         let trimmed = text.trim();
-        if !trimmed.starts_with('{') { return false; }
+        if !trimmed.starts_with('{') {
+            return false;
+        }
         let obj: Value = match serde_json::from_str(trimmed) {
             Ok(v) => v,
             Err(_) => return false,
         };
-        obj.get("sessionId").is_some()
-            && obj.get("messages").map(|m| m.is_array()).unwrap_or(false)
+        obj.get("sessionId").is_some() && obj.get("messages").map(|m| m.is_array()).unwrap_or(false)
     }
 
     fn parse(&self, text: &str) -> Vec<Turn> {
@@ -64,12 +67,24 @@ impl ConversationAdapter for Gemini {
 
         for msg in messages {
             let msg_type = msg.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            let ts = msg.get("timestamp").and_then(|t| t.as_str()).map(|s| s.to_string());
+            let ts = msg
+                .get("timestamp")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string());
 
             if msg_type == "user" {
-                finalize(&mut turns, &mut turn_index, &mut user_text, &mut timestamp, &mut blocks);
+                finalize(
+                    &mut turns,
+                    &mut turn_index,
+                    &mut user_text,
+                    &mut timestamp,
+                    &mut blocks,
+                );
                 user_text = clean_system_tags(
-                    msg.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string(),
+                    msg.get("content")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                 );
                 timestamp = ts.unwrap_or_default();
                 continue;
@@ -78,13 +93,28 @@ impl ConversationAdapter for Gemini {
             if msg_type == "gemini" {
                 if let Some(thoughts) = msg.get("thoughts").and_then(|t| t.as_array()) {
                     for thought in thoughts {
-                        let subject = thought.get("subject").and_then(|s| s.as_str()).unwrap_or("").trim();
-                        let description = thought.get("description").and_then(|s| s.as_str()).unwrap_or("").trim();
-                        if subject.is_empty() && description.is_empty() { continue; }
+                        let subject = thought
+                            .get("subject")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .trim();
+                        let description = thought
+                            .get("description")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .trim();
+                        if subject.is_empty() && description.is_empty() {
+                            continue;
+                        }
                         let think = if !subject.is_empty() {
                             format!("{}: {}", subject, description)
-                        } else { description.to_string() };
-                        let tts = thought.get("timestamp").and_then(|t| t.as_str()).map(|s| s.to_string())
+                        } else {
+                            description.to_string()
+                        };
+                        let tts = thought
+                            .get("timestamp")
+                            .and_then(|t| t.as_str())
+                            .map(|s| s.to_string())
                             .or_else(|| ts.clone());
                         blocks.push(AssistantBlock::thinking(think, tts));
                     }
@@ -93,18 +123,27 @@ impl ConversationAdapter for Gemini {
                 if let Some(tool_calls) = msg.get("toolCalls").and_then(|t| t.as_array()) {
                     for tc in tool_calls {
                         let raw_name = tc.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
-                        let mapped_name = TOOL_MAP.get(raw_name).copied().unwrap_or(raw_name).to_string();
+                        let mapped_name = TOOL_MAP
+                            .get(raw_name)
+                            .copied()
+                            .unwrap_or(raw_name)
+                            .to_string();
                         let input = tc.get("args").cloned().unwrap_or(Value::Object(Map::new()));
                         let normalized_input = if mapped_name == "Bash" {
                             if let Some(cmd) = input.get("command").and_then(|c| c.as_str()) {
                                 let mut obj = Map::new();
                                 obj.insert("command".into(), Value::String(cmd.to_string()));
                                 Value::Object(obj)
-                            } else { input.clone() }
-                        } else { input };
+                            } else {
+                                input.clone()
+                            }
+                        } else {
+                            input
+                        };
 
                         let result_text = extract_tool_result(tc.get("result"));
-                        let exit_code = tc.get("result")
+                        let exit_code = tc
+                            .get("result")
                             .and_then(|r| r.as_array())
                             .and_then(|arr| arr.first())
                             .and_then(|first| first.get("functionResponse"))
@@ -116,11 +155,18 @@ impl ConversationAdapter for Gemini {
 
                         blocks.push(AssistantBlock::tool_use(
                             ToolCall {
-                                tool_use_id: tc.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                tool_use_id: tc
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
                                 name: mapped_name,
                                 input: normalized_input,
                                 result: result_text,
-                                result_timestamp: tc.get("timestamp").and_then(|t| t.as_str()).map(|s| s.to_string()),
+                                result_timestamp: tc
+                                    .get("timestamp")
+                                    .and_then(|t| t.as_str())
+                                    .map(|s| s.to_string()),
                                 is_error,
                             },
                             ts.clone(),
@@ -128,7 +174,11 @@ impl ConversationAdapter for Gemini {
                     }
                 }
 
-                let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("").trim();
+                let content = msg
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .trim();
                 if !content.is_empty() {
                     blocks.push(AssistantBlock::text(content.to_string(), ts.clone()));
                 }
@@ -136,7 +186,13 @@ impl ConversationAdapter for Gemini {
             }
         }
 
-        finalize(&mut turns, &mut turn_index, &mut user_text, &mut timestamp, &mut blocks);
+        finalize(
+            &mut turns,
+            &mut turn_index,
+            &mut user_text,
+            &mut timestamp,
+            &mut blocks,
+        );
         filter_empty_turns(turns)
     }
 }
@@ -148,7 +204,9 @@ fn finalize(
     timestamp: &mut String,
     blocks: &mut Vec<AssistantBlock>,
 ) {
-    if user_text.is_empty() && blocks.is_empty() { return; }
+    if user_text.is_empty() && blocks.is_empty() {
+        return;
+    }
     *turn_index += 1;
     turns.push(Turn {
         index: *turn_index,
@@ -161,7 +219,9 @@ fn finalize(
 
 fn extract_tool_result(result: Option<&Value>) -> Option<String> {
     let result = result?;
-    if let Value::String(s) = result { return Some(s.clone()); }
+    if let Value::String(s) = result {
+        return Some(s.clone());
+    }
     let arr = result.as_array()?;
     let first = arr.first()?;
     let fr = first.get("functionResponse")?;
@@ -171,7 +231,11 @@ fn extract_tool_result(result: Option<&Value>) -> Option<String> {
     if output.is_empty() && !error.is_empty() && error != "(none)" {
         return Some(error.to_string());
     }
-    if output.is_empty() { None } else { Some(output.to_string()) }
+    if output.is_empty() {
+        None
+    } else {
+        Some(output.to_string())
+    }
 }
 
 #[cfg(test)]

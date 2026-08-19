@@ -4,15 +4,17 @@
 //! Consecutive user messages merge into a single turn; tool_results scan forward
 //! from the next user message and match by `tool_use_id`.
 
+use crate::ConversationAdapter;
 use crate::shared::build_turns_from_entries;
 use crate::turn::Turn;
-use crate::ConversationAdapter;
 use serde_json::Value;
 
 pub struct ClaudeCode;
 
 impl ConversationAdapter for ClaudeCode {
-    fn tool_name(&self) -> &'static str { "claude-code" }
+    fn tool_name(&self) -> &'static str {
+        "claude-code"
+    }
 
     fn detect(&self, obj: &Value) -> bool {
         match obj.get("type").and_then(|v| v.as_str()) {
@@ -25,7 +27,9 @@ impl ConversationAdapter for ClaudeCode {
         let mut entries = Vec::new();
         for line in text.lines() {
             let trimmed = line.trim();
-            if trimmed.is_empty() { continue; }
+            if trimmed.is_empty() {
+                continue;
+            }
             let obj: Value = match serde_json::from_str(trimmed) {
                 Ok(v) => v,
                 Err(_) => continue,

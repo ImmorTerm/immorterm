@@ -82,7 +82,8 @@ pub fn maybe_write_asciicast(
         return;
     }
     if let Some(w) = writer
-        && let Err(e) = w.write_output(data) {
-            warn!("Asciicast write error: {}", e);
-        }
+        && let Err(e) = w.write_output(data)
+    {
+        warn!("Asciicast write error: {}", e);
+    }
 }

@@ -20,20 +20,21 @@
 //! then group consecutive `>`-prefixed lines into the matching assistant block.
 //! Anything outside those two prefixes is treated as a section break.
 
+use crate::ConversationAdapter;
 use crate::shared::filter_empty_turns;
 use crate::turn::{AssistantBlock, Turn};
-use crate::ConversationAdapter;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
 pub struct Aider;
 
-static RE_SESSION_HEADER: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?m)^#\s+aider chat started at\s+(.*)$").unwrap()
-});
+static RE_SESSION_HEADER: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?m)^#\s+aider chat started at\s+(.*)$").unwrap());
 
 impl ConversationAdapter for Aider {
-    fn tool_name(&self) -> &'static str { "aider" }
+    fn tool_name(&self) -> &'static str {
+        "aider"
+    }
 
     fn detect_from_text(&self, text: &str) -> bool {
         RE_SESSION_HEADER.is_match(text)
@@ -59,7 +60,10 @@ impl ConversationAdapter for Aider {
                     &mut current_assistant,
                     &mut current_timestamp,
                 );
-                last_session_header = caps.get(1).map(|m| m.as_str().trim().to_string()).unwrap_or_default();
+                last_session_header = caps
+                    .get(1)
+                    .map(|m| m.as_str().trim().to_string())
+                    .unwrap_or_default();
                 state = ParseState::Idle;
                 continue;
             }
@@ -133,7 +137,11 @@ impl ConversationAdapter for Aider {
 }
 
 #[derive(Clone, Copy)]
-enum ParseState { Idle, User, Assistant }
+enum ParseState {
+    Idle,
+    User,
+    Assistant,
+}
 
 fn flush_turn(
     turns: &mut Vec<Turn>,
@@ -144,7 +152,9 @@ fn flush_turn(
 ) {
     let user_text = collapse(user_lines.drain(..).collect());
     let assistant_text = collapse(assistant_lines.drain(..).collect());
-    if user_text.is_empty() && assistant_text.is_empty() { return; }
+    if user_text.is_empty() && assistant_text.is_empty() {
+        return;
+    }
     let mut blocks = Vec::new();
     if !assistant_text.is_empty() {
         blocks.push(AssistantBlock::text(assistant_text, None));

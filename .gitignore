@@ -99,6 +99,7 @@ test-results/
 # Native binary build artifacts
 packages/immorterm-memory-*/bin/
 packages/immorterm-memory/bin/
+apps/extension/resources/bin/immorterm-adapter
 
 # Claude worktrees + ephemeral runtime files (NEVER commit — worktrees are
 # multi-GB working copies, scheduled_tasks.lock is a runtime mutex).
