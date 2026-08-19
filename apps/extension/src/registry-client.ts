@@ -69,6 +69,13 @@ interface RegistryEntryJson {
     theme?: string;
     ai_transcript_path?: string;
     ai_stats?: ClaudeStatsJson;
+    tool?: string;
+    tool_history?: Array<{
+        tool: string;
+        session_id: string;
+        transcript_path: string;
+        ts: string;
+    }>;
     /** Per-session structured log directory written by the Rust daemon —
      * `{projectDir}/.immorterm/terminals/logs/{windowId}` (or the legacy
      * date-prefixed form). The basename matches the on-disk dir name and
@@ -445,6 +452,7 @@ const DAEMON_OWNED_FIELDS = [
     // otherwise trips `if (!session.name) continue` in restore and drops the tab.
     'name', 'pid', 'ws_port', 'session_type',
     'ai_session_id', 'ai_transcript_path', 'ai_stats',
+    'tool', 'tool_history',
     'structured_log_dir',
     'owner_project_dir', 'owner_project_id', 'owner_project_name',
     'worktree',
