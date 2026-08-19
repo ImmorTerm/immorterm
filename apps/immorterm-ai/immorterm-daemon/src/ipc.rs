@@ -46,6 +46,42 @@ pub enum Request {
     /// external message presented to this exact daemon. The MCP process uses
     /// it to prove receiving-agent authority without a deployment credential.
     GetExternalMessageReceipt { message_id: String },
+    /// Send terminal input to this session's actively shared partner.
+    SendSharedMessage { data: String },
+    /// Internal receiving half of `SendSharedMessage`.
+    ReceiveSharedMessage {
+        data: String,
+        source_id: String,
+        source_name: String,
+    },
+    /// Transfer a file to this session's actively shared partner.
+    SendSharedFile {
+        source_path: String,
+        file_name: String,
+        media_type: String,
+        is_image: bool,
+        message: Option<String>,
+    },
+    /// Ask the receiver to use a path already visible on its filesystem.
+    ReceiveSharedFileReference {
+        source_path: String,
+        file_name: String,
+        media_type: String,
+        is_image: bool,
+        message: Option<String>,
+        source_id: String,
+        source_name: String,
+    },
+    /// Internal receiving half of `SendSharedFile`.
+    ReceiveSharedFile {
+        file_name: String,
+        media_type: String,
+        data_base64: String,
+        is_image: bool,
+        message: Option<String>,
+        source_id: String,
+        source_name: String,
+    },
     /// Kill the session
     Kill,
     /// Read the current screen content (viewport + cursor)

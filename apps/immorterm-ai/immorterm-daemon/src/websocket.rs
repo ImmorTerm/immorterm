@@ -401,6 +401,12 @@ pub enum WsServerMsg {
         ws_port: Option<u16>,
         alive: bool,
     },
+    #[serde(rename = "shared_activity")]
+    SharedActivity {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        events: Vec<crate::shared_activity::SharedActivityEvent>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -543,6 +549,11 @@ pub enum WsClientMsg {
     /// scratch_info { ws_port: null, alive: false }.
     #[serde(rename = "scratch_kill")]
     ScratchKill {
+        #[serde(default)]
+        request_id: Option<String>,
+    },
+    #[serde(rename = "get_shared_activity")]
+    GetSharedActivity {
         #[serde(default)]
         request_id: Option<String>,
     },
@@ -858,6 +869,9 @@ pub enum WsCommand {
         offset: usize,
         count: usize,
         reply: oneshot::Sender<ScrollbackReply>,
+    },
+    GetSharedActivity {
+        reply: oneshot::Sender<Vec<crate::shared_activity::SharedActivityEvent>>,
     },
     /// Register a channel server for cross-session messaging.
     RegisterChannel {
@@ -1682,6 +1696,22 @@ async fn handle_client_message(
                 let _ = ws_sink.send(Message::Text(json)).await;
             }
         }
+        WsClientMsg::GetSharedActivity { request_id } => {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            let events = if cmd_tx
+                .send(WsCommand::GetSharedActivity { reply: reply_tx })
+                .await
+                .is_ok()
+            {
+                reply_rx.await.unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let resp = WsServerMsg::SharedActivity { request_id, events };
+            if let Ok(json) = serde_json::to_string(&resp) {
+                let _ = ws_sink.send(Message::Text(json)).await;
+            }
+        }
         WsClientMsg::DrawRect {
             x, y, width, height, color, border_color, border_width, anchor, request_id,
         } => {
@@ -1991,6 +2021,20 @@ mod browser_input_tests {
                 WsClientMsg::BrowserControl { action: a } => assert_eq!(a, action),
                 _ => panic!("{action} did not parse as BrowserControl"),
             }
+        }
+    }
+
+    #[test]
+    fn parses_shared_activity_request() {
+        match serde_json::from_str::<WsClientMsg>(
+            r#"{"type":"get_shared_activity","request_id":"activity-1"}"#,
+        )
+        .unwrap()
+        {
+            WsClientMsg::GetSharedActivity { request_id } => {
+                assert_eq!(request_id.as_deref(), Some("activity-1"));
+            }
+            _ => panic!("shared activity request did not parse"),
         }
     }
 }

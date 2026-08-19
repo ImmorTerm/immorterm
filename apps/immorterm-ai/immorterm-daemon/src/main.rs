@@ -26,6 +26,7 @@ mod pty;
 mod pty_history;
 pub mod remote;
 mod screenshot;
+mod shared_activity;
 mod structured_log;
 mod openmemory_push;
 pub mod subagent_watcher;

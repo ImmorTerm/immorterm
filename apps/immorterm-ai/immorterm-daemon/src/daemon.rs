@@ -1320,6 +1320,7 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
     > = None;
     let mut chat_overlay: Option<crate::chat_overlay::ChatOverlay> = None;
     let mut channel_partner_id: Option<String> = None;
+    let mut channel_partner_name: Option<String> = None;
 
     // Subscribe the main loop to the AI event broadcast so we can react to
     // events that need session-state access (PTY write on workshop clicks).
@@ -1353,6 +1354,7 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                             &ai_eval_tx,
                             &workshop_tx,
                             &channel_partner_id,
+                            &channel_partner_name,
                             &mut chat_overlay,
                             &persist_tx,
                         ).await;
@@ -1677,6 +1679,10 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                         offset,
                         total,
                     });
+                } else if let crate::websocket::WsCommand::GetSharedActivity { reply } = cmd {
+                    let events = crate::shared_activity::load_recent(&state.window_id, 300)
+                        .unwrap_or_default();
+                    let _ = reply.send(events);
                 } else if let crate::websocket::WsCommand::SubscribeRaw { reply, full_snapshot } = cmd {
                     let scrollback_total = state.terminal.scrollback.len();
                     // Send full snapshot (with scrollback) when:
@@ -1738,35 +1744,48 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                     }
                 } else if let crate::websocket::WsCommand::PairSessions { source_id, target_id, source_name, target_name } = cmd {
                     info!("Pairing sessions: {} ({}) <-> {} ({})", source_name, source_id, target_name, target_id);
-                    // Notify the local channel server about the pairing
-                    if let Some(ref tx) = channel_tx {
-                        let paired_msg = serde_json::json!({
-                            "type": "session_paired",
-                            "partner_id": target_id,
-                            "partner_name": target_name,
-                        });
-                        let _ = tx.try_send(paired_msg.to_string());
+                    if let Some((partner_id, partner_name)) = pairing_partner(
+                        &state.window_id, &source_id, &source_name, &target_id, &target_name,
+                    ) {
+                        if let Some(ref tx) = channel_tx {
+                            let paired_msg = serde_json::json!({
+                                "type": "session_paired",
+                                "partner_id": partner_id,
+                                "partner_name": partner_name,
+                            });
+                            let _ = tx.try_send(paired_msg.to_string());
+                        }
+                        if let Some(ref mut overlay) = chat_overlay {
+                            overlay.remove(&mut state.terminal.ai_layer);
+                        }
+                        chat_overlay = None;
+                        channel_partner_id = Some(partner_id.to_string());
+                        channel_partner_name = Some(partner_name.to_string());
+                        log_shared_activity(
+                            &state.window_id,
+                            crate::shared_activity::SharedActivityEvent::new(
+                                "paired", "system", partner_id, partner_name,
+                            ),
+                        );
+                        if state.window_id == source_id {
+                            let inbox_dir = {
+                                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+                                std::path::PathBuf::from(home).join(".immorterm").join("channel-inbox")
+                            };
+                            let pair_msg = crate::channel_registry::ChannelMessage {
+                                from_immorterm_id: source_id.clone(),
+                                from_name: source_name.clone(),
+                                message: format!("__pair__:{}:{}", source_id, source_name),
+                                timestamp: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64,
+                            };
+                            let _ = crate::channel_registry::write_to_inbox(&inbox_dir, &target_id, &pair_msg);
+                        }
+                    } else {
+                        warn!("Ignoring pair command that does not include local session {}", state.window_id);
                     }
-                    // Also notify the target session via inbox
-                    let inbox_dir = {
-                        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-                        std::path::PathBuf::from(home).join(".immorterm").join("channel-inbox")
-                    };
-                    let pair_msg = crate::channel_registry::ChannelMessage {
-                        from_immorterm_id: source_id.clone(),
-                        from_name: source_name.clone(),
-                        message: format!("__pair__:{}:{}", source_id, source_name),
-                        timestamp: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as u64,
-                    };
-                    let _ = crate::channel_registry::write_to_inbox(&inbox_dir, &target_id, &pair_msg);
-                    // Create chat overlay on the terminal
-                    let mut overlay = crate::chat_overlay::ChatOverlay::new(&target_name);
-                    overlay.render(&mut state.terminal.ai_layer);
-                    chat_overlay = Some(overlay);
-                    channel_partner_id = Some(target_id.clone());
                 } else if let crate::websocket::WsCommand::CloseWorkshop { name } = cmd {
                     // Webview-initiated close (X button on tab or context menu).
                     // Mirrors the MCP CloseWorkshop IPC: remove from state,
@@ -1781,6 +1800,15 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                     let _ = workshop_tx.send(Arc::new(envelope));
                 } else if let crate::websocket::WsCommand::UnpairSessions = cmd {
                     info!("Unpairing sessions");
+                    if let Some(partner_id) = channel_partner_id.as_deref() {
+                        log_shared_activity(
+                            &state.window_id,
+                            crate::shared_activity::SharedActivityEvent::new(
+                                "unpaired", "system", partner_id,
+                                channel_partner_name.as_deref().unwrap_or(partner_id),
+                            ),
+                        );
+                    }
                     if let Some(ref tx) = channel_tx {
                         let unpaired_msg = serde_json::json!({
                             "type": "session_unpaired",
@@ -1793,6 +1821,7 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                     }
                     chat_overlay = None;
                     channel_partner_id = None;
+                    channel_partner_name = None;
                 } else {
                     handle_ws_command(cmd, &mut state, &persist_tx);
                 }
@@ -1823,6 +1852,7 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                             }
                             chat_overlay = None;
                             channel_partner_id = Some(partner_id.to_string());
+                            channel_partner_name = Some(partner_name.to_string());
                         }
                     } else if msg.message == "__unpair__" {
                         // Partner disconnected — tear down the channel
@@ -1837,7 +1867,14 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                             overlay.remove(&mut state.terminal.ai_layer);
                         }
                         chat_overlay = None;
+                        log_shared_activity(
+                            &state.window_id,
+                            crate::shared_activity::SharedActivityEvent::new(
+                                "unpaired", "system", &msg.from_immorterm_id, &msg.from_name,
+                            ),
+                        );
                         channel_partner_id = None;
+                        channel_partner_name = None;
                     } else {
                         // Forward regular channel message to the channel server
                         if let Some(ref tx) = channel_tx {
@@ -1981,6 +2018,7 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                     chat_overlay = None;
                     channel_tx = None;
                     channel_partner_id = None;
+                    channel_partner_name = None;
                 }
 
                 // ── Self-healing: re-register if our entry was lost ──
@@ -2363,6 +2401,369 @@ async fn send_response(stream: &mut tokio::net::UnixStream, resp: &Response) {
     }
 }
 
+fn active_shared_partner(partner: &Option<String>) -> Result<&str, &'static str> {
+    partner.as_deref().filter(|id| !id.is_empty()).ok_or(
+        "No active shared session. Start Interactive session sharing before sending messages.",
+    )
+}
+
+fn pairing_partner<'a>(
+    local_id: &str,
+    source_id: &'a str,
+    source_name: &'a str,
+    target_id: &'a str,
+    target_name: &'a str,
+) -> Option<(&'a str, &'a str)> {
+    if local_id == source_id {
+        Some((target_id, target_name))
+    } else if local_id == target_id {
+        Some((source_id, source_name))
+    } else {
+        None
+    }
+}
+
+fn log_shared_activity(window_id: &str, event: crate::shared_activity::SharedActivityEvent) {
+    if let Err(error) = crate::shared_activity::append(window_id, &event) {
+        warn!("Failed to append shared activity: {}", error);
+    }
+}
+
+async fn send_file_to_session(session: &str, request: Request) -> Response {
+    let operation = async {
+        let socket = crate::commands::find_session_socket_sync(session)
+            .map_err(|e| format!("Shared session is no longer live: {}", e))?;
+        let mut target = tokio::net::UnixStream::connect(&socket)
+            .await
+            .map_err(|e| format!("Failed to connect to shared session: {}", e))?;
+        let request = serde_json::to_vec(&request)
+            .map_err(|e| format!("Failed to encode shared file: {}", e))?;
+        target
+            .write_all(&request)
+            .await
+            .map_err(|e| format!("Failed to send shared file: {}", e))?;
+
+        let mut response = vec![0u8; 8192];
+        let n = target
+            .read(&mut response)
+            .await
+            .map_err(|e| format!("Failed to confirm shared file: {}", e))?;
+        if n == 0 {
+            return Err("Shared session closed without confirming the file".to_string());
+        }
+        match serde_json::from_slice::<Response>(&response[..n])
+            .map_err(|e| format!("Invalid response from shared session: {}", e))?
+        {
+            Response::Ok(detail) => Ok(Response::Ok(detail)),
+            Response::Error(e) => Err(e),
+            _ => Err("Unexpected response from shared session".to_string()),
+        }
+    };
+
+    match tokio::time::timeout(std::time::Duration::from_secs(10), operation).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => Response::Error(error),
+        Err(_) => Response::Error("Timed out sending a file to the active shared session".into()),
+    }
+}
+
+fn sanitize_shared_file_name(name: &str) -> String {
+    let base = std::path::Path::new(name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("attachment");
+    let sanitized: String = base
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .take(180)
+        .collect();
+    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
+        "attachment".into()
+    } else {
+        sanitized
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn receive_shared_file_reference(
+    state: &mut SessionState,
+    source_path: String,
+    file_name: String,
+    media_type: String,
+    is_image: bool,
+    message: Option<String>,
+    source_id: String,
+    source_name: String,
+) -> Response {
+    let path = match resolve_shared_file_reference(&source_path) {
+        Ok(path) => path,
+        Err(error) => return Response::Error(error),
+    };
+    announce_shared_file(
+        state,
+        path,
+        sanitize_shared_file_name(&file_name),
+        media_type,
+        is_image,
+        message,
+        source_id,
+        source_name,
+        false,
+        "zero-copy",
+    )
+}
+
+fn resolve_shared_file_reference(source_path: &str) -> Result<std::path::PathBuf, String> {
+    match std::path::Path::new(source_path).canonicalize() {
+        Ok(path) if path.is_file() => Ok(path),
+        Ok(_) => Err("SHARED_PATH_UNAVAILABLE: referenced path is not a regular file".into()),
+        Err(e) => Err(format!(
+            "SHARED_PATH_UNAVAILABLE: receiver cannot access path: {}",
+            e
+        )),
+    }
+}
+
+fn prepare_shared_file_transfer(
+    source_path: &str,
+    file_name: &str,
+    media_type: &str,
+    is_image: bool,
+) -> Result<(String, String, String), String> {
+    use base64::Engine;
+
+    const MAX_SHARED_FILE_BYTES: usize = 20 * 1024 * 1024;
+    let path = std::path::Path::new(source_path)
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve shared file for transfer: {}", e))?;
+    let metadata = path
+        .metadata()
+        .map_err(|e| format!("Cannot inspect shared file for transfer: {}", e))?;
+    if !metadata.is_file() {
+        return Err("Shared path is not a regular file".into());
+    }
+    if metadata.len() > MAX_SHARED_FILE_BYTES as u64 {
+        return Err(format!(
+            "Shared file requires transfer but exceeds the {} byte limit",
+            MAX_SHARED_FILE_BYTES
+        ));
+    }
+    let mut bytes =
+        std::fs::read(&path).map_err(|e| format!("Cannot read shared file for transfer: {}", e))?;
+    let (transferred_name, transferred_media_type) = if is_image {
+        let decoded = image::load_from_memory(&bytes)
+            .map_err(|e| format!("Cannot decode shared image: {}", e))?;
+        let mut png = std::io::Cursor::new(Vec::new());
+        decoded
+            .write_to(&mut png, image::ImageFormat::Png)
+            .map_err(|e| format!("Cannot normalize shared image: {}", e))?;
+        bytes = png.into_inner();
+        let stem = std::path::Path::new(file_name)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("shared-image");
+        (format!("{}.png", stem), "image/png".to_string())
+    } else {
+        (file_name.to_string(), media_type.to_string())
+    };
+    if bytes.len() > MAX_SHARED_FILE_BYTES {
+        return Err(format!(
+            "Prepared attachment exceeds the {} byte transfer limit",
+            MAX_SHARED_FILE_BYTES
+        ));
+    }
+    Ok((
+        transferred_name,
+        transferred_media_type,
+        base64::engine::general_purpose::STANDARD.encode(bytes),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn receive_shared_file(
+    state: &mut SessionState,
+    file_name: String,
+    media_type: String,
+    data_base64: String,
+    is_image: bool,
+    message: Option<String>,
+    source_id: String,
+    source_name: String,
+) -> Response {
+    use base64::Engine;
+
+    const MAX_SHARED_FILE_BYTES: usize = 20 * 1024 * 1024;
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(data_base64) {
+        Ok(bytes) if !bytes.is_empty() && bytes.len() <= MAX_SHARED_FILE_BYTES => bytes,
+        Ok(bytes) => {
+            return Response::Error(format!(
+                "Shared file must be between 1 and {} bytes (received {})",
+                MAX_SHARED_FILE_BYTES,
+                bytes.len()
+            ));
+        }
+        Err(e) => return Response::Error(format!("Invalid shared-file encoding: {}", e)),
+    };
+
+    let safe_name = sanitize_shared_file_name(&file_name);
+    let saved_path = if is_image {
+        match crate::websocket::save_image_bytes_to_temp(&bytes) {
+            Some(path) => std::path::PathBuf::from(path),
+            None => {
+                return Response::Error("Failed to save shared image through paste staging".into());
+            }
+        }
+    } else {
+        if state.window_id.is_empty() {
+            return Response::Error("Receiving session has no stable ImmorTerm ID".into());
+        }
+        let dir = crate::dirs_home()
+            .join(".immorterm")
+            .join("shared-files")
+            .join(&state.window_id);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            return Response::Error(format!("Failed to create shared-files directory: {}", e));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
+        // Match paste-image retention: received attachments are transient,
+        // not a second permanent copy of the sender's workspace.
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let max_age = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+            for entry in entries.flatten() {
+                let expired = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|meta| meta.modified().ok())
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| age > max_age);
+                if expired {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let path = dir.join(format!(
+            "{}-{}-{}",
+            timestamp,
+            std::process::id(),
+            safe_name
+        ));
+        if let Err(e) = std::fs::write(&path, &bytes) {
+            return Response::Error(format!("Failed to save shared file: {}", e));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+        path
+    };
+
+    announce_shared_file(
+        state,
+        saved_path,
+        safe_name,
+        media_type,
+        is_image,
+        message,
+        source_id,
+        source_name,
+        true,
+        if is_image { "paste-copy" } else { "copied" },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn announce_shared_file(
+    state: &mut SessionState,
+    saved_path: std::path::PathBuf,
+    safe_name: String,
+    media_type: String,
+    is_image: bool,
+    message: Option<String>,
+    source_id: String,
+    source_name: String,
+    remove_on_failure: bool,
+    delivery_mode: &'static str,
+) -> Response {
+    let item_id = format!(
+        "shared-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
+    let item = serde_json::json!({
+        "id": item_id,
+        "kind": "file",
+        "file_path": saved_path.to_string_lossy(),
+        "rel_path": safe_name,
+        "media_type": media_type,
+        "source_name": source_name,
+        "shared_image": is_image,
+        "delivery_mode": delivery_mode,
+    });
+    if !crate::websocket::write_share_item_to_queue(&state.window_id, &item) {
+        if remove_on_failure {
+            let _ = std::fs::remove_file(&saved_path);
+        }
+        return Response::Error("Failed to queue shared-file context for receiving session".into());
+    }
+
+    let kind = if is_image { "image" } else { "file" };
+    let mut prompt = format!(
+        "[ImmorTerm shared {} from {}]\nPath: {}\nMedia type: {}",
+        kind,
+        source_name.replace(['\r', '\n'], " "),
+        saved_path.display(),
+        media_type
+    );
+    if let Some(note) = message.as_deref().filter(|note| !note.is_empty()) {
+        prompt.push_str("\nMessage: ");
+        prompt.push_str(&note.replace('\r', ""));
+    }
+    prompt.push('\r');
+    if let Err(e) = state.pty.write_all(prompt.as_bytes()) {
+        return Response::Error(format!(
+            "File saved but failed to notify receiving agent: {}",
+            e
+        ));
+    }
+
+    let mut event = crate::shared_activity::SharedActivityEvent::new(
+        if is_image { "image" } else { "file" },
+        "incoming",
+        &source_id,
+        &source_name,
+    );
+    event.message = message;
+    event.file_path = Some(saved_path.to_string_lossy().into_owned());
+    event.media_type = Some(media_type);
+    event.delivery_mode = Some(delivery_mode.into());
+    log_shared_activity(&state.window_id, event);
+
+    Response::Ok(format!(
+        "Shared {} available at {} ({})",
+        kind,
+        saved_path.display(),
+        delivery_mode
+    ))
+}
+
 /// Convert a grid Row to a trimmed text string.
 fn row_to_text(row: &immorterm_core::Row) -> String {
     let line: String = row.cells.iter()
@@ -2397,6 +2798,7 @@ async fn handle_client_connection(
     ai_eval_tx: &broadcast::Sender<Arc<String>>,
     workshop_tx: &broadcast::Sender<Arc<String>>,
     channel_partner_id: &Option<String>,
+    channel_partner_name: &Option<String>,
     chat_overlay: &mut Option<crate::chat_overlay::ChatOverlay>,
     persist_tx: &std::sync::mpsc::Sender<PersistDelta>,
 ) {
@@ -3623,6 +4025,193 @@ async fn handle_client_connection(
                         "no presented external-message receipt for {message_id}"
                     ))
                 });
+            send_response(&mut stream, &resp).await;
+        }
+        Request::SendSharedMessage { data } => {
+            let resp = match active_shared_partner(channel_partner_id) {
+                Ok(partner_id) => {
+                    let response = send_file_to_session(
+                        partner_id,
+                        Request::ReceiveSharedMessage {
+                            data: data.clone(),
+                            source_id: state.window_id.clone(),
+                            source_name: state.title.clone(),
+                        },
+                    )
+                    .await;
+                    let mut event = crate::shared_activity::SharedActivityEvent::new(
+                        "message",
+                        "outgoing",
+                        partner_id,
+                        channel_partner_name.as_deref().unwrap_or(partner_id),
+                    );
+                    event.message = Some(data.trim_end_matches('\r').to_string());
+                    if !matches!(response, Response::Ok(_)) {
+                        event.status = "failed".into();
+                    }
+                    log_shared_activity(&state.window_id, event);
+                    response
+                }
+                Err(error) => Response::Error(error.into()),
+            };
+            send_response(&mut stream, &resp).await;
+        }
+        Request::ReceiveSharedMessage {
+            data,
+            source_id,
+            source_name,
+        } => {
+            let resp = match active_shared_partner(channel_partner_id) {
+                Ok(partner_id) if partner_id == source_id => {
+                    match state.pty.write_all(data.as_bytes()) {
+                        Ok(()) => {
+                            let mut event = crate::shared_activity::SharedActivityEvent::new(
+                                "message",
+                                "incoming",
+                                &source_id,
+                                channel_partner_name.as_deref().unwrap_or(&source_name),
+                            );
+                            event.message = Some(data.trim_end_matches('\r').to_string());
+                            log_shared_activity(&state.window_id, event);
+                            Response::Ok("Shared message delivered".into())
+                        }
+                        Err(e) => Response::Error(format!(
+                            "Failed to write shared message to terminal: {}",
+                            e
+                        )),
+                    }
+                }
+                Ok(_) => {
+                    Response::Error("Shared-message sender does not match active partner".into())
+                }
+                Err(error) => Response::Error(error.into()),
+            };
+            send_response(&mut stream, &resp).await;
+        }
+        Request::SendSharedFile {
+            source_path,
+            file_name,
+            media_type,
+            is_image,
+            message,
+        } => {
+            let resp = match active_shared_partner(channel_partner_id) {
+                Ok(partner_id) => {
+                    let reference_result = send_file_to_session(
+                        partner_id,
+                        Request::ReceiveSharedFileReference {
+                            source_path: source_path.clone(),
+                            file_name: file_name.clone(),
+                            media_type: media_type.clone(),
+                            is_image,
+                            message: message.clone(),
+                            source_id: state.window_id.clone(),
+                            source_name: state.title.clone(),
+                        },
+                    )
+                    .await;
+                    match reference_result {
+                        Response::Error(error) if error.starts_with("SHARED_PATH_UNAVAILABLE:") => {
+                            match prepare_shared_file_transfer(
+                                &source_path,
+                                &file_name,
+                                &media_type,
+                                is_image,
+                            ) {
+                                Ok((file_name, media_type, data_base64)) => {
+                                    send_file_to_session(
+                                        partner_id,
+                                        Request::ReceiveSharedFile {
+                                            file_name,
+                                            media_type,
+                                            data_base64,
+                                            is_image,
+                                            message: message.clone(),
+                                            source_id: state.window_id.clone(),
+                                            source_name: state.title.clone(),
+                                        },
+                                    )
+                                    .await
+                                }
+                                Err(error) => Response::Error(error),
+                            }
+                        }
+                        response => response,
+                    }
+                }
+                Err(error) => Response::Error(error.into()),
+            };
+            if let Response::Ok(detail) = &resp
+                && let Some(partner_id) = channel_partner_id.as_deref()
+            {
+                let mut event = crate::shared_activity::SharedActivityEvent::new(
+                    if is_image { "image" } else { "file" },
+                    "outgoing",
+                    partner_id,
+                    channel_partner_name.as_deref().unwrap_or(partner_id),
+                );
+                event.message = message;
+                event.file_path = Some(source_path);
+                event.media_type = Some(media_type);
+                event.delivery_mode = Some(if detail.contains("zero-copy") {
+                    "zero-copy".into()
+                } else if is_image {
+                    "paste-copy".into()
+                } else {
+                    "copied".into()
+                });
+                log_shared_activity(&state.window_id, event);
+            }
+            send_response(&mut stream, &resp).await;
+        }
+        Request::ReceiveSharedFileReference {
+            source_path,
+            file_name,
+            media_type,
+            is_image,
+            message,
+            source_id,
+            source_name,
+        } => {
+            let resp = match active_shared_partner(channel_partner_id) {
+                Ok(partner_id) if partner_id == source_id => receive_shared_file_reference(
+                    state,
+                    source_path,
+                    file_name,
+                    media_type,
+                    is_image,
+                    message,
+                    source_id,
+                    source_name,
+                ),
+                Ok(_) => Response::Error("Shared-file sender does not match active partner".into()),
+                Err(error) => Response::Error(error.into()),
+            };
+            send_response(&mut stream, &resp).await;
+        }
+        Request::ReceiveSharedFile {
+            file_name,
+            media_type,
+            data_base64,
+            is_image,
+            message,
+            source_id,
+            source_name,
+        } => {
+            let resp = match active_shared_partner(channel_partner_id) {
+                Ok(partner_id) if partner_id == source_id => receive_shared_file(
+                    state,
+                    file_name,
+                    media_type,
+                    data_base64,
+                    is_image,
+                    message,
+                    source_id,
+                    source_name,
+                ),
+                Ok(_) => Response::Error("Shared-file sender does not match active partner".into()),
+                Err(error) => Response::Error(error.into()),
+            };
             send_response(&mut stream, &resp).await;
         }
         Request::SubscribeAiLayer => {
@@ -5318,6 +5907,10 @@ fn handle_ws_command(
             // Handled inline in the event loop's select! — unreachable here
             let _ = reply;
         }
+        WsCommand::GetSharedActivity { reply } => {
+            // Handled inline in the event loop's select! — unreachable here
+            let _ = reply;
+        }
         WsCommand::RegisterChannel { .. }
         | WsCommand::PairSessions { .. }
         | WsCommand::UnpairSessions => {
@@ -5331,7 +5924,56 @@ fn handle_ws_command(
 
 #[cfg(test)]
 mod persist_delta_tests {
-    use super::PersistDelta;
+    use super::{
+        PersistDelta, active_shared_partner, pairing_partner, resolve_shared_file_reference,
+        sanitize_shared_file_name,
+    };
+
+    #[test]
+    fn shared_messages_require_an_active_pairing() {
+        assert!(active_shared_partner(&None).is_err());
+        assert!(active_shared_partner(&Some(String::new())).is_err());
+        assert_eq!(
+            active_shared_partner(&Some("41103-66e4a36b".into())),
+            Ok("41103-66e4a36b")
+        );
+    }
+
+    #[test]
+    fn shared_file_names_cannot_escape_the_receiving_directory() {
+        assert_eq!(sanitize_shared_file_name("../../secret.txt"), "secret.txt");
+        assert_eq!(sanitize_shared_file_name("my image.png"), "my_image.png");
+        assert_eq!(sanitize_shared_file_name(".."), "attachment");
+    }
+
+    #[test]
+    fn both_shared_endpoints_resolve_the_other_as_partner() {
+        assert_eq!(
+            pairing_partner("source", "source", "Source", "target", "Target"),
+            Some(("target", "Target"))
+        );
+        assert_eq!(
+            pairing_partner("target", "source", "Source", "target", "Target"),
+            Some(("source", "Source"))
+        );
+        assert_eq!(
+            pairing_partner("stranger", "source", "Source", "target", "Target"),
+            None
+        );
+    }
+
+    #[test]
+    fn locally_visible_shared_file_uses_its_existing_path() {
+        let path = std::env::temp_dir().join(format!(
+            "immorterm-zero-copy-{}",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"shared once").unwrap();
+        let resolved = resolve_shared_file_reference(path.to_str().unwrap()).unwrap();
+        assert_eq!(resolved, path.canonicalize().unwrap());
+        assert!(resolve_shared_file_reference(path.join("missing").to_str().unwrap()).is_err());
+        let _ = std::fs::remove_file(path);
+    }
 
     // The coalescing crux: a session-id change must survive a burst even when
     // later deltas in the same burst carry only stats (no id). And a newer id
