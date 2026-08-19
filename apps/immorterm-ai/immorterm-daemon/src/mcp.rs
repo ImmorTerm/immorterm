@@ -7,6 +7,9 @@ use std::io::{BufRead, Write};
 use std::sync::{Mutex, OnceLock};
 
 use anyhow::Result;
+use base64::Engine as _;
+use image::codecs::jpeg::JpegEncoder;
+use image::imageops::FilterType;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -420,6 +423,12 @@ const SERVER_NAME: &str = "immorterm";
 const SERVER_VERSION: &str = "0.1.0";
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
+/// Non-configurable ceilings for anything entering an agent's context through
+/// MCP. Browser output must never consume a session by accident.
+const MAX_TOOL_RESULT_BYTES: usize = 128 * 1024;
+const MAX_INLINE_IMAGE_BASE64_BYTES: usize = 96 * 1024;
+const MAX_TEXT_CONTENT_BYTES: usize = 24 * 1024;
+
 /// MCP instructions injected into Claude Code's context on initialize.
 /// Teaches Claude how to use the `im-html` overlay fence in terminal output.
 const MCP_INSTRUCTIONS: &str = r##"You are running inside an ImmorTerm AI terminal with GPU rendering and inline HTML overlays.
@@ -605,6 +614,18 @@ immorterm_open_workshop(session="33770-7693ce05", name="picker",
 # react in the next turn
 immorterm_eval_in_workshop(name="picker", js="root.querySelector('[data-click=hero-2]').style.background='#a6e3a1'")
 ```
+
+## Browser workflow — compact by default
+
+For repeatable product verification, use the repository's Playwright tests first:
+assertions and failure-only traces are more reliable and context-efficient than
+screenshots. Use ImmorTerm's browser tools for exploratory control: read/find the
+page, then act by ref. Open/click/input/key/scroll return compact text and never
+inject screenshots. `immorterm_browser_screenshot` captures nothing by default;
+only `{ "inline": true }` returns one bounded preview, and only when pixel-level
+visual judgment is genuinely necessary. Puppeteer is an acceptable fallback when
+the project already uses it. Use human handoff for login, secrets, permissions,
+payments, or user-browser state.
 "##;
 
 // ─── Session resolution ─────────────────────────────────────────────
@@ -1129,7 +1150,7 @@ fn tool_definitions() -> Vec<Value> {
         // ─── Self-driven browser (CDP over a private pipe, ref-based) ──
         json!({
             "name": "immorterm_browser_open",
-            "description": "Open (or reuse) ImmorTerm's self-driven headless browser and navigate to a URL. Returns a caption plus a CSS-pixel-accurate PNG to the agent, but stays hidden from the user by default. Call immorterm_browser_show only when the user should see the page; sign-in, CAPTCHA, password, payment, and other sensitive intervention must use immorterm_browser_request_human. Only http, https, and about:blank are allowed.",
+            "description": "Open (or reuse) ImmorTerm's self-driven headless browser and navigate to a URL. Returns compact text only and stays hidden from the user by default. Use browser_read_page/browser_find and ref-based actions for exploration; use the project's Playwright tests first for repeatable verification. Call immorterm_browser_show only when the user should see the page; sign-in, CAPTCHA, password, payment, and other sensitive intervention must use immorterm_browser_request_human. Only http, https, and about:blank are allowed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1165,7 +1186,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "immorterm_browser_click",
-            "description": "Click an element. Prefer clicking by handle (ref from read_page/find); coordinates are a fallback. Returns a fresh agent-only screenshot after the page settles. Never click to enter credentials — use browser_request_human for user intervention.",
+            "description": "Click an element. Prefer clicking by handle (ref from read_page/find); coordinates are a fallback. Returns compact text only; use read_page/find for resulting state. Never click to enter credentials — use browser_request_human for user intervention.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1179,7 +1200,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "immorterm_browser_form_input",
-            "description": "Set the value of a text field, checkbox, or dropdown BY HANDLE. This is how you fill forms — including dropdowns and checkboxes a plain click can't set. Returns a fresh agent-only screenshot. Passwords, card numbers, and one-time codes require browser_request_human — never type them here.",
+            "description": "Set the value of a text field, checkbox, or dropdown BY HANDLE. Returns compact text only; use read_page/find for resulting state. Passwords, card numbers, and one-time codes require browser_request_human — never type them here.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1192,7 +1213,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "immorterm_browser_key",
-            "description": "Press a single key in the browser page: Enter, Tab, Escape, Backspace, or ArrowUp/ArrowDown/ArrowLeft/ArrowRight. Returns a screenshot.",
+            "description": "Press a single key in the browser page: Enter, Tab, Escape, Backspace, or ArrowUp/ArrowDown/ArrowLeft/ArrowRight. Returns compact text only.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1204,7 +1225,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "immorterm_browser_scroll",
-            "description": "Scroll the browser page vertically by dy CSS pixels (positive scrolls down). Returns a screenshot.",
+            "description": "Scroll the browser page vertically by dy CSS pixels (positive scrolls down). Returns compact text only.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1216,10 +1237,13 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "immorterm_browser_screenshot",
-            "description": "Take a fresh CSS-pixel-accurate PNG of the current page without doing anything else. Screenshot pixels line up 1:1 with click coordinates, even on Retina displays.",
+            "description": "Screenshot capture is OFF by default. A call without inline=true returns compact guidance and does not issue Page.captureScreenshot. Set inline=true only when pixel-level visual judgment is genuinely necessary; the result is a bounded compressed preview. Use browser_read_page/browser_find for exploration and Playwright tests first for repeatable verification.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "session": { "type": "string", "description": "ImmorTerm session id. Auto-resolves when a single session is active." } },
+                "properties": {
+                    "inline": { "type": "boolean", "description": "Opt in to one bounded inline preview. Defaults to false, which captures and returns no image." },
+                    "session": { "type": "string", "description": "ImmorTerm session id. Auto-resolves when a single session is active." }
+                },
                 "required": []
             }
         }),
@@ -2443,7 +2467,13 @@ fn handle_request(req: &JsonRpcRequest, rt: &tokio::runtime::Runtime) -> JsonRpc
             ..base
         },
 
-        "tools/call" => handle_tool_call(req, base, rt),
+        "tools/call" => {
+            let tool_name = req.params.as_ref()
+                .and_then(|params| params.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            enforce_tool_response_budget(handle_tool_call(req, base, rt), tool_name)
+        }
 
         "ping" => JsonRpcResponse {
             result: Some(json!({})),
@@ -2639,6 +2669,77 @@ fn handle_tool_call(
             ..base
         },
     }
+}
+
+/// Final handler-independent circuit breaker for MCP tool output. Handlers
+/// should remain compact, but future regressions still cannot emit megabytes.
+fn enforce_tool_response_budget(mut response: JsonRpcResponse, tool_name: &str) -> JsonRpcResponse {
+    let mut omitted_images = 0usize;
+    let mut truncated_text_bytes = 0usize;
+    if let Some(content) = response.result.as_mut()
+        .and_then(|result| result.get_mut("content"))
+        .and_then(Value::as_array_mut)
+    {
+        let mut remaining_text = MAX_TEXT_CONTENT_BYTES;
+        let mut bounded = Vec::with_capacity(content.len() + 1);
+        for item in content.drain(..) {
+            match item.get("type").and_then(Value::as_str) {
+                Some("image") => {
+                    let image_bytes = item.get("data").and_then(Value::as_str)
+                        .map(str::len).unwrap_or(0);
+                    if image_bytes <= MAX_INLINE_IMAGE_BASE64_BYTES {
+                        bounded.push(item);
+                    } else {
+                        omitted_images += 1;
+                    }
+                }
+                Some("text") => {
+                    let text = item.get("text").and_then(Value::as_str).unwrap_or("");
+                    let prefix = utf8_prefix(text, text.len().min(remaining_text));
+                    truncated_text_bytes += text.len().saturating_sub(prefix.len());
+                    remaining_text = remaining_text.saturating_sub(prefix.len());
+                    if !prefix.is_empty() {
+                        bounded.push(json!({ "type": "text", "text": prefix }));
+                    }
+                }
+                _ => bounded.push(item),
+            }
+        }
+        if omitted_images > 0 || truncated_text_bytes > 0 {
+            bounded.push(json!({
+                "type": "text",
+                "text": format!("⚠️ ImmorTerm context guard: omitted {omitted_images} oversized image(s) and truncated {truncated_text_bytes} text byte(s). Use browser_read_page/browser_find or narrow the request.")
+            }));
+        }
+        *content = bounded;
+    }
+
+    let serialized_len = serde_json::to_vec(&response)
+        .map(|bytes| bytes.len()).unwrap_or(usize::MAX);
+    if serialized_len > MAX_TOOL_RESULT_BYTES {
+        response.result = Some(json!({
+            "content": [{
+                "type": "text",
+                "text": format!("⚠️ ImmorTerm suppressed the {tool_name} result because its serialized payload was {serialized_len} bytes, above the hard {MAX_TOOL_RESULT_BYTES}-byte agent-context ceiling. Narrow the request or use the Workshop view.")
+            }],
+            "isError": true
+        }));
+        response.error = None;
+    }
+    debug_assert!(serde_json::to_vec(&response)
+        .map(|bytes| bytes.len() <= MAX_TOOL_RESULT_BYTES).unwrap_or(false));
+    response
+}
+
+fn utf8_prefix(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 // ─── Tool implementations ───────────────────────────────────────────
@@ -3389,8 +3490,8 @@ fn handle_screenshot(args: &Value, rt: &tokio::runtime::Runtime) -> Result<Value
     Ok(png_image_content(&png_base64))
 }
 
-/// The one MCP `image` content block shape, shared by every tool that returns
-/// a PNG (screenshot + all browser_* tools) so the wire shape stays in sync.
+/// MCP image content for the terminal screenshot tool. Browser previews use
+/// the bounded PNG/JPEG path below.
 fn png_image_content(png_base64: &str) -> Value {
     json!({ "type": "image", "data": png_base64, "mimeType": "image/png" })
 }
@@ -3503,8 +3604,8 @@ fn is_dead_pipe(msg: &str) -> bool {
         || m.contains("browser exited")
 }
 
-/// Shared body for the screenshot-returning browser tools: perform the action,
-/// take an agent-only screenshot, and return MCP content (caption + image).
+/// Shared body for browser drive tools. Routine actions return compact text;
+/// screenshots require an explicit `inline: true` opt-in and remain bounded.
 /// User presentation is a separate, explicit Browser-workshop path.
 fn handle_browser_shot(
     tool: &str,
@@ -3532,6 +3633,8 @@ fn handle_browser_shot(
     // and a short narration — both emitted to the panel after the closure.
     let mut cursor: Option<(f64, f64, String)> = None;
     let mut narration: Option<String> = None;
+    let requested_screenshot = tool == "immorterm_browser_screenshot";
+    let include_inline_image = wants_inline_browser_screenshot(tool, args);
 
     let (png, title, url, handoff, cursor, narration) =
         with_browser(rt, launch_url, |b| {
@@ -3634,11 +3737,11 @@ fn handle_browser_shot(
                 None
             };
             let (title, url) = b.current_title_url();
-            // Skip the screenshot entirely on handoff (privacy) and while paused.
-            let png = if handoff.is_some() || browser_is_paused() {
-                String::new()
+            // Skip capture on handoff/paused, routine actions, and default calls.
+            let png = if handoff.is_some() || browser_is_paused() || !include_inline_image {
+                None
             } else {
-                b.screenshot()?
+                Some(b.screenshot()?)
             };
             Ok((png, title, url, handoff, cursor, narration))
         })?;
@@ -3668,10 +3771,58 @@ fn handle_browser_shot(
         })]);
     }
 
-    Ok(vec![
-        json!({ "type": "text", "text": format!("🌐 {} — {}", title, url) }),
-        png_image_content(&png),
-    ])
+    let mut content = vec![json!({
+        "type": "text",
+        "text": if include_inline_image {
+            format!("🌐 {title} — {url}")
+        } else if requested_screenshot {
+            format!("🌐 {title} — {url}\nNo screenshot was captured or inserted into agent context. Use browser_read_page/browser_find or Playwright for functional verification. Only call immorterm_browser_screenshot with inline=true when pixel-level visual judgment is genuinely necessary.")
+        } else {
+            format!("🌐 {title} — {url}\nNo screenshot was inserted into agent context. Use browser_read_page or browser_find for compact page state.")
+        },
+    })];
+    if let Some(png) = png {
+        match bounded_screenshot_content(&png) {
+            Ok(image) => content.push(image),
+            Err(error) => content.push(json!({
+                "type": "text",
+                "text": format!("⚠️ ImmorTerm context guard omitted this screenshot: {error}. Use browser_read_page/browser_find or the Workshop view."),
+            })),
+        }
+    }
+    Ok(content)
+}
+
+fn wants_inline_browser_screenshot(tool: &str, args: &Value) -> bool {
+    tool == "immorterm_browser_screenshot"
+        && args.get("inline").and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn bounded_screenshot_content(png_base64: &str) -> Result<Value, String> {
+    if png_base64.len() <= MAX_INLINE_IMAGE_BASE64_BYTES {
+        return Ok(json!({ "type": "image", "data": png_base64, "mimeType": "image/png" }));
+    }
+    let source = base64::engine::general_purpose::STANDARD.decode(png_base64)
+        .map_err(|error| format!("decode screenshot for bounded preview: {error}"))?;
+    let image = image::load_from_memory(&source)
+        .map_err(|error| format!("decode screenshot pixels for bounded preview: {error}"))?;
+    let source_width = image.width().max(1);
+    let source_height = image.height().max(1);
+    const CANDIDATES: &[(u32, u8)] = &[(768, 55), (640, 45), (512, 35), (384, 25)];
+    for (max_width, quality) in CANDIDATES {
+        let width = source_width.min(*max_width);
+        let height = ((source_height as u64 * width as u64) / source_width as u64)
+            .max(1).min(u32::MAX as u64) as u32;
+        let preview = image.resize(width, height, FilterType::Triangle).to_rgb8();
+        let mut encoded = Vec::new();
+        JpegEncoder::new_with_quality(&mut encoded, *quality).encode_image(&preview)
+            .map_err(|error| format!("encode bounded screenshot preview: {error}"))?;
+        let data = base64::engine::general_purpose::STANDARD.encode(encoded);
+        if data.len() <= MAX_INLINE_IMAGE_BASE64_BYTES {
+            return Ok(json!({ "type": "image", "data": data, "mimeType": "image/jpeg" }));
+        }
+    }
+    Err(format!("preview remains above the hard {MAX_INLINE_IMAGE_BASE64_BYTES}-byte inline-image ceiling"))
 }
 
 /// Brief pause after an interaction so the page can react before screenshot.
@@ -6770,6 +6921,55 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("only when presenting something useful to the user"));
+        let screenshot = tools.iter()
+            .find(|tool| tool["name"] == "immorterm_browser_screenshot")
+            .expect("browser_screenshot tool definition");
+        assert_eq!(screenshot["inputSchema"]["properties"]["inline"]["type"], "boolean");
+        assert!(screenshot["description"].as_str().unwrap().contains("OFF by default"));
+        assert!(open_description.contains("Playwright tests first"));
+    }
+
+    #[test]
+    fn browser_screenshot_pixels_require_explicit_opt_in() {
+        assert!(!wants_inline_browser_screenshot("immorterm_browser_screenshot", &json!({})));
+        assert!(!wants_inline_browser_screenshot("immorterm_browser_screenshot", &json!({ "inline": false })));
+        assert!(wants_inline_browser_screenshot("immorterm_browser_screenshot", &json!({ "inline": true })));
+        assert!(!wants_inline_browser_screenshot("immorterm_browser_click", &json!({ "inline": true })));
+    }
+
+    #[test]
+    fn context_guard_omits_oversized_images_and_bounds_utf8_text() {
+        let response = JsonRpcResponse {
+            jsonrpc: "2.0".into(), id: Some(json!(1)), error: None,
+            result: Some(json!({ "content": [
+                { "type": "image", "data": "A".repeat(MAX_INLINE_IMAGE_BASE64_BYTES + 1), "mimeType": "image/png" },
+                { "type": "text", "text": "🦀".repeat(MAX_TEXT_CONTENT_BYTES) }
+            ] })),
+        };
+        let bounded = enforce_tool_response_budget(response, "future_browser_tool");
+        assert!(serde_json::to_vec(&bounded).unwrap().len() <= MAX_TOOL_RESULT_BYTES);
+        let result = bounded.result.unwrap();
+        let content = result["content"].as_array().unwrap();
+        assert!(!content.iter().any(|item| item["type"] == "image"));
+        assert!(content.iter().any(|item| item["text"].as_str()
+            .map(|text| text.contains("context guard")).unwrap_or(false)));
+    }
+
+    #[test]
+    fn large_png_becomes_bounded_jpeg_preview() {
+        use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
+        use std::io::Cursor;
+        let raster = ImageBuffer::from_fn(1024, 768, |x, y| {
+            let n = x.wrapping_mul(1_664_525).wrapping_add(y.wrapping_mul(1_013_904_223));
+            Rgb([(n & 0xff) as u8, ((n >> 8) & 0xff) as u8, ((n >> 16) & 0xff) as u8])
+        });
+        let mut png = Vec::new();
+        DynamicImage::ImageRgb8(raster).write_to(&mut Cursor::new(&mut png), ImageFormat::Png).unwrap();
+        let png = base64::engine::general_purpose::STANDARD.encode(png);
+        assert!(png.len() > MAX_INLINE_IMAGE_BASE64_BYTES);
+        let preview = bounded_screenshot_content(&png).unwrap();
+        assert_eq!(preview["mimeType"], "image/jpeg");
+        assert!(preview["data"].as_str().unwrap().len() <= MAX_INLINE_IMAGE_BASE64_BYTES);
     }
 
     #[test]

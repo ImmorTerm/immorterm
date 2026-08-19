@@ -49,15 +49,19 @@ you know what it can and cannot do:
 
 | Tool | What it does |
 |---|---|
-| `immorterm_browser_open` | Opens (or reuses) the browser and navigates to a URL, returning a screenshot. |
-| `immorterm_browser_screenshot` | Takes a fresh screenshot of the current page. |
-| `immorterm_browser_click` | Clicks at a position on the page, then screenshots the result. |
+| `immorterm_browser_open` | Opens (or reuses) the browser and navigates to a URL, returning compact text. |
+| `immorterm_browser_screenshot` | Captures nothing by default; `inline: true` requests one bounded visual preview. |
+| `immorterm_browser_click` | Clicks by semantic ref (preferred) or position and returns compact text. |
 | `immorterm_browser_type` | Types text into the focused field, optionally pressing Enter to submit. |
 | `immorterm_browser_key` | Presses a single key such as Enter, Tab, Escape, or an arrow key. |
 | `immorterm_browser_scroll` | Scrolls the page up or down. |
-| `immorterm_browser_read` | Reads the page as plain text — cheaper and faster than a screenshot when only the words matter. |
+| `immorterm_browser_read_page` / `find` | Reads compact semantic page state with reusable refs. |
 | `immorterm_browser_eval` | Runs a JavaScript expression in the page and returns the result. |
 | `immorterm_browser_close` | Closes the browser; the next open starts fresh. |
+
+For repeatable product verification, agents should use the repository's
+Playwright tests first. ImmorTerm's browser is the first choice for exploratory
+driving; image previews are sparse, explicit, and reserved for visual judgment.
 
 ## How sign-ins work: you do them
 
