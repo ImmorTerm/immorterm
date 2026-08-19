@@ -37,6 +37,8 @@ jobs:
   publish:
     name: Publish immorterm-memory packages
     runs-on: ubuntu-latest
+    # Bounds a hung job; a binary re-publish is minutes, never hours.
+    timeout-minutes: 15
     permissions:
       contents: read
       id-token: write # npm Trusted Publishing (OIDC)

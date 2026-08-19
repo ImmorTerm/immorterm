@@ -61,6 +61,8 @@ jobs:
   publish:
     name: Publish selected libs
     runs-on: ubuntu-latest
+    # Bounds a hung job; a lib publish is minutes, never hours.
+    timeout-minutes: 15
     permissions:
       contents: read
       id-token: write # npm Trusted Publishing (OIDC)

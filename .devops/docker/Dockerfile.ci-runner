@@ -1,0 +1,40 @@
+# The warm CI runner image for the immorterm scale set on the flam k3s cluster.
+#
+# ci.yml skips apt-get, dtolnay/rust-toolchain and Swatinem's cache whenever
+# it runs on the warm pool (vars.FAST_RUNNER_LABEL) — because everything those
+# steps provide is pre-baked HERE. If you add a system dependency to ci.yml's
+# hosted path, add it here too, or the warm path breaks while hosted stays
+# green.
+#
+# Build + push (from the repo root), then set the image in
+# .devops/k8s/immorterm-runner-values.yaml:
+#   docker build -f .devops/docker/Dockerfile.ci-runner \
+#     -t ghcr.io/immorterm/ci-runner:2.336.0-rust1.93 .devops/docker
+#   docker push ghcr.io/immorterm/ci-runner:2.336.0-rust1.93
+#
+# PINNED, both layers. A floating :latest on the binary that runs CI is a
+# supply-chain hole, and it makes "what changed?" unanswerable during an
+# incident. Bump the runner and the toolchain deliberately, in the tag.
+FROM ghcr.io/actions/actions-runner:2.336.0
+
+USER root
+# libasound2-dev: the Rust engine links ALSA (same package ci.yml installs on
+# hosted runners). The rest are rustup/cargo needs the slim runner image lacks.
+# mold: fast linker. ci.yml sets RUSTFLAGS=-C link-arg=-fuse-ld=mold on the
+# warm path so cargo test / release links go through it. -fuse-ld=mold needs
+# gcc >= 12.1 (this base is Ubuntu 24.04 / gcc 13 — satisfied); if a future
+# base regresses gcc, the link step is where it will fail.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libasound2-dev build-essential pkg-config curl ca-certificates mold \
+    && rm -rf /var/lib/apt/lists/*
+
+USER runner
+# The toolchain matches what dtolnay/rust-toolchain@stable resolves today.
+# CARGO_HOME stays default (~/.cargo) for rustup's own binaries; ci.yml points
+# the job's CARGO_HOME at the persistent /ci-cache/cargo hostPath so the
+# registry survives pods — the toolchain itself lives in this image.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain 1.93.1 \
+        --component clippy --target wasm32-unknown-unknown
+ENV PATH="/home/runner/.cargo/bin:${PATH}"

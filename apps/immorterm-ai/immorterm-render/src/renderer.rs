@@ -501,6 +501,8 @@ pub struct TerminalRenderer {
     pub danger_effects: bool,
     /// Whether per-character text animations (pulse, glow, wave, etc.) are rendered.
     pub text_animations: bool,
+    /// Whether Codex `›` user-prompt rows receive a neutral full-width card.
+    pub codex_prompt_highlight: bool,
     /// Status bar visual reveal factor (0.0 = hidden, 1.0 = fully visible).
     /// Used for smooth fade+slide animation without triggering PTY resize.
     pub status_bar_reveal: f32,
@@ -578,6 +580,7 @@ impl TerminalRenderer {
             celebrations_enabled: true,
             danger_effects: true,
             text_animations: true,
+            codex_prompt_highlight: false,
             status_bar_reveal: 1.0,
             celebration: CelebrationSystem::new(),
             prev_frame_time: 0.0,
@@ -669,6 +672,37 @@ impl TerminalRenderer {
         );
 
         let render_rows = visible_rows;
+
+        // Scan a bounded look-behind so a wrapped prompt that begins just
+        // above the viewport remains highlighted while scrolling through it.
+        let codex_highlighted_rows = if self.codex_prompt_highlight {
+            let viewport_start = sb_len.saturating_sub(scroll_offset);
+            let scan_start = viewport_start.saturating_sub(render_rows);
+            let scan_end = (viewport_start + render_rows).min(sb_len + visible_rows);
+            let scan_rows: Vec<&Row> = (scan_start..scan_end).filter_map(|idx| {
+                if idx < sb_len {
+                    terminal.scrollback.get(idx)
+                } else {
+                    terminal.grid.row(idx - sb_len)
+                }
+            }).collect();
+            immorterm_core::dialect::codex_prompt_highlight_mask(&scan_rows)
+                .into_iter()
+                .enumerate()
+                .filter_map(|(idx, highlighted)| highlighted.then_some(scan_start + idx))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let prompt_bg = {
+            const MIX: f32 = 0.13;
+            [
+                self.theme.bg[0] * (1.0 - MIX) + self.theme.fg[0] * MIX,
+                self.theme.bg[1] * (1.0 - MIX) + self.theme.fg[1] * MIX,
+                self.theme.bg[2] * (1.0 - MIX) + self.theme.fg[2] * MIX,
+                1.0,
+            ]
+        };
 
         // Compute popup rect for cell-skipping (popup occludes terminal content)
         let popup_rect: Option<(usize, usize, usize, usize)> =
@@ -764,6 +798,8 @@ impl TerminalRenderer {
                 opts.selections,
                 opts.pseudo_selections,
                 popup_rect,
+                codex_highlighted_rows.contains(&content_idx),
+                prompt_bg,
                 &terminal.expression_colors,
                 terminal.expression_meta,
                 &terminal.combining_marks,
@@ -2180,6 +2216,8 @@ impl TerminalRenderer {
         selections: &[Selection],
         pseudo_selections: &[Selection],
         popup_rect: Option<(usize, usize, usize, usize)>,
+        codex_prompt_highlight: bool,
+        prompt_bg: [f32; 4],
         expression_colors: &std::collections::HashMap<(usize, usize), [f32; 4]>,
         global_expression: ExpressionMeta,
         combining_marks: &immorterm_core::CombiningMarks,
@@ -2206,6 +2244,15 @@ impl TerminalRenderer {
         // run_covered_scratch) is preserved for future activation via Phase 6 controls.
         self.run_covered_scratch.clear();
         self.run_covered_scratch.resize(visible_cols, false);
+
+        if codex_prompt_highlight {
+            for visual_col in 0..visible_cols {
+                bg_instances.push(BgInstance {
+                    pos: [pad_cell_x + visual_col as f32, pad_cell_y + display_row as f32],
+                    color: prompt_bg,
+                });
+            }
+        }
 
         for (col_idx, cell) in row.cells.iter().enumerate().take(visible_cols) {
             if cell.width == 0 {
