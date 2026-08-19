@@ -5,6 +5,7 @@ pub mod claude_cache;
 pub mod config_api;
 pub mod digest_api;
 pub mod files_api;
+pub mod inbox;
 pub mod legacy;
 pub mod modal_api;
 pub mod plans;
@@ -90,6 +91,11 @@ pub fn api_routes() -> Router {
         .route("/tasks/{id}/link", post(tasks::link_task))
         .route("/tasks/{id}/unlink", post(tasks::unlink_task))
         .route("/tasks/{id}/enrich", post(tasks::enrich_task))
+        // Human Inbox — durable agent-to-human messages and correlated actions.
+        .route("/inbox", get(inbox::list).post(inbox::publish))
+        .route("/inbox/read-all", post(inbox::mark_all_read))
+        .route("/inbox/{id}/read", post(inbox::mark_read))
+        .route("/inbox/{id}/action", post(inbox::act))
         // Authenticated channel-neutral session bridge. Targets are resolved
         // strictly through the canonical project registry.
         .route("/bridge/status", get(bridge::status))
@@ -195,6 +201,15 @@ pub fn api_routes() -> Router {
             "/remotes/{name}/tasks",
             get(remote_api::proxy_remote_tasks_root)
                 .post(remote_api::proxy_remote_tasks_root),
+        )
+        // Remote inbox records remain owned by the remote project hub.
+        .route(
+            "/remotes/{name}/inbox/{*rest}",
+            get(remote_api::proxy_remote_inbox).post(remote_api::proxy_remote_inbox),
+        )
+        .route(
+            "/remotes/{name}/inbox",
+            get(remote_api::proxy_remote_inbox_root).post(remote_api::proxy_remote_inbox_root),
         )
 }
 
