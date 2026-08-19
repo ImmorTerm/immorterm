@@ -88,6 +88,54 @@ pub fn row_is_menu_option(row: &Row, sentinel_col: usize) -> bool {
     false
 }
 
+/// Return a mask for rows that belong to a Codex user-prompt card.
+///
+/// Codex writes submitted prompts and its live composer as ordinary terminal
+/// rows (`› ...`) with default backgrounds. ImmorTerm recreates the native
+/// presentation from the grid structure. A card includes one blank padding
+/// row on either side and any indented/wrapped continuation rows. Numbered
+/// `› 1. ...` menu choices are deliberately excluded.
+pub fn codex_prompt_highlight_mask(rows: &[&Row]) -> Vec<bool> {
+    let mut highlighted = vec![false; rows.len()];
+
+    for (idx, row) in rows.iter().enumerate() {
+        let Some(sentinel_col) = row.cells.iter().position(|cell| {
+            !matches!(cell.grapheme, ' ' | '\0' | '\u{a0}')
+        }) else {
+            continue;
+        };
+        if row.cells[sentinel_col].grapheme != AiDialect::Codex.prompt_sentinel()
+            || row_is_menu_option(row, sentinel_col)
+        {
+            continue;
+        }
+
+        highlighted[idx] = true;
+        if idx > 0 && row_is_blank(rows[idx - 1]) {
+            highlighted[idx - 1] = true;
+        }
+
+        for next_idx in (idx + 1)..rows.len() {
+            let next = rows[next_idx];
+            if row_is_blank(next) {
+                highlighted[next_idx] = true;
+                break;
+            }
+
+            let leading_blanks = next.cells.iter()
+                .take_while(|cell| matches!(cell.grapheme, ' ' | '\0' | '\u{a0}'))
+                .count();
+            if leading_blanks >= 2 || rows[next_idx - 1].wrapped {
+                highlighted[next_idx] = true;
+                continue;
+            }
+            break;
+        }
+    }
+
+    highlighted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +185,27 @@ mod tests {
         assert!(row_is_blank(&row("   ")));
         assert!(row_is_blank(&row("\u{a0}\u{a0}")));
         assert!(!row_is_blank(&row("  x  ")));
+    }
+
+    #[test]
+    fn codex_prompt_cards_include_padding_and_continuations() {
+        let top = row("");
+        let prompt = row("› explain this screenshot");
+        let image = row("  [Image #1]");
+        let bottom = row("");
+        let assistant = row("• I can help");
+        let rows = [&top, &prompt, &image, &bottom, &assistant];
+
+        assert_eq!(codex_prompt_highlight_mask(&rows), vec![true, true, true, true, false]);
+    }
+
+    #[test]
+    fn codex_menu_choices_are_not_prompt_cards() {
+        let top = row("");
+        let choice = row("› 1. Yes, continue");
+        let bottom = row("");
+        let rows = [&top, &choice, &bottom];
+
+        assert_eq!(codex_prompt_highlight_mask(&rows), vec![false; 3]);
     }
 }
