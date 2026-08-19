@@ -22,26 +22,30 @@ pub enum Request {
     /// Get session info
     GetInfo,
     /// Execute a screen command (-X)
-    Execute {
-        command: String,
-        args: Vec<String>,
-    },
+    Execute { command: String, args: Vec<String> },
     /// Query a value (-Q)
-    Query {
-        command: String,
-    },
+    Query { command: String },
     /// Attach to the session (bidirectional relay)
-    Attach {
-        cols: u16,
-        rows: u16,
-    },
+    Attach { cols: u16, rows: u16 },
     /// Detach from the session
     Detach,
     /// Resize the terminal
-    Resize {
-        cols: u16,
-        rows: u16,
+    Resize { cols: u16, rows: u16 },
+    /// Phase 1 of authenticated external delivery. The daemon accepts a
+    /// correlated payload into its own bounded pending map but does not yet
+    /// claim it was shown to the agent.
+    AcceptExternalMessage {
+        message_id: String,
+        correlation_id: String,
+        input: String,
+        agent_receipt: String,
     },
+    /// Phase 2: present a previously accepted message to the active AI input.
+    PresentExternalMessage { message_id: String },
+    /// Return the opaque, message-bound receipt installed by the Hub for an
+    /// external message presented to this exact daemon. The MCP process uses
+    /// it to prove receiving-agent authority without a deployment credential.
+    GetExternalMessageReceipt { message_id: String },
     /// Kill the session
     Kill,
     /// Read the current screen content (viewport + cursor)
@@ -56,10 +60,7 @@ pub enum Request {
     /// Get the last command's exit code (from OSC 133;D)
     GetExitCode,
     /// Wait for a pattern to appear in terminal output
-    WaitFor {
-        pattern: String,
-        timeout_ms: u64,
-    },
+    WaitFor { pattern: String, timeout_ms: u64 },
     /// Get status bar data (project, stats, theme, activity)
     GetStatusBar,
     /// Get Claude Code process info (session ID, PID, stats)
@@ -149,15 +150,12 @@ pub enum Request {
     },
 
     /// Update just the permission mode (from hook or CLI).
-    UpdatePermissionMode {
-        mode: String,
-    },
+    UpdatePermissionMode { mode: String },
 
     /// Get detected subagents for the current Claude session.
     GetSubagents,
 
     // ─── AI Canvas Layer ─────────────────────────────────────────────
-
     /// Draw a filled rectangle with optional border on the AI canvas.
     DrawRect {
         x: f32,
@@ -257,18 +255,13 @@ pub enum Request {
         on_click_inject_context: Option<String>,
     },
     /// Remove a specific AI primitive by ID.
-    RemoveAiPrimitive {
-        id: u32,
-    },
+    RemoveAiPrimitive { id: u32 },
     /// Run a JS snippet inside an existing HTML primitive's Shadow DOM.
     /// Fire-and-forget: daemon broadcasts the snippet to all raw-mode WS
     /// clients; each client finds the card by primitive id and executes the
     /// JS with `root`, `wrapper`, `card`, `prim` in scope (same context as
     /// inline `<script>` blocks in `draw_html`).
-    EvalInPrimitive {
-        id: u32,
-        js: String,
-    },
+    EvalInPrimitive { id: u32, js: String },
     /// Open (or replace) a Workshop — a persistent, full-size webview pane
     /// living next to the terminal. Unlike `DrawHtml` overlays which are
     /// ephemeral and inline, a Workshop survives across response turns and
@@ -318,16 +311,11 @@ pub enum Request {
     /// `card`, `prim` available). The Workshop equivalent of
     /// `EvalInPrimitive` — turn-by-turn surgical mutation without redrawing
     /// the whole pane.
-    EvalInWorkshop {
-        name: String,
-        js: String,
-    },
+    EvalInWorkshop { name: String, js: String },
     /// Tear down a Workshop — removes the sidebar entry, closes the panel,
     /// deletes the persisted HTML file. Returns Ok even if the name was
     /// already absent (idempotent close).
-    CloseWorkshop {
-        name: String,
-    },
+    CloseWorkshop { name: String },
     /// List active Workshops (name + last-modified timestamp + html size).
     /// Used by the AI to discover what's open across turns.
     ListWorkshops,
@@ -338,9 +326,7 @@ pub enum Request {
     /// run inside the webview's Shadow DOM and are NOT reflected here — the
     /// daemon doesn't see them. To capture truly-live state we'd need a
     /// roundtrip to the webview; v1 returns last-full-write state.
-    ReadWorkshop {
-        name: String,
-    },
+    ReadWorkshop { name: String },
     /// Fire-and-forget: a project-scoped Plan changed on disk
     /// (~/.immorterm/plans/<project>/<id>/). The daemon holds no plan state —
     /// it just fans a `plan_changed` envelope out over the workshop broadcast
@@ -409,13 +395,10 @@ pub enum Request {
     GetWebSocketPort,
 
     // ─── Agent Teams ─────────────────────────────────────────────────
-
     /// List all active Claude Code teams (from `~/.claude/teams/`).
     ListTeams,
     /// Get full team state: config, tasks, messages, member statuses.
-    GetTeamState {
-        team_name: String,
-    },
+    GetTeamState { team_name: String },
     /// Send a message to a teammate's inbox.
     SendTeamMessage {
         team_name: String,
@@ -424,9 +407,7 @@ pub enum Request {
     },
 
     /// Send a message to a paired interactive session via the channel inbox.
-    ChannelReply {
-        message: String,
-    },
+    ChannelReply { message: String },
 
     /// Subscribe to AI layer state updates. Returns initial `Subscribed` response,
     /// then streams length-prefixed JSON (`Vec<AiPrimitive>`) whenever the AI canvas
@@ -438,7 +419,6 @@ pub enum Request {
     TakeSnapshot,
 
     // ─── AI Expression Protocol ──────────────────────────────────────
-
     /// Set the AI expression state (confidence, danger, mood, animation, color).
     /// Applied to all subsequent terminal cells until changed or reset.
     SetExpression {
@@ -471,7 +451,6 @@ pub enum Request {
     },
 
     // ─── Audio ────────────────────────────────────────────────────────
-
     /// Play a named sound or custom audio file.
     PlaySound {
         /// Named sound: "chime", "alert", "click", "rumble", "fanfare", "ping", "tick"
@@ -480,9 +459,7 @@ pub enum Request {
         path: Option<String>,
     },
     /// Set audio volume (0-100).
-    SetVolume {
-        volume: u8,
-    },
+    SetVolume { volume: u8 },
     /// Toggle mute state.
     ToggleMute,
 
@@ -491,7 +468,6 @@ pub enum Request {
     // process pumps CDP screencast frames + status through these requests; the
     // daemon just relays them to raw-mode webview clients over `control_tx`,
     // which the browser panel already listens for (`browser_frame` etc).
-
     /// Relay one screencast frame to the webview browser panel.
     BrowserFrame {
         /// Base64 screencast frame (JPEG q75 from envoyage). Field name kept as
@@ -504,9 +480,7 @@ pub enum Request {
         seq: u64,
     },
     /// Relay the AI-driving pause state to the panel.
-    BrowserState {
-        paused: bool,
-    },
+    BrowserState { paused: bool },
     /// Ask the human to take over the browser pane (handoff banner).
     BrowserHumanRequest {
         reason: String,
@@ -515,20 +489,12 @@ pub enum Request {
     },
     /// Glide the panel's "Mort" cursor to where the AI is about to act. Coords
     /// are PAGE CSS pixels; `action` ∈ {move, click, type, scroll}.
-    BrowserCursor {
-        x: f64,
-        y: f64,
-        action: String,
-    },
+    BrowserCursor { x: f64, y: f64, action: String },
     /// Show a short intent balloon in the panel (what the AI is doing now).
-    BrowserNarration {
-        text: String,
-    },
+    BrowserNarration { text: String },
     /// Relay the page's copied selection back to the panel so the webview writes
     /// it to the OS clipboard (response to a human Cmd/Ctrl+C on the frame).
-    BrowserCopy {
-        text: String,
-    },
+    BrowserCopy { text: String },
     /// Drain queued human→browser input the webview forwarded to the daemon
     /// (clicks/keys/scroll/pause). The MCP pump dispatches these to the live
     /// browser. Returns `BrowserInput` and clears the queue.
@@ -726,4 +692,45 @@ pub enum Response {
     BrowserInput {
         events: Vec<BrowserInputEvent>,
     },
+}
+
+#[cfg(test)]
+mod bridge_tests {
+    use super::*;
+
+    #[test]
+    fn external_message_phases_have_stable_wire_shapes() {
+        let accepted = Request::AcceptExternalMessage {
+            message_id: "msg-123".into(),
+            correlation_id: "corr-456".into(),
+            input: "hello".into(),
+            agent_receipt: "imsr_secret".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(accepted).unwrap(),
+            serde_json::json!({
+                "type":"AcceptExternalMessage", "message_id":"msg-123",
+                "correlation_id":"corr-456", "input":"hello",
+                "agent_receipt":"imsr_secret"
+            })
+        );
+        let presented = Request::PresentExternalMessage {
+            message_id: "msg-123".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(presented).unwrap(),
+            serde_json::json!({
+                "type":"PresentExternalMessage", "message_id":"msg-123"
+            })
+        );
+        let receipt = Request::GetExternalMessageReceipt {
+            message_id: "msg-123".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(receipt).unwrap(),
+            serde_json::json!({
+                "type":"GetExternalMessageReceipt", "message_id":"msg-123"
+            })
+        );
+    }
 }

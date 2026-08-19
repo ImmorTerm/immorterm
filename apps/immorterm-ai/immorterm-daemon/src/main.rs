@@ -15,8 +15,7 @@
 mod attach;
 pub mod audio;
 // Browser driver now lives in the `envoyage` crate (envoyage::BrowserSession /
-// envoyage::browser_lock). Only the ImmorTerm-specific canvas mirror stays local.
-pub mod browser_mirror;
+// envoyage::browser_lock). ImmorTerm owns only the opt-in workshop presentation.
 pub mod claude;
 pub mod commands;
 mod daemon;

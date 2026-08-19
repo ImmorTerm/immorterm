@@ -2436,6 +2436,23 @@ body.with-tab-bar #container {
   background: var(--sidebar-border, #313244);
 }
 
+/* Prefix sub-groups within a lane (collapsible) */
+.task-prefix-header {
+  display: flex; align-items: center; gap: 5px;
+  padding: 2px 8px 2px 10px; cursor: pointer;
+  user-select: none;
+}
+.task-prefix-header:hover { background: var(--sidebar-hover, #1e1e2e); }
+.task-prefix-header .tree-caret { font-size: 8px; }
+.task-prefix-label {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.3px;
+  color: var(--sidebar-text, #cdd6f4); opacity: 0.85;
+}
+.task-prefix-count {
+  font-size: 9px; color: var(--sidebar-muted, #a6adc8); opacity: 0.6;
+}
+.task-item-grouped { padding-left: 22px; }  /* indent tasks under a prefix header */
+
 /* Task items */
 .task-item {
   display: flex; align-items: center; gap: 6px;
@@ -2829,6 +2846,7 @@ body.with-tab-bar #container {
 .task-board-item .task-type { flex-shrink: 0; }
 .task-board-item .task-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task-board-item .task-status { flex-shrink: 0; opacity: 0.6; }
+.task-board-item-grouped { padding-left: 22px; }  /* indent under a prefix header */
 .task-board-item .task-time { flex-shrink: 0; font-size: 10px; color: var(--sidebar-muted, #a6adc8); }
 .task-board-item .task-link { flex-shrink: 0; font-size: 11px; opacity: 0.7; }
 .task-board-time { flex-shrink: 0; font-size: 10px; opacity: 0.5; color: var(--sidebar-muted, #a6adc8); }

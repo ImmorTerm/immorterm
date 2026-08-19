@@ -58,7 +58,7 @@ rodio = { workspace = true }
 # The extracted browser driver (renamed rudder → envoyage). Git dep against the
 # Envoyage-Browsing home. Fall back to a path dep (`envoyage = { path =
 # "../../../../envoyage" }`) if git auth becomes a bottleneck for local builds.
-envoyage = { git = "https://github.com/Envoyage-Browsing/envoyage" }
+envoyage = { git = "https://github.com/Envoyage-Browsing/envoyage", rev = "b335cf3e483ec2950f60ba8078aa0cd1783b10c3" }
 
 # macOS-only AppKit/Foundation bindings — used by `websocket.rs::read_clipboard_file_url`
 # to read NSPasteboard `public.file-url` entries (Finder Cmd+C → POSIX path).

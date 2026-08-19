@@ -175,6 +175,15 @@ export async function restoreTerminals(
 
   logger.info(`Restoring ${terminals.length} terminals sequentially...`);
 
+  // Per-terminal timings. Restore latency is the thing users actually feel on
+  // a multi-window restart, and it was being optimized by guesswork — this
+  // reports where the wall-clock really goes (spawn cost vs. the deliberate
+  // inter-terminal delay) so the slow phase can be identified rather than
+  // assumed.
+  const restoreStart = Date.now();
+  let spawnTotal = 0;
+  let slowest = { name: '', ms: 0 };
+
   const details: RestorationDetail[] = [];
   for (let i = 0; i < terminals.length; i++) {
     const terminalState = terminals[i];
@@ -184,6 +193,7 @@ export async function restoreTerminals(
       await delay(INTER_TERMINAL_DELAY);
     }
 
+    const spawnStart = Date.now();
     try {
       const detail = await restoreSingleTerminal(
         manager,
@@ -202,6 +212,13 @@ export async function restoreTerminals(
         reason: error instanceof Error ? error.message : String(error),
       });
     }
+
+    const spawnMs = Date.now() - spawnStart;
+    spawnTotal += spawnMs;
+    if (spawnMs > slowest.ms) slowest = { name: terminalState.name, ms: spawnMs };
+    logger.debug(
+      `  restore[${i + 1}/${terminals.length}] "${terminalState.name}" spawn=${spawnMs}ms`
+    );
   }
 
   // Aggregate results
@@ -220,9 +237,17 @@ export async function restoreTerminals(
     }
   }
 
+  const totalMs = Date.now() - restoreStart;
+  const delayMs = Math.max(0, terminals.length - 1) * INTER_TERMINAL_DELAY;
   logger.info(
     `Terminal restoration complete: ${result.restored} restored, ` +
     `${result.failed} failed, ${result.skipped} skipped`
+  );
+  logger.info(
+    `Restore timing: total=${totalMs}ms for ${terminals.length} terminals ` +
+    `(spawn=${spawnTotal}ms, inter-terminal delay=${delayMs}ms, ` +
+    `avg=${Math.round(totalMs / Math.max(1, terminals.length))}ms/terminal, ` +
+    `slowest="${slowest.name}" ${slowest.ms}ms)`
   );
 
   // Show the terminal panel if any terminals were restored

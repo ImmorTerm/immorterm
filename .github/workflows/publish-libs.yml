@@ -1,4 +1,4 @@
-# Publish the @immorterm/* shared libraries to npm.
+# Publish the @immorterm/* shared libraries and SDK packages to npm.
 #
 # Manually dispatched with per-lib checkboxes. Uses npm Trusted Publishing
 # (OIDC) — no NPM_TOKEN.
@@ -12,7 +12,7 @@
 # translated to real semver ranges by `bun pm pack`. Libs are published in
 # dependency order (leaves first) so dependents are installable immediately.
 
-name: Publish Libs
+name: Publish Packages
 
 on:
   workflow_dispatch:
@@ -47,6 +47,10 @@ on:
         default: false
       publish_ui:
         description: "@immorterm/ui (deps: menu-data, tier-config)"
+        type: boolean
+        default: false
+      publish_session_bridge:
+        description: "@immorterm/session-bridge"
         type: boolean
         default: false
 
@@ -87,6 +91,7 @@ jobs:
           PUBLISH_MENU_DATA: ${{ inputs.publish_menu_data }}
           PUBLISH_SERVICES: ${{ inputs.publish_services }}
           PUBLISH_UI: ${{ inputs.publish_ui }}
+          PUBLISH_SESSION_BRIDGE: ${{ inputs.publish_session_bridge }}
         run: |
           set -euo pipefail
 
@@ -101,15 +106,16 @@ jobs:
           [ "$PUBLISH_SERVICES" = "true" ]      && LIBS="$LIBS services"
           [ "$PUBLISH_UI" = "true" ]            && LIBS="$LIBS ui"
 
-          if [ -z "$LIBS" ]; then
-            echo "No libs selected — nothing to do."
+          if [ -z "$LIBS" ] && [ "$PUBLISH_SESSION_BRIDGE" != "true" ]; then
+            echo "No packages selected — nothing to do."
             exit 0
           fi
 
-          echo "## Published Libs" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Package | Version |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|---------|---------|" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' \
+            "## Published Packages" \
+            "" \
+            "| Package | Version |" \
+            "|---------|---------|" >> "$GITHUB_STEP_SUMMARY"
 
           for LIB in $LIBS; do
             echo "── Publishing @immorterm/$LIB ──"
@@ -128,3 +134,21 @@ jobs:
             rm -f "$TARBALL"
             cd "$GITHUB_WORKSPACE"
           done
+
+          if [ "$PUBLISH_SESSION_BRIDGE" = "true" ]; then
+            echo "── Publishing @immorterm/session-bridge ──"
+            cd "packages/session-bridge"
+
+            bun run test
+            bun run build
+            bun pm pack
+            TARBALL=$(ls immorterm-session-bridge-*.tgz)
+
+            npx -y npm@latest publish "$TARBALL" --provenance --access public
+
+            VERSION=$(jq -r .version package.json)
+            echo "| @immorterm/session-bridge | $VERSION |" >> "$GITHUB_STEP_SUMMARY"
+
+            rm -f "$TARBALL"
+            cd "$GITHUB_WORKSPACE"
+          fi

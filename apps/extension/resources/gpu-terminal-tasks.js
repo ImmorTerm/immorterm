@@ -110,6 +110,52 @@ export function createTasksPanel({ taskListEl, tasksHeaderEl, postMessage, onDra
   let _taskDragState = null;
   let _dragJustEnded = false;
 
+  // ── Prefix grouping (shared by sidebar + board) ──────────────
+  // Collapse state is keyed by prefix string ONLY (not lane), so collapsing
+  // `imm` hides it in every lane and in the board modal — one source of truth.
+  const _collapsedPrefixes = new Set();
+
+  // Parse the leading `[prefix …]` token from a title → prefix word, else null.
+  // `[imm #15] Polish` → 'imm'; `[codex-agent #3] …` → 'codex-agent'; plain
+  // titles → null (rendered flat, no sub-header).
+  function taskPrefix(task) {
+    const m = /^\[([a-z0-9][\w-]*)/i.exec((task.title || '').trim());
+    return m ? m[1] : null;
+  }
+
+  // Split a lane's tasks into ordered prefix groups + ungrouped remainder,
+  // preserving first-seen order (already recency-sorted by the caller).
+  function groupByPrefix(tasks) {
+    const order = [];
+    const map = new Map();
+    const ungrouped = [];
+    for (const t of tasks) {
+      const p = taskPrefix(t);
+      if (p === null) { ungrouped.push(t); continue; }
+      if (!map.has(p)) { map.set(p, []); order.push(p); }
+      map.get(p).push(t);
+    }
+    return { groups: order.map(p => ({ prefix: p, tasks: map.get(p) })), ungrouped };
+  }
+
+  // Collapsible sub-header: caret ▸/▾ + prefix + count. Reuses the Spaces N2
+  // `.tree-caret` glyph/interaction for a consistent disclosure look. onToggle
+  // is the caller's re-render (render() for the sidebar, renderBoard for the modal).
+  function buildPrefixHeader(prefix, count, collapsed, onToggle) {
+    const header = el('div', 'task-prefix-header' + (collapsed ? ' collapsed' : ''));
+    const caret = el('span', 'tree-caret ' + (collapsed ? 'collapsed' : 'expanded'),
+      collapsed ? '▸' : '▾');
+    header.appendChild(caret);
+    header.appendChild(el('span', 'task-prefix-label', prefix));
+    header.appendChild(el('span', 'task-prefix-count', String(count)));
+    header.addEventListener('click', () => {
+      if (_collapsedPrefixes.has(prefix)) _collapsedPrefixes.delete(prefix);
+      else _collapsedPrefixes.add(prefix);
+      onToggle();
+    });
+    return header;
+  }
+
   // ── Rendering ────────────────────────────────────────────────
 
   function render() {
@@ -159,10 +205,24 @@ export function createTasksPanel({ taskListEl, tasksHeaderEl, postMessage, onDra
 
       if (tasks.length === 0) continue;
 
-      for (const task of tasks) {
+      const { groups, ungrouped } = groupByPrefix(tasks);
+      // Ungrouped (no prefix) render flat, above the prefix groups.
+      for (const task of ungrouped) {
         const item = buildTaskItem(task);
         item.dataset.lane = lane;
         taskListEl.appendChild(item);
+      }
+      // Prefix groups: each under a collapsible sub-header.
+      for (const g of groups) {
+        const collapsed = _collapsedPrefixes.has(g.prefix);
+        taskListEl.appendChild(buildPrefixHeader(g.prefix, g.tasks.length, collapsed, render));
+        if (collapsed) continue;
+        for (const task of g.tasks) {
+          const item = buildTaskItem(task);
+          item.dataset.lane = lane;
+          item.classList.add('task-item-grouped');
+          taskListEl.appendChild(item);
+        }
       }
     }
   }
@@ -910,7 +970,18 @@ export function createTasksPanel({ taskListEl, tasksHeaderEl, postMessage, onDra
             const empty = el('div', 'task-board-lane-empty', 'No tasks');
             section.appendChild(empty);
           } else {
-            for (const task of byLane[l]) section.appendChild(buildBoardItem(task));
+            const { groups, ungrouped } = groupByPrefix(byLane[l]);
+            for (const task of ungrouped) section.appendChild(buildBoardItem(task));
+            for (const g of groups) {
+              const collapsed = _collapsedPrefixes.has(g.prefix);
+              section.appendChild(buildPrefixHeader(g.prefix, g.tasks.length, collapsed, () => renderBoard(mode)));
+              if (collapsed) continue;
+              for (const task of g.tasks) {
+                const bi = buildBoardItem(task);
+                bi.classList.add('task-board-item-grouped');
+                section.appendChild(bi);
+              }
+            }
           }
           body.appendChild(section);
         }

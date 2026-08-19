@@ -45,6 +45,7 @@ jobs:
       crate_render: ${{ steps.filter.outputs.crate_render }}
       crate_daemon: ${{ steps.filter.outputs.crate_daemon }}
       crate_wasm: ${{ steps.filter.outputs.crate_wasm }}
+      crate_hub: ${{ steps.filter.outputs.crate_hub }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -73,6 +74,8 @@ jobs:
               - 'libs/structured-logs/**'
             crate_wasm:
               - 'apps/immorterm-ai/immorterm-wasm/**'
+            crate_hub:
+              - 'services/hub/**'
             typescript:
               - 'apps/extension/**'
               - 'apps/immorterm/**'
@@ -235,18 +238,21 @@ jobs:
           RENDER: ${{ needs.changes.outputs.crate_render }}
           DAEMON: ${{ needs.changes.outputs.crate_daemon }}
           WASM: ${{ needs.changes.outputs.crate_wasm }}
+          HUB: ${{ needs.changes.outputs.crate_hub }}
         run: |
           set -euo pipefail
-          core=0; render=0; daemon=0; wasm=0
-          [ "$BROAD"  = "true" ] && { core=1; render=1; daemon=1; wasm=1; }
+          core=0; render=0; daemon=0; wasm=0; hub=0
+          [ "$BROAD"  = "true" ] && { core=1; render=1; daemon=1; wasm=1; hub=1; }
           [ "$CORE"   = "true" ] && { core=1; render=1; daemon=1; wasm=1; }
           [ "$RENDER" = "true" ] && { render=1; daemon=1; wasm=1; }
           [ "$DAEMON" = "true" ] && daemon=1
           [ "$WASM"   = "true" ] && wasm=1
+          [ "$HUB"    = "true" ] && hub=1
           clippy=""; test=""
           [ "$core"   = 1 ] && { clippy="$clippy -p immorterm-core";   test="$test -p immorterm-core"; }
           [ "$render" = 1 ] && { clippy="$clippy -p immorterm-render"; test="$test -p immorterm-render"; }
           [ "$daemon" = 1 ] && clippy="$clippy -p immorterm-daemon"
+          [ "$hub"    = 1 ] && { clippy="$clippy -p immorterm-hub"; test="$test -p immorterm-hub"; }
           {
             echo "NATIVE_CLIPPY_ARGS=$clippy"
             echo "NATIVE_TEST_ARGS=$test"
@@ -258,7 +264,7 @@ jobs:
             echo "affected: native-clippy='$clippy' native-test='$test' wasm=$wasm"
           fi
 
-      - name: Check + clippy (native crates)
+      - name: Check + clippy (affected native crates)
         if: env.NATIVE_CLIPPY_ARGS != ''
         run: |
           # word-splitting the -p flags is deliberate — the args are a fixed
@@ -270,7 +276,7 @@ jobs:
         if: env.WASM_AFFECTED == '1'
         run: cargo clippy -p immorterm-wasm --target wasm32-unknown-unknown -- -D warnings
 
-      - name: Test (core + render)
+      - name: Test (affected native crates)
         if: env.NATIVE_TEST_ARGS != ''
         run: |
           # shellcheck disable=SC2086

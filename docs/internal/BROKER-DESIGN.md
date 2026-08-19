@@ -223,14 +223,14 @@ request/response bodies live in `docs/browser-tools.md`; summary:
 
 | Tool | Request | Returns |
 |---|---|---|
-| `immorterm_browser_open` | `{url}` (scheme-allowlisted) | text caption + PNG |
+| `immorterm_browser_open` | `{url}` (scheme-allowlisted) | compact text |
 | `immorterm_browser_read_page` | `{interactive_only?}` | AX-tree text listing, untrusted-framed |
 | `immorterm_browser_find` | `{query}` | ranked `[ref_N] role "name"` list, untrusted-framed |
-| `immorterm_browser_click` | `{ref}` **or** `{x,y}` (CSS px) | text caption + PNG |
-| `immorterm_browser_form_input` | `{ref, value}` | text caption + PNG |
-| `immorterm_browser_key` | `{key}` (Enter/Tab/Escape/Backspace/Arrows) | text caption + PNG |
-| `immorterm_browser_scroll` | `{dy}` (CSS px) | text caption + PNG |
-| `immorterm_browser_screenshot` | `{}` | text caption + PNG |
+| `immorterm_browser_click` | `{ref}` **or** `{x,y}` (CSS px) | compact text |
+| `immorterm_browser_form_input` | `{ref, value}` | compact text |
+| `immorterm_browser_key` | `{key}` (Enter/Tab/Escape/Backspace/Arrows) | compact text |
+| `immorterm_browser_scroll` | `{dy}` (CSS px) | compact text |
+| `immorterm_browser_screenshot` | `{inline?: false}` | no capture by default; bounded preview only with `inline: true` |
 | `immorterm_browser_close` | `{}` | short text |
 | `immorterm_browser_eval` | `{js}` — **gated** `IMMORTERM_BROWSER_EVAL=1` | text |
 

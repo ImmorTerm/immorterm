@@ -11,7 +11,7 @@ GitHub releases / npm / Marketplace / brew state on 2026-07-07.
 | Memory binary | GitHub Releases (`memory-prod-*` tarballs) | No | `immorterm upgrade memory` | CI: `promote-memory` job in `20-promote-prod.yml` |
 | Terminal binary (C) | **RETIRED** (see below) | — | — (command removed) | Nobody — apps/terminal deleted 2026-07 |
 | AI daemon (`immorterm-ai`) | GitHub Releases (`ai-prod-*`) — coded, never published | Install-if-missing only | none (`immorterm upgrade ai` says "not yet distributable") | CI: `promote-immorterm-ai` — never run |
-| Hub (`immorterm-hub`) | Bundled inside the Tauri app | Rides the app updater | none (no independent channel by design) | CI: built as Tauri sidecar in `01-build.yml` |
+| Hub (`immorterm-hub`) | Tauri sidecar + GHCR `immorterm-hub` image | Desktop rides the app updater; servers pin an image digest | pull the reviewed `main-<sha>` image | CI: Tauri build + `publish-hub-image.yml` |
 | VS Code extension | Marketplace `immorterm.immorterm-terminal` (1.0.3 live) | Yes — VS Code built-in auto-update | automatic | CI: `promote-extension` (green since 2026-07-07) |
 | Tauri desktop app | tauri-plugin-updater ← `latest.json` on GitHub release | Yes (check 2s post-boot, banner → install → relaunch) | none needed | CI: `promote-tauri-app` — never run |
 | MCP Gateway | npm `immorterm-mcp-gateway` (0.1.3 live, Trusted Publishing) | Yes (extension 6h poll); CLI users: manual npm | automatic via extension | CI: `promote-gateway` lane (added 2026-07-08; `files:[dist]` fix) |
@@ -62,8 +62,11 @@ only the pid-file pid — the pattern all tooling must follow).
 
 ### Hub (`immorterm-hub`)
 
-Bundled as a Tauri `externalBin` sidecar; a new app bundle ships a new hub. No independent
-channel and none needed — but it inherits the Tauri chain's state (never published).
+Desktop installs receive the Hub as a Tauri `externalBin` sidecar. SaaS and private-network hosts
+receive the same Hub as `ghcr.io/immorterm/immorterm-hub`. Every main build publishes a moving
+`main` tag and an immutable `main-<full-commit-sha>` tag with provenance and an SBOM. Deployments pin
+the resulting image digest. The server image is publicly readable because it contains no
+credential or customer data; every Session Bridge operation still requires its scoped credential.
 
 ### VS Code extension
 

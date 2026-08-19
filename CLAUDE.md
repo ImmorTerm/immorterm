@@ -65,7 +65,7 @@ cd apps/immorterm-app/src-tauri && cargo check
 
 6. **DRY** — look for shared utilities in `libs/` before writing new ones. If something exists a few files away, reuse it.
 
-6a. **Browsing** — use the `immorterm_browser_*` tools (native, rendered live in the terminal workshop, no extension, works over SSH). Prefer them over claude-in-chrome (needs a Chrome extension) and puppeteer (headless, invisible).
+6a. **Browsing** — use repository Playwright tests first for repeatable product verification. Use `immorterm_browser_*` for compact exploratory driving via read/find + refs; actions are text-only and screenshots require explicit `inline: true` for genuinely visual judgment. Use Puppeteer when the repository already standardizes on it. Reserve visible/user-browser handoff for login, secrets, permissions, payments, or user intervention.
 
 7. **Memory identity is three orthogonal dimensions.** Every memory row carries:
    - **`user_id` = WHO** (the human) — resolved from `~/.immorterm/identity.json` → `IMMORTERM_USER_ID` → global git email → `$USER@$HOSTNAME`. Per-repo git email is ignored. Never `$USER` bare, never `"default"`.
