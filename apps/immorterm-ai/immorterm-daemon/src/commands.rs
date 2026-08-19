@@ -382,17 +382,14 @@ pub fn session_auto(args: &[String]) -> Result<()> {
         let _ = execute_in_session(&session_name, &["title".into(), display_name.clone()]);
 
         // Auto-resume via the vendor-neutral `immorterm recall` CLI.
-        // When IMMORTERM_CLAUDE_SESSION_ID is set (extension passed the prior
-        // Claude UUID from registry/session.json/claude-env), stuff `<bin> recall`
+        // When a restore session id is set, stuff `<bin> recall`
         // into the new session. Full path to this daemon binary is used because
         // /usr/local/bin/immorterm is the unrelated C fork. The recall CLI
         // handles the 3-tier cascade: claude --resume if jsonl is present,
         // /immorterm:recall skill if the jsonl is gone, or fresh claude.
         // See docs/restore-and-logs.md.
-        if let Ok(claude_id) = std::env::var("IMMORTERM_CLAUDE_SESSION_ID")
-            && !claude_id.is_empty()
-        {
-            tracing::info!("Auto-resuming via immorterm recall (claude session: {})", claude_id);
+        if let Some(session_id) = crate::registry::restore_session_id_from_env() {
+            tracing::info!("Auto-resuming via immorterm recall (agent session: {})", session_id);
             let bin = std::env::current_exe()
                 .ok()
                 .and_then(|p| p.into_os_string().into_string().ok())
@@ -536,9 +533,7 @@ fn clear_viewport_before_handoff() {
 }
 
 fn resolve_claude_uuid_for_recall(window_id: &str) -> Option<String> {
-    if let Ok(v) = std::env::var("IMMORTERM_CLAUDE_SESSION_ID")
-        && !v.is_empty()
-    {
+    if let Some(v) = crate::registry::restore_session_id_from_env() {
         return Some(v);
     }
 
@@ -680,6 +675,9 @@ fn which_agent(bin: &str) -> Option<PathBuf> {
 /// Absent means the window predates that announce, and back then Claude was
 /// the only thing registered — so Claude is the right assumption.
 fn registry_tool_for(window_id: &str) -> Option<String> {
+    if let Some(tool) = crate::registry::restore_tool_from_env() {
+        return Some(tool);
+    }
     let registry = crate::registry::Registry::load();
     registry
         .sessions

@@ -782,9 +782,7 @@ fn run_daemon(
     // Seed had_ai_session from the boot-time UUID env var so restored
     // sessions know they had AI before, even before the periodic scan
     // re-detects a (newly-launched) Claude process tree.
-    let restored_claude_uuid = std::env::var("IMMORTERM_CLAUDE_SESSION_ID")
-        .ok()
-        .filter(|s| !s.is_empty());
+    let restored_claude_uuid = crate::registry::restore_session_id_from_env();
     let mut claude_tracker = crate::claude::ClaudeTracker::new(&window_id);
     if restored_claude_uuid.is_some() {
         claude_tracker.had_ai_session = true;

@@ -2493,6 +2493,18 @@ export async function activate(
 ): Promise<void> {
   logger.info('ImmorTerm extension activating...');
 
+  // Migration safety: old VSIX installs used the lonormaly publisher. If a
+  // machine has both packages, each extension host otherwise races to register
+  // the same view/commands and to respawn the same persisted terminals. A
+  // legacy build carrying this guard becomes inert whenever the official
+  // package is installed; the official package remains the sole owner.
+  const runningExtensionId = context.extension?.id?.toLowerCase();
+  if (runningExtensionId?.startsWith('lonormaly.')
+    && vscode.extensions.getExtension('immorterm.immorterm-terminal')) {
+    logger.warn('Legacy lonormaly ImmorTerm extension disabled because the official ImmorTerm extension is installed.');
+    return;
+  }
+
   // Spawn the hub sidecar early — webview HTTP fetches (/api/v1/config,
   // /api/v1/digest/test, etc.) all need a hub on localhost:1440. The
   // standalone Tauri app does this via src-tauri/hub_sidecar.rs; VS Code

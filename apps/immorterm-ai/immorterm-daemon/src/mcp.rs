@@ -7,6 +7,9 @@ use std::io::{BufRead, Write};
 use std::sync::{Mutex, OnceLock};
 
 use anyhow::Result;
+use base64::Engine as _;
+use image::codecs::jpeg::JpegEncoder;
+use image::imageops::FilterType;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -23,13 +26,6 @@ static BROWSER: OnceLock<Mutex<Option<BrowserSession>>> = OnceLock::new();
 fn browser_slot() -> &'static Mutex<Option<BrowserSession>> {
     BROWSER.get_or_init(|| Mutex::new(None))
 }
-
-/// Id of the last AI-canvas primitive we mirrored the browser screenshot into,
-/// so the next mirror replaces it instead of stacking. Re-homed here (consumer
-/// side) when the browser driver moved to `envoyage` — envoyage's `BrowserSession`
-/// no longer carries this ImmorTerm-only field. Lives parallel to `BROWSER`;
-/// both are process-global (one browser per MCP process).
-static LAST_MIRROR_PRIM_ID: Mutex<Option<u32>> = Mutex::new(None);
 
 /// True once the screencast pump thread has been spawned. The pump lives for
 /// the MCP process lifetime (one browser per process); it idles cheaply when no
@@ -50,14 +46,14 @@ pub fn browser_is_paused() -> bool {
     BROWSER_PAUSED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Set when the human closes (✕) the panel: the pump stops the screencast and
-/// skips frame encoding/push (the expensive part) until any fresh browser
-/// activity — a human input event or a browser tool call — clears it. The
-/// BrowserSession stays alive (minimize/close never kills the tab).
-static BROWSER_CLOSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Presentation is opt-in. Agent browser work stays headless and invisible until
+/// the agent explicitly calls `browser_show` or requests human intervention.
+/// Closing the Browser workshop hides the stream without killing the browser.
+static BROWSER_VISIBLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
-fn browser_reopen() {
-    BROWSER_CLOSED.store(false, std::sync::atomic::Ordering::Relaxed);
+fn browser_is_visible() -> bool {
+    BROWSER_VISIBLE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Reap the browser after this long with no AI tool call and no human panel
@@ -111,6 +107,7 @@ fn teardown_browser(guard: &mut Option<BrowserSession>) -> Option<u32> {
     let pid = session.pid();
     drop(session); // Drop → close() stops the screencast + kills the exact PID.
     BROWSER_PAUSED.store(false, std::sync::atomic::Ordering::Relaxed);
+    BROWSER_VISIBLE.store(false, std::sync::atomic::Ordering::Relaxed);
     // Release the ownership lock only if it is ours (don't clobber a lock
     // another live session took over).
     if envoyage::browser_lock::read()
@@ -133,9 +130,6 @@ const PUMP_TICK: std::time::Duration = std::time::Duration::from_millis(16);
 /// lock only for the brief poll each tick, so tool calls interleave freely.
 fn ensure_browser_pump(session: String) {
     use std::sync::atomic::Ordering;
-    // A browser tool call means the AI is driving — reopen a human-closed panel
-    // so frames resume even when the pump is already running.
-    browser_reopen();
     if BROWSER_PUMP_STARTED.swap(true, Ordering::SeqCst) {
         return; // already running
     }
@@ -195,9 +189,9 @@ fn browser_pump_loop(session: String) {
                     copied = Some(text);
                 }
             }
-            // Panel closed by the human: stop encoding frames (the costly part)
-            // and idle. The tab stays alive; reopens on the next activity.
-            if BROWSER_CLOSED.load(std::sync::atomic::Ordering::Relaxed) {
+            // Hidden by default (or closed by the human): stop encoding frames
+            // and idle. The browser stays alive for headless agent work.
+            if !browser_is_visible() {
                 b.stop_screencast();
                 continue;
             }
@@ -251,10 +245,10 @@ fn dispatch_browser_input(
     ev: crate::ipc::BrowserInputEvent,
 ) -> Option<String> {
     use crate::ipc::BrowserInputEvent as E;
-    // Any human input other than an explicit "close" reopens a closed panel so
-    // frames resume streaming.
+    // Any human input other than an explicit "close" keeps the visible panel
+    // active. Input cannot arrive before a panel has been presented.
     if !matches!(&ev, E::Control { action } if action == "close") {
-        browser_reopen();
+        BROWSER_VISIBLE.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     match ev {
         E::Click { x, y } => {
@@ -293,13 +287,20 @@ fn dispatch_browser_input(
 }
 
 /// Apply a panel control action. "pause"/"continue" toggle the paused flag;
-/// "close" stops the screencast (panel ✕) via the pump's BROWSER_CLOSED gate,
-/// leaving the tab alive. Anything else resumes.
+/// "close" hides the screencast workshop while leaving the browser alive.
+/// Anything else resumes.
 fn apply_browser_control(action: &str) {
     match action {
-        "close" => BROWSER_CLOSED.store(true, std::sync::atomic::Ordering::Relaxed),
+        "close" => BROWSER_VISIBLE.store(false, std::sync::atomic::Ordering::Relaxed),
         _ => BROWSER_PAUSED.store(action == "pause", std::sync::atomic::Ordering::Relaxed),
     }
+}
+
+/// Reveal the single Browser workshop and start its live stream. Normal browser
+/// tools never call this; presentation is explicit or caused by human handoff.
+fn show_browser_panel(session: String) {
+    BROWSER_VISIBLE.store(true, std::sync::atomic::Ordering::Relaxed);
+    ensure_browser_pump(session);
 }
 
 /// Emit a "Mort" cursor move to the panel (fire-and-forget). Coords are PAGE
@@ -358,6 +359,7 @@ fn hand_off_to_human(
     // Banner the panel (fire-and-forget — the human sees the live screencast
     // regardless; a missing session just means no panel to banner).
     if let Ok(session) = resolve_session(args) {
+        show_browser_panel(session.clone());
         let _ = raw_ipc_query(
             &session,
             Request::BrowserHumanRequest {
@@ -420,6 +422,12 @@ struct JsonRpcError {
 const SERVER_NAME: &str = "immorterm";
 const SERVER_VERSION: &str = "0.1.0";
 const PROTOCOL_VERSION: &str = "2024-11-05";
+
+/// Non-configurable ceilings for anything entering an agent's context through
+/// MCP. Browser output must never consume a session by accident.
+const MAX_TOOL_RESULT_BYTES: usize = 128 * 1024;
+const MAX_INLINE_IMAGE_BASE64_BYTES: usize = 96 * 1024;
+const MAX_TEXT_CONTENT_BYTES: usize = 24 * 1024;
 
 /// MCP instructions injected into Claude Code's context on initialize.
 /// Teaches Claude how to use the `im-html` overlay fence in terminal output.
@@ -606,6 +614,18 @@ immorterm_open_workshop(session="33770-7693ce05", name="picker",
 # react in the next turn
 immorterm_eval_in_workshop(name="picker", js="root.querySelector('[data-click=hero-2]').style.background='#a6e3a1'")
 ```
+
+## Browser workflow — compact by default
+
+For repeatable product verification, use the repository's Playwright tests first:
+assertions and failure-only traces are more reliable and context-efficient than
+screenshots. Use ImmorTerm's browser tools for exploratory control: read/find the
+page, then act by ref. Open/click/input/key/scroll return compact text and never
+inject screenshots. `immorterm_browser_screenshot` captures nothing by default;
+only `{ "inline": true }` returns one bounded preview, and only when pixel-level
+visual judgment is genuinely necessary. Puppeteer is an acceptable fallback when
+the project already uses it. Use human handoff for login, secrets, permissions,
+payments, or user-browser state.
 "##;
 
 // ─── Session resolution ─────────────────────────────────────────────
@@ -1130,12 +1150,12 @@ fn tool_definitions() -> Vec<Value> {
         // ─── Self-driven browser (CDP over a private pipe, ref-based) ──
         json!({
             "name": "immorterm_browser_open",
-            "description": "Open (or reuse) ImmorTerm's self-driven browser and navigate to a URL. Returns a caption plus a CSS-pixel-accurate PNG. The window is REAL and VISIBLE on the user's screen with a persistent profile — the USER signs in and enters any credentials themselves in that window. Only http, https, and about:blank are allowed. NEVER type passwords, payment info, or other secrets via these tools — ask the user to enter those in the visible window.",
+            "description": "Open (or reuse) ImmorTerm's self-driven headless browser and navigate to a URL. Returns compact text only and stays hidden from the user by default. Use browser_read_page/browser_find and ref-based actions for exploration; use the project's Playwright tests first for repeatable verification. Call immorterm_browser_show only when the user should see the page; sign-in, CAPTCHA, password, payment, and other sensitive intervention must use immorterm_browser_request_human. Only http, https, and about:blank are allowed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "url": { "type": "string", "description": "URL to open. Must start with http:// or https://, or be about:blank." },
-                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror. Pass your immorterm_id. Auto-resolves when a single session is active." }
+                    "session": { "type": "string", "description": "ImmorTerm session id. Pass your immorterm_id. Auto-resolves when a single session is active." }
                 },
                 "required": ["url"]
             }
@@ -1147,7 +1167,7 @@ fn tool_definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "interactive_only": { "type": "boolean", "description": "true (default) lists only actionable elements (links, buttons, fields, checkboxes, dropdowns); false includes plain text." },
-                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror." }
+                    "session": { "type": "string", "description": "ImmorTerm session id." }
                 },
                 "required": []
             }
@@ -1159,68 +1179,71 @@ fn tool_definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Natural-language or literal text to match against element names and roles." },
-                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror." }
+                    "session": { "type": "string", "description": "ImmorTerm session id." }
                 },
                 "required": ["query"]
             }
         }),
         json!({
             "name": "immorterm_browser_click",
-            "description": "Click an element. Prefer clicking by handle (ref from read_page/find); coordinates are a fallback. Returns a fresh screenshot after the page settles. Never click to enter credentials — the user does that in the visible window.",
+            "description": "Click an element. Prefer clicking by handle (ref from read_page/find); coordinates are a fallback. Returns compact text only; use read_page/find for resulting state. Never click to enter credentials — use browser_request_human for user intervention.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "ref": { "type": "string", "description": "A ref_N handle from read_page/find. ImmorTerm clicks the element's center." },
                     "x": { "type": "number", "description": "Fallback: X in CSS pixels of the last screenshot." },
                     "y": { "type": "number", "description": "Fallback: Y in CSS pixels of the last screenshot." },
-                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror." }
+                    "session": { "type": "string", "description": "ImmorTerm session id." }
                 },
                 "required": []
             }
         }),
         json!({
             "name": "immorterm_browser_form_input",
-            "description": "Set the value of a text field, checkbox, or dropdown BY HANDLE. This is how you fill forms — including dropdowns and checkboxes a plain click can't set. Returns a fresh screenshot. Reminder: passwords, card numbers, and one-time codes are the user's to type in the visible window — never here.",
+            "description": "Set the value of a text field, checkbox, or dropdown BY HANDLE. Returns compact text only; use read_page/find for resulting state. Passwords, card numbers, and one-time codes require browser_request_human — never type them here.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "ref": { "type": "string", "description": "A field/checkbox/dropdown handle from read_page/find." },
                     "value": { "type": "string", "description": "Text to type, option to select, or 'checked'/'unchecked' for a checkbox." },
-                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror." }
+                    "session": { "type": "string", "description": "ImmorTerm session id." }
                 },
                 "required": ["ref", "value"]
             }
         }),
         json!({
             "name": "immorterm_browser_key",
-            "description": "Press a single key in the browser page: Enter, Tab, Escape, Backspace, or ArrowUp/ArrowDown/ArrowLeft/ArrowRight. Returns a screenshot.",
+            "description": "Press a single key in the browser page: Enter, Tab, Escape, Backspace, or ArrowUp/ArrowDown/ArrowLeft/ArrowRight. Returns compact text only.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "key": { "type": "string", "description": "Key name: Enter | Tab | Escape | Backspace | ArrowUp | ArrowDown | ArrowLeft | ArrowRight" },
-                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror." }
+                    "session": { "type": "string", "description": "ImmorTerm session id." }
                 },
                 "required": ["key"]
             }
         }),
         json!({
             "name": "immorterm_browser_scroll",
-            "description": "Scroll the browser page vertically by dy CSS pixels (positive scrolls down). Returns a screenshot.",
+            "description": "Scroll the browser page vertically by dy CSS pixels (positive scrolls down). Returns compact text only.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "dy": { "type": "number", "description": "Vertical scroll delta in CSS pixels (positive = down)" },
-                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror." }
+                    "session": { "type": "string", "description": "ImmorTerm session id." }
                 },
                 "required": ["dy"]
             }
         }),
         json!({
             "name": "immorterm_browser_screenshot",
-            "description": "Take a fresh CSS-pixel-accurate PNG of the current page without doing anything else. Screenshot pixels line up 1:1 with click coordinates, even on Retina displays.",
+            "description": "Screenshot capture is OFF by default. A call without inline=true returns compact guidance and does not issue Page.captureScreenshot. Set inline=true only when pixel-level visual judgment is genuinely necessary; the result is a bounded compressed preview. Use browser_read_page/browser_find for exploration and Playwright tests first for repeatable verification.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror. Auto-resolves when a single session is active." } },
+                "properties": {
+                    "inline": { "type": "boolean", "description": "Opt in to one bounded inline preview. Defaults to false, which captures and returns no image." },
+                    "session": { "type": "string", "description": "ImmorTerm session id. Auto-resolves when a single session is active." }
+                },
                 "required": []
             }
         }),
@@ -1230,7 +1253,7 @@ fn tool_definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror." }
+                    "session": { "type": "string", "description": "ImmorTerm session id." }
                 },
                 "required": []
             }
@@ -1243,7 +1266,7 @@ fn tool_definitions() -> Vec<Value> {
                 "properties": {
                     "index": { "type": "integer", "description": "0-based tab index from browser_tabs_list." },
                     "targetId": { "type": "string", "description": "Exact targetId from browser_tabs_list (preferred if the list may have changed)." },
-                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror." }
+                    "session": { "type": "string", "description": "ImmorTerm session id." }
                 },
                 "required": []
             }
@@ -1258,6 +1281,17 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "immorterm_browser_show",
+            "description": "Show the existing headless browser in ImmorTerm's Browser workshop. Use this only when presenting something useful to the user; routine agent browsing stays hidden. Human sign-in, CAPTCHA, password, payment, or other sensitive intervention must use immorterm_browser_request_human instead.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session": { "type": "string", "description": "ImmorTerm session id whose Browser workshop should be shown." }
+                },
+                "required": []
+            }
+        }),
+        json!({
             "name": "immorterm_browser_request_human",
             "description": "Hand the browser to the human when you hit something you can't or shouldn't do yourself — a Cloudflare/CAPTCHA bot-check, an OAuth/sign-in consent screen, a password or one-time-code field. Pauses the browser, banners the ImmorTerm workshop panel for the human to solve it, and returns a wait cue. Do NOT sleep-loop on such pages: call this, then immorterm_browser_wait_for_human.",
             "inputSchema": {
@@ -1265,7 +1299,7 @@ fn tool_definitions() -> Vec<Value> {
                 "properties": {
                     "reason": { "type": "string", "description": "Short human-readable reason, e.g. 'Cloudflare human check' or 'Google sign-in'." },
                     "instructions": { "type": "string", "description": "Optional: what the human should do in the panel before clicking ▶ Continue." },
-                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror." }
+                    "session": { "type": "string", "description": "ImmorTerm session id." }
                 },
                 "required": []
             }
@@ -1276,7 +1310,7 @@ fn tool_definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror." }
+                    "session": { "type": "string", "description": "ImmorTerm session id." }
                 },
                 "required": []
             }
@@ -1287,7 +1321,7 @@ fn tool_definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror." }
+                    "session": { "type": "string", "description": "ImmorTerm session id." }
                 },
                 "required": []
             }
@@ -1300,7 +1334,7 @@ fn tool_definitions() -> Vec<Value> {
                 "properties": {
                     "ref": { "type": "string", "description": "A file-input handle (ref_N) from read_page/find." },
                     "path": { "type": "string", "description": "Absolute path to the file to upload." },
-                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror." }
+                    "session": { "type": "string", "description": "ImmorTerm session id." }
                 },
                 "required": ["ref", "path"]
             }
@@ -1314,7 +1348,7 @@ fn tool_definitions() -> Vec<Value> {
                     "selector": { "type": "string", "description": "CSS selector to wait for, e.g. '.results' or '#done'." },
                     "text": { "type": "string", "description": "Visible page text to wait for (substring match)." },
                     "timeout_secs": { "type": "number", "description": "Max seconds to wait (default 15, max 120)." },
-                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror." }
+                    "session": { "type": "string", "description": "ImmorTerm session id." }
                 },
                 "required": []
             }
@@ -1326,7 +1360,7 @@ fn tool_definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "timeout_secs": { "type": "number", "description": "Max seconds to wait before returning (default 300, max 600). Call again if it times out." },
-                    "session": { "type": "string", "description": "ImmorTerm session id for the canvas mirror." }
+                    "session": { "type": "string", "description": "ImmorTerm session id." }
                 },
                 "required": []
             }
@@ -2433,7 +2467,13 @@ fn handle_request(req: &JsonRpcRequest, rt: &tokio::runtime::Runtime) -> JsonRpc
             ..base
         },
 
-        "tools/call" => handle_tool_call(req, base, rt),
+        "tools/call" => {
+            let tool_name = req.params.as_ref()
+                .and_then(|params| params.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            enforce_tool_response_budget(handle_tool_call(req, base, rt), tool_name)
+        }
 
         "ping" => JsonRpcResponse {
             result: Some(json!({})),
@@ -2535,6 +2575,7 @@ fn handle_tool_call(
         "immorterm_browser_tabs_switch" => handle_browser_tabs_switch(&arguments, rt),
         "immorterm_browser_eval" => handle_browser_eval(&arguments, rt),
         "immorterm_browser_close" => handle_browser_close(),
+        "immorterm_browser_show" => handle_browser_show(&arguments),
         "immorterm_browser_request_human" => handle_browser_request_human(&arguments, rt),
         "immorterm_browser_wait_for_human" => handle_browser_wait_for_human(&arguments),
         "immorterm_browser_wait_for" => handle_browser_wait_for(&arguments, rt),
@@ -2628,6 +2669,77 @@ fn handle_tool_call(
             ..base
         },
     }
+}
+
+/// Final handler-independent circuit breaker for MCP tool output. Handlers
+/// should remain compact, but future regressions still cannot emit megabytes.
+fn enforce_tool_response_budget(mut response: JsonRpcResponse, tool_name: &str) -> JsonRpcResponse {
+    let mut omitted_images = 0usize;
+    let mut truncated_text_bytes = 0usize;
+    if let Some(content) = response.result.as_mut()
+        .and_then(|result| result.get_mut("content"))
+        .and_then(Value::as_array_mut)
+    {
+        let mut remaining_text = MAX_TEXT_CONTENT_BYTES;
+        let mut bounded = Vec::with_capacity(content.len() + 1);
+        for item in content.drain(..) {
+            match item.get("type").and_then(Value::as_str) {
+                Some("image") => {
+                    let image_bytes = item.get("data").and_then(Value::as_str)
+                        .map(str::len).unwrap_or(0);
+                    if image_bytes <= MAX_INLINE_IMAGE_BASE64_BYTES {
+                        bounded.push(item);
+                    } else {
+                        omitted_images += 1;
+                    }
+                }
+                Some("text") => {
+                    let text = item.get("text").and_then(Value::as_str).unwrap_or("");
+                    let prefix = utf8_prefix(text, text.len().min(remaining_text));
+                    truncated_text_bytes += text.len().saturating_sub(prefix.len());
+                    remaining_text = remaining_text.saturating_sub(prefix.len());
+                    if !prefix.is_empty() {
+                        bounded.push(json!({ "type": "text", "text": prefix }));
+                    }
+                }
+                _ => bounded.push(item),
+            }
+        }
+        if omitted_images > 0 || truncated_text_bytes > 0 {
+            bounded.push(json!({
+                "type": "text",
+                "text": format!("⚠️ ImmorTerm context guard: omitted {omitted_images} oversized image(s) and truncated {truncated_text_bytes} text byte(s). Use browser_read_page/browser_find or narrow the request.")
+            }));
+        }
+        *content = bounded;
+    }
+
+    let serialized_len = serde_json::to_vec(&response)
+        .map(|bytes| bytes.len()).unwrap_or(usize::MAX);
+    if serialized_len > MAX_TOOL_RESULT_BYTES {
+        response.result = Some(json!({
+            "content": [{
+                "type": "text",
+                "text": format!("⚠️ ImmorTerm suppressed the {tool_name} result because its serialized payload was {serialized_len} bytes, above the hard {MAX_TOOL_RESULT_BYTES}-byte agent-context ceiling. Narrow the request or use the Workshop view.")
+            }],
+            "isError": true
+        }));
+        response.error = None;
+    }
+    debug_assert!(serde_json::to_vec(&response)
+        .map(|bytes| bytes.len() <= MAX_TOOL_RESULT_BYTES).unwrap_or(false));
+    response
+}
+
+fn utf8_prefix(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 // ─── Tool implementations ───────────────────────────────────────────
@@ -3378,8 +3490,8 @@ fn handle_screenshot(args: &Value, rt: &tokio::runtime::Runtime) -> Result<Value
     Ok(png_image_content(&png_base64))
 }
 
-/// The one MCP `image` content block shape, shared by every tool that returns
-/// a PNG (screenshot + all browser_* tools) so the wire shape stays in sync.
+/// MCP image content for the terminal screenshot tool. Browser previews use
+/// the bounded PNG/JPEG path below.
 fn png_image_content(png_base64: &str) -> Value {
     json!({ "type": "image", "data": png_base64, "mimeType": "image/png" })
 }
@@ -3492,50 +3604,9 @@ fn is_dead_pipe(msg: &str) -> bool {
         || m.contains("browser exited")
 }
 
-/// Push a browser screenshot onto the terminal's AI canvas as a top-right
-/// image overlay. Best-effort: if no session/webview is attached, the error is
-/// swallowed so the browser tools still work headless/remote. Replaces the
-/// previous mirror overlay (tracked by primitive id) instead of stacking.
-fn mirror_to_canvas(
-    args: &Value,
-    png_base64: &str,
-    title: &str,
-    url: &str,
-    prev_id: Option<u32>,
-    rt: &tokio::runtime::Runtime,
-) -> Option<u32> {
-    let session = resolve_session(args).ok()?;
-    // Remove the prior mirror so overlays don't stack.
-    if let Some(id) = prev_id {
-        let _ = simple_ipc_query(&session, Request::RemoveAiPrimitive { id }, rt);
-    }
-    let html = crate::browser_mirror::mirror_html(png_base64, title, url);
-    let resp = raw_ipc_query(
-        &session,
-        Request::DrawHtml {
-            html,
-            css: String::new(),
-            x: -1.0,
-            y: -1.0,
-            width: 0.0,
-            height: 0.0,
-            anchor: Some("top-right".to_string()),
-            anchor_to: None,
-            name: Some("browser-mirror".to_string()),
-            on_click_prompt: None,
-            on_click_inject_context: None,
-        },
-        rt,
-    )
-    .ok()?;
-    match resp {
-        Response::PrimitiveId { id } => Some(id),
-        _ => None,
-    }
-}
-
-/// Shared body for the screenshot-returning browser tools: perform the action,
-/// screenshot, mirror to canvas, and return MCP content (caption + image).
+/// Shared body for browser drive tools. Routine actions return compact text;
+/// screenshots require an explicit `inline: true` opt-in and remain bounded.
+/// User presentation is a separate, explicit Browser-workshop path.
 fn handle_browser_shot(
     tool: &str,
     args: &Value,
@@ -3562,8 +3633,10 @@ fn handle_browser_shot(
     // and a short narration — both emitted to the panel after the closure.
     let mut cursor: Option<(f64, f64, String)> = None;
     let mut narration: Option<String> = None;
+    let requested_screenshot = tool == "immorterm_browser_screenshot";
+    let include_inline_image = wants_inline_browser_screenshot(tool, args);
 
-    let (png, title, url, prev_id, handoff, cursor, narration) =
+    let (png, title, url, handoff, cursor, narration) =
         with_browser(rt, launch_url, |b| {
             match tool {
                 "immorterm_browser_open" => {
@@ -3664,38 +3737,30 @@ fn handle_browser_shot(
                 None
             };
             let (title, url) = b.current_title_url();
-            // Skip the screenshot entirely on handoff (privacy) and while paused.
-            let png = if handoff.is_some() || browser_is_paused() {
-                String::new()
+            // Skip capture on handoff/paused, routine actions, and default calls.
+            let png = if handoff.is_some() || browser_is_paused() || !include_inline_image {
+                None
             } else {
-                b.screenshot()?
+                Some(b.screenshot()?)
             };
-            let prev_mirror = LAST_MIRROR_PRIM_ID.lock().ok().and_then(|g| *g);
-            Ok((png, title, url, prev_mirror, handoff, cursor, narration))
+            Ok((png, title, url, handoff, cursor, narration))
         })?;
 
-    // Emit the intent balloon + Mort cursor to the panel (fire-and-forget).
-    if let Some(text) = &narration {
-        emit_browser_narration(args, text, rt);
-    }
-    if let Some((x, y, action)) = &cursor {
-        emit_browser_cursor(args, *x, *y, action, rt);
+    // Presentation events themselves create/reveal the Browser workshop, so
+    // emit them only after the browser has explicitly been shown.
+    if browser_is_visible() {
+        if let Some(text) = &narration {
+            emit_browser_narration(args, text, rt);
+        }
+        if let Some((x, y, action)) = &cursor {
+            emit_browser_cursor(args, *x, *y, action, rt);
+        }
     }
 
     // Human-handoff: pause, banner the panel, return text-only (no screenshot).
     if let Some(reason) = handoff {
         let msg = hand_off_to_human(args, reason.reason(), Some(reason.instructions()), rt);
-        // Keep the pump alive so the human sees the live page in the panel.
-        if let Ok(session) = resolve_session(args) {
-            ensure_browser_pump(session);
-        }
         return Ok(vec![json!({ "type": "text", "text": msg })]);
-    }
-
-    // Start the live screencast pump (idempotent) so the panel keeps streaming
-    // between tool calls. Scoped to the session we're mirroring into.
-    if let Ok(session) = resolve_session(args) {
-        ensure_browser_pump(session);
     }
 
     // Paused (human driving): never mirror or return the screen to the model.
@@ -3706,16 +3771,58 @@ fn handle_browser_shot(
         })]);
     }
 
-    // Mirror onto the canvas (best-effort), and remember the new overlay id.
-    let new_id = mirror_to_canvas(args, &png, &title, &url, prev_id, rt);
-    if let Ok(mut guard) = LAST_MIRROR_PRIM_ID.lock() {
-        *guard = new_id.or(prev_id);
+    let mut content = vec![json!({
+        "type": "text",
+        "text": if include_inline_image {
+            format!("🌐 {title} — {url}")
+        } else if requested_screenshot {
+            format!("🌐 {title} — {url}\nNo screenshot was captured or inserted into agent context. Use browser_read_page/browser_find or Playwright for functional verification. Only call immorterm_browser_screenshot with inline=true when pixel-level visual judgment is genuinely necessary.")
+        } else {
+            format!("🌐 {title} — {url}\nNo screenshot was inserted into agent context. Use browser_read_page or browser_find for compact page state.")
+        },
+    })];
+    if let Some(png) = png {
+        match bounded_screenshot_content(&png) {
+            Ok(image) => content.push(image),
+            Err(error) => content.push(json!({
+                "type": "text",
+                "text": format!("⚠️ ImmorTerm context guard omitted this screenshot: {error}. Use browser_read_page/browser_find or the Workshop view."),
+            })),
+        }
     }
+    Ok(content)
+}
 
-    Ok(vec![
-        json!({ "type": "text", "text": format!("🌐 {} — {}", title, url) }),
-        png_image_content(&png),
-    ])
+fn wants_inline_browser_screenshot(tool: &str, args: &Value) -> bool {
+    tool == "immorterm_browser_screenshot"
+        && args.get("inline").and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn bounded_screenshot_content(png_base64: &str) -> Result<Value, String> {
+    if png_base64.len() <= MAX_INLINE_IMAGE_BASE64_BYTES {
+        return Ok(json!({ "type": "image", "data": png_base64, "mimeType": "image/png" }));
+    }
+    let source = base64::engine::general_purpose::STANDARD.decode(png_base64)
+        .map_err(|error| format!("decode screenshot for bounded preview: {error}"))?;
+    let image = image::load_from_memory(&source)
+        .map_err(|error| format!("decode screenshot pixels for bounded preview: {error}"))?;
+    let source_width = image.width().max(1);
+    let source_height = image.height().max(1);
+    const CANDIDATES: &[(u32, u8)] = &[(768, 55), (640, 45), (512, 35), (384, 25)];
+    for (max_width, quality) in CANDIDATES {
+        let width = source_width.min(*max_width);
+        let height = ((source_height as u64 * width as u64) / source_width as u64)
+            .max(1).min(u32::MAX as u64) as u32;
+        let preview = image.resize(width, height, FilterType::Triangle).to_rgb8();
+        let mut encoded = Vec::new();
+        JpegEncoder::new_with_quality(&mut encoded, *quality).encode_image(&preview)
+            .map_err(|error| format!("encode bounded screenshot preview: {error}"))?;
+        let data = base64::engine::general_purpose::STANDARD.encode(encoded);
+        if data.len() <= MAX_INLINE_IMAGE_BASE64_BYTES {
+            return Ok(json!({ "type": "image", "data": data, "mimeType": "image/jpeg" }));
+        }
+    }
+    Err(format!("preview remains above the hard {MAX_INLINE_IMAGE_BASE64_BYTES}-byte inline-image ceiling"))
 }
 
 /// Brief pause after an interaction so the page can react before screenshot.
@@ -3821,6 +3928,24 @@ fn handle_browser_close() -> Result<String, String> {
         Some(pid) => format!("Browser closed (pid {pid})."),
         None => "No browser session was open.".to_string(),
     })
+}
+
+/// Explicitly present the already-open browser to the user. Opening a browser
+/// remains headless; this is the opt-in transition to a live workshop stream.
+fn handle_browser_show(args: &Value) -> Result<String, String> {
+    let (title, url) = {
+        let mut guard = browser_slot()
+            .lock()
+            .map_err(|_| "browser lock poisoned".to_string())?;
+        let browser = guard
+            .as_mut()
+            .ok_or("No browser session is open — call immorterm_browser_open first.")?;
+        browser.current_title_url()
+    };
+    let session = resolve_session(args)?;
+    browser_touch();
+    show_browser_panel(session);
+    Ok(format!("Browser shown in the ImmorTerm workshop: {title} — {url}"))
 }
 
 /// AI proactively hands the browser to the human (it noticed a bot-check /
@@ -6765,12 +6890,86 @@ mod tests {
     fn browser_control_toggles_paused_flag() {
         // The panel's ⏸/▶ toggle maps to pause/continue actions; only "pause"
         // sets the flag, anything else resumes.
+        BROWSER_VISIBLE.store(true, std::sync::atomic::Ordering::Relaxed);
         apply_browser_control("continue");
         assert!(!browser_is_paused());
+        assert!(browser_is_visible());
         apply_browser_control("pause");
         assert!(browser_is_paused());
         apply_browser_control("continue");
         assert!(!browser_is_paused());
+        apply_browser_control("close");
+        assert!(!browser_is_visible());
+    }
+
+    #[test]
+    fn browser_tool_contract_is_headless_until_explicit_show() {
+        let tools = tool_definitions();
+        let open = tools
+            .iter()
+            .find(|tool| tool["name"] == "immorterm_browser_open")
+            .expect("browser_open tool definition");
+        let open_description = open["description"].as_str().unwrap();
+        assert!(open_description.contains("headless"));
+        assert!(open_description.contains("stays hidden from the user by default"));
+
+        let show = tools
+            .iter()
+            .find(|tool| tool["name"] == "immorterm_browser_show")
+            .expect("explicit browser_show tool definition");
+        assert!(show["description"]
+            .as_str()
+            .unwrap()
+            .contains("only when presenting something useful to the user"));
+        let screenshot = tools.iter()
+            .find(|tool| tool["name"] == "immorterm_browser_screenshot")
+            .expect("browser_screenshot tool definition");
+        assert_eq!(screenshot["inputSchema"]["properties"]["inline"]["type"], "boolean");
+        assert!(screenshot["description"].as_str().unwrap().contains("OFF by default"));
+        assert!(open_description.contains("Playwright tests first"));
+    }
+
+    #[test]
+    fn browser_screenshot_pixels_require_explicit_opt_in() {
+        assert!(!wants_inline_browser_screenshot("immorterm_browser_screenshot", &json!({})));
+        assert!(!wants_inline_browser_screenshot("immorterm_browser_screenshot", &json!({ "inline": false })));
+        assert!(wants_inline_browser_screenshot("immorterm_browser_screenshot", &json!({ "inline": true })));
+        assert!(!wants_inline_browser_screenshot("immorterm_browser_click", &json!({ "inline": true })));
+    }
+
+    #[test]
+    fn context_guard_omits_oversized_images_and_bounds_utf8_text() {
+        let response = JsonRpcResponse {
+            jsonrpc: "2.0".into(), id: Some(json!(1)), error: None,
+            result: Some(json!({ "content": [
+                { "type": "image", "data": "A".repeat(MAX_INLINE_IMAGE_BASE64_BYTES + 1), "mimeType": "image/png" },
+                { "type": "text", "text": "🦀".repeat(MAX_TEXT_CONTENT_BYTES) }
+            ] })),
+        };
+        let bounded = enforce_tool_response_budget(response, "future_browser_tool");
+        assert!(serde_json::to_vec(&bounded).unwrap().len() <= MAX_TOOL_RESULT_BYTES);
+        let result = bounded.result.unwrap();
+        let content = result["content"].as_array().unwrap();
+        assert!(!content.iter().any(|item| item["type"] == "image"));
+        assert!(content.iter().any(|item| item["text"].as_str()
+            .map(|text| text.contains("context guard")).unwrap_or(false)));
+    }
+
+    #[test]
+    fn large_png_becomes_bounded_jpeg_preview() {
+        use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
+        use std::io::Cursor;
+        let raster = ImageBuffer::from_fn(1024, 768, |x, y| {
+            let n = x.wrapping_mul(1_664_525).wrapping_add(y.wrapping_mul(1_013_904_223));
+            Rgb([(n & 0xff) as u8, ((n >> 8) & 0xff) as u8, ((n >> 16) & 0xff) as u8])
+        });
+        let mut png = Vec::new();
+        DynamicImage::ImageRgb8(raster).write_to(&mut Cursor::new(&mut png), ImageFormat::Png).unwrap();
+        let png = base64::engine::general_purpose::STANDARD.encode(png);
+        assert!(png.len() > MAX_INLINE_IMAGE_BASE64_BYTES);
+        let preview = bounded_screenshot_content(&png).unwrap();
+        assert_eq!(preview["mimeType"], "image/jpeg");
+        assert!(preview["data"].as_str().unwrap().len() <= MAX_INLINE_IMAGE_BASE64_BYTES);
     }
 
     #[test]

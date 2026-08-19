@@ -809,6 +809,22 @@ pub struct AiStatsEntry {
     pub context_pct: Option<f64>,
 }
 
+/// Vendor-neutral restore session id supplied by the extension. The Claude
+/// name remains a compatibility alias for older extension builds.
+pub fn restore_session_id_from_env() -> Option<String> {
+    std::env::var("IMMORTERM_AI_SESSION_ID")
+        .or_else(|_| std::env::var("IMMORTERM_CLAUDE_SESSION_ID"))
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// Vendor owning the restore id. Missing means a legacy Claude session.
+pub fn restore_tool_from_env() -> Option<String> {
+    std::env::var("IMMORTERM_AI_TOOL")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
 /// A single session entry in the registry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryEntry {
@@ -1598,9 +1614,7 @@ pub fn register_session(name: &str, shell: &str, logfile: Option<&str>) {
     let owner_project_id = owner_identity.as_ref().map(|p| p.id.clone());
     let owner_project_name = owner_identity.as_ref().map(|p| p.name.clone());
 
-    let ai_session_id = std::env::var("IMMORTERM_CLAUDE_SESSION_ID")
-        .ok()
-        .filter(|s| !s.is_empty());
+    let ai_session_id = restore_session_id_from_env();
     let title_locked = std::env::var("IMMORTERM_TITLE_LOCKED")
         .map(|v| v == "1")
         .unwrap_or(false);
@@ -1661,7 +1675,7 @@ pub fn register_session(name: &str, shell: &str, logfile: Option<&str>) {
         theme: None,
         ai_transcript_path: None,
         ai_stats: None,
-        tool: None,
+        tool: restore_tool_from_env(),
         tool_history: Vec::new(),
         session_status: None,
         shelved_at: None,

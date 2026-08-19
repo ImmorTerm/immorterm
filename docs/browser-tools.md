@@ -68,7 +68,7 @@ gets fresh ones.
 same-origin redirect, a sign-in that reloads the page — stays on the **same
 tab**, and the AI just keeps reading it. But a `window.open`, a `target="_blank"`
 link, or an OAuth/consent **popup** creates a **new tab**. When that happens
-mid-task, ImmorTerm **auto-follows the new tab** so the next screenshot is the
+mid-task, ImmorTerm **auto-follows the new tab** so the next page read targets the
 popup — the AI keeps driving without a dead-end. The AI can also list all tabs
 (`browser_tabs_list`) and switch between them (`browser_tabs_switch`), e.g. to
 return to the opener page after finishing in a popup.
@@ -80,9 +80,9 @@ return to the opener page after finishing in a popup.
 All tools are named `immorterm_browser_*`. Requests and responses are shown as
 the fields that go in and come out.
 
-Coordinates, where they appear, are in **CSS pixels** — the same units the page
-itself uses — so a screenshot pixel and a click target line up one-to-one, even
-on high-resolution (Retina) displays.
+For repeatable product verification, prefer the repository's Playwright tests.
+Use these tools for compact exploratory driving through read/find + refs. Images
+are opt-in and reserved for questions that genuinely require visual judgment.
 
 ### `immorterm_browser_open`
 
@@ -97,11 +97,11 @@ Request:
 - `url` (required) — must start with `http://`, `https://`, or be
   `about:blank`. Anything else is refused.
 
-Response — a short caption plus a screenshot:
+Response — compact text only:
 
 ```
 [text]  🌐 Example Domain — https://example.com/
-[image] PNG of the page (CSS-pixel accurate)
+No screenshot is captured or inserted into agent context.
 ```
 
 ### `immorterm_browser_read_page`
@@ -203,7 +203,7 @@ Request:
 - `value` (required) — the text to type, the option to select, or `"checked"` /
   `"unchecked"` for a checkbox.
 
-Response — a caption plus a fresh screenshot.
+Response — compact text only. Read/find the page for resulting state.
 
 > Reminder: this is for ordinary form fields. Passwords, card numbers, and
 > one-time codes are yours to type in the visible window.
@@ -219,7 +219,7 @@ Request:
 { "key": "Enter" }
 ```
 
-Response — a caption plus a fresh screenshot.
+Response — compact text only. Read/find the page for resulting state.
 
 ### `immorterm_browser_scroll`
 
@@ -237,11 +237,15 @@ Response — a caption plus a fresh screenshot.
 
 ### `immorterm_browser_screenshot`
 
-Take a fresh picture of the current page without doing anything else.
+Return compact guidance without capturing pixels by default. For a question that
+requires pixel-level visual judgment, explicitly opt into one bounded preview.
 
-Request: `{}`
+Default request: `{}` (no capture)
 
-Response — a caption plus a screenshot (CSS-pixel accurate).
+Visual request: `{ "inline": true }`
+
+The opt-in result is capped at 96 KiB of base64 image data and may be scaled and
+converted to JPEG. Every MCP tool result also has a hard 128 KiB serialized cap.
 
 ### `immorterm_browser_tabs_list`
 
