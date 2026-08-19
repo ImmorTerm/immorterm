@@ -42,6 +42,10 @@ jobs:
   build-tauri-app:
     name: Build Tauri App (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    # The worst honest run on record is 30m48s (run 29427019916). Without a
+    # ceiling, run 29401810406 burned 6.5 HOURS of hosted macos minutes before
+    # a human cancelled it. 75 bounds a hang without racing a slow real build.
+    timeout-minutes: 75
     strategy:
       matrix:
         include:
@@ -182,6 +186,7 @@ jobs:
     name: Publish GitHub Release + updater feed
     needs: [build-tauri-app]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

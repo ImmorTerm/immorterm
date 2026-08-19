@@ -1,0 +1,83 @@
+# The runner pod spec for the `immorterm` GitHub Actions scale set (ARC) on
+# the shared flam k3s cluster — the third tenant, beside flam-cluster and
+# longstory-runner. Install: see .devops/k8s/README.md.
+#
+# ═══ WHY A VALUES FILE AND NOT --set ═════════════════════════════════════════
+# The gha-runner-scale-set chart does not merge a partial template.spec: the
+# moment you supply template.spec.containers, yours REPLACES the chart's
+# entirely. Two upstream installs failed learning this. So the full spec is
+# written out here.
+#
+# ═══ WHAT MAKES IT WARM ══════════════════════════════════════════════════════
+# hostPath, deliberately: the whole value of this runner is that the checkout,
+# node_modules, target/ and the cargo registry SURVIVE the ephemeral pod. An
+# emptyDir would start every build cold, which is the cost this exists to
+# remove. ci.yml's install-skip fingerprint and its `git clean -ffdx -e
+# node_modules/ -e target/` are the other half of the contract.
+
+template:
+  spec:
+    # Exactly ONE node carries this label (label it once, by hand — see
+    # README). A runner scheduled on a different node sees empty hostPath
+    # directories with the same names, which turns every warm run cold.
+    # Use flam-memory-1: FLAM's own CI caches live on flam-memory-2, and two
+    # cargo/nx builds on one 4-CPU node starve each other.
+    nodeSelector:
+      immorterm.dev/ci-cache: "true"
+
+    # hostPath directories are created root:root 0755. The runner is uid 1001;
+    # without this one-time chown every cache is silently read-only and each
+    # pod starts cold. Only the mount roots — walking a multi-GB target/ on
+    # every pod start would erase the speedup.
+    initContainers:
+      - name: init-runner-caches
+        image: busybox:1.37.0
+        command: ["sh", "-c", "chown 1001:1001 /ci-cache /runner-work"]
+        volumeMounts:
+          - { name: ci-cache, mountPath: /ci-cache }
+          - { name: work, mountPath: /runner-work }
+        resources:
+          requests: { cpu: 10m, memory: 16Mi }
+          limits: { cpu: 100m, memory: 64Mi }
+
+    containers:
+      - name: runner
+        # Built from .devops/docker/Dockerfile.ci-runner — the pinned ARC
+        # runner image with libasound2-dev and the Rust toolchain pre-baked
+        # (ci.yml skips those setup steps on this pool). Pinned: a floating
+        # :latest on the binary that runs CI is a supply-chain hole.
+        image: ghcr.io/immorterm/ci-runner:2.336.0-rust1.93
+        command: ["/home/runner/run.sh"]
+        env:
+          # Bound the worst case BEFORE sizing memory to it. Four parallel
+          # rustc jobs on a full workspace build can spike past any limit this
+          # node can grant; two fit. If you raise this, raise the memory limit
+          # with it.
+          - { name: CARGO_BUILD_JOBS, value: "2" }
+        volumeMounts:
+          - { name: work, mountPath: /home/runner/_work }
+          # Bun's package cache and the persistent cargo registry live here;
+          # ci.yml points BUN_INSTALL_CACHE_DIR and CARGO_HOME at it whenever
+          # FAST_RUNNER_LABEL is set.
+          - { name: ci-cache, mountPath: /ci-cache }
+        resources:
+          # Request what the node can spare — an unschedulable runner is a
+          # dead queue. The node has 4 CPU / 7.7Gi allocatable.
+          requests: { cpu: 500m, memory: 512Mi }
+          # 5Gi, sized to the CONFIGURED worst case: a full cold cargo
+          # workspace build at CARGO_BUILD_JOBS=2 plus the bun/TS jobs.
+          # Upstream sized a limit to the warm case and the first full rebuild
+          # OOMKilled — which GitHub reports as "runner lost communication",
+          # and the queue then wedged for ten hours. Do not trim this to fit
+          # more tenants; drop CARGO_BUILD_JOBS instead.
+          limits: { cpu: 3, memory: 5Gi }
+
+    volumes:
+      # ARC normally puts the checkout on emptyDir, deleting node_modules and
+      # target/ after every job. The pool is intentionally ONE runner, so this
+      # host directory keeps them warm. actions/checkout still resets tracked
+      # files every run (ci.yml passes clean:false + an explicit git clean).
+      - name: work
+        hostPath: { path: /var/lib/immorterm-runner-work, type: DirectoryOrCreate }
+      - name: ci-cache
+        hostPath: { path: /var/lib/immorterm-ci-cache, type: DirectoryOrCreate }

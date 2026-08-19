@@ -1,0 +1,106 @@
+# Release proof — the deep half of the CI split.
+#
+# ci.yml is the fast commit gate: extension + CLI + core/render crates only.
+# This workflow proves everything the commit gate deliberately skips, and
+# promote.yml REQUIRES it before any lane publishes — before this existed,
+# `promote` shipped to npm, the Marketplace and Cloudflare Pages with zero
+# tests run. It also runs on every push to main for early signal (the repo is
+# public; hosted minutes are free).
+#
+# What it proves that ci.yml does not:
+#   - biome lint (ratcheted — see BIOME_ERROR_BASELINE)
+#   - clippy + tests for the ENTIRE Rust workspace: hub, daemon, digest and
+#     the conversation libs, not just core/render
+#   - the docs site actually builds
+#   - the extension actually packages into a .vsix
+name: Release proof
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  prove:
+    name: Prove the workspace
+    runs-on: ubuntu-latest
+    # Cold Swatinem cache put the narrower ci.yml Rust job at 5m09s; the full
+    # workspace build is bigger, and the docs build adds a few minutes. 30
+    # bounds a hang without ever racing an honest cold build.
+    timeout-minutes: 30
+    env:
+      # THE RATCHET. origin/main carried 340 biome errors the day this gate
+      # landed (16 Aug 2026), so a hard `biome check` would have blocked every
+      # release on inherited debt. Instead the count may only SHRINK: new code
+      # that adds an error fails here. When you fix errors, lower this number
+      # in the same commit so the debt can never silently regrow.
+      BIOME_ERROR_BASELINE: "340"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Biome ratchet (error count may only shrink)
+        run: |
+          set -uo pipefail
+          bunx biome check . > biome-report.txt 2>&1
+          status=$?
+          errors=$(grep -oE 'Found [0-9]+ errors' biome-report.txt | grep -oE '[0-9]+' || true)
+          errors=${errors:-0}
+          # `biome check` exits 1 whenever errors exist; only the count vs the
+          # baseline decides pass/fail. A crash (exit > 1) always fails.
+          if [ "$status" -gt 1 ]; then
+            tail -40 biome-report.txt
+            echo "biome crashed (exit $status)"
+            exit "$status"
+          fi
+          echo "biome errors: $errors (baseline: $BIOME_ERROR_BASELINE)"
+          if [ "$errors" -gt "$BIOME_ERROR_BASELINE" ]; then
+            tail -60 biome-report.txt
+            echo "biome error count grew past the baseline — fix the new errors"
+            exit 1
+          fi
+          if [ "$errors" -lt "$BIOME_ERROR_BASELINE" ]; then
+            echo "debt repaid: lower BIOME_ERROR_BASELINE to $errors in release-proof.yml"
+          fi
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (full workspace)
+        run: bun run lint:rust
+
+      - name: Test (full workspace — hub, daemon, digest, conversation libs)
+        run: bun run test:rust
+
+      - name: Build shared libs
+        run: |
+          (cd libs/design-tokens && bun run build) 2>/dev/null || true
+          (cd libs/menu-data && bun run build)
+
+      - name: Build docs site
+        run: bun run build:docs
+
+      - name: Package extension (.vsix smoke)
+        working-directory: apps/extension
+        run: |
+          bun run compile
+          npx -y @vscode/vsce package --no-dependencies

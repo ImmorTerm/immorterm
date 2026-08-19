@@ -29,10 +29,22 @@ permissions:
   contents: read
 
 jobs:
+  # NOTHING PUBLISHES UNPROVEN. Before this gate, promote shipped to npm, the
+  # Marketplace and Cloudflare Pages without running a single test. Every lane
+  # below needs the full release proof (biome ratchet, whole Rust workspace,
+  # docs build, .vsix packaging) to pass first.
+  proof:
+    name: Release proof
+    uses: ./.github/workflows/release-proof.yml
+    permissions:
+      contents: read
+
   promote-cli:
     name: Promote CLI
     if: inputs.promote_cli == true
+    needs: proof
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: apps/immorterm
@@ -62,7 +74,9 @@ jobs:
   promote-extension:
     name: Promote Extension
     if: inputs.promote_extension == true
+    needs: proof
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: apps/extension
@@ -108,7 +122,9 @@ jobs:
   promote-docs:
     name: Promote Docs
     if: inputs.promote_docs == true
+    needs: proof
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
