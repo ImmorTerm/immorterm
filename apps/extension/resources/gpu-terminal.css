@@ -201,6 +201,117 @@ body.with-tab-bar #container {
   /* Padding is now applied inside the GPU renderer (content_padding) so the
      accent border renders at the canvas edges while content is inset. */
 }
+     accent border renders at the canvas edges while content is inset. */
+}
+
+/* ── Shared Activity ────────────────────────────────────────────────
+ * Durable, session-scoped history opened by the ⇄ status-bar icon. */
+#shared-activity-panel {
+  display: none;
+  position: absolute;
+  z-index: 45;
+  right: 12px;
+  bottom: 34px;
+  width: min(520px, calc(100% - 24px));
+  max-height: min(560px, calc(100% - 52px));
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--sb-popup-border, rgba(180,130,255,0.4));
+  border-radius: 10px;
+  background: var(--sb-popup-bg, #1e1e2e);
+  box-shadow: 0 12px 36px rgba(0,0,0,0.48);
+  color: var(--sb-popup-text, #cdd6f4);
+}
+#shared-activity-panel.visible { display: flex; }
+.shared-activity-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--sb-popup-separator, #313244);
+}
+.shared-activity-title { font-weight: 650; flex: 1; }
+.shared-activity-session {
+  color: var(--sb-popup-header, #a6adc8);
+  font-size: var(--ui-font-size-xs);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 45%;
+}
+.shared-activity-close {
+  border: 0; background: transparent; color: inherit; cursor: pointer;
+  font: inherit; font-size: 18px; line-height: 1; padding: 2px 4px;
+  opacity: 0.72;
+}
+.shared-activity-close:hover { opacity: 1; }
+.shared-activity-list {
+  overflow-y: auto; padding: 10px 12px 12px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.shared-activity-connection {
+  padding: 10px 12px;
+  border: 1px solid var(--sb-popup-separator, #313244);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--sb-popup-active, var(--sidebar-accent, #b482ff)) 10%, transparent);
+}
+.shared-activity-connection-head {
+  display: flex; align-items: center; gap: 7px;
+  font-size: var(--ui-font-size-sm); font-weight: 650;
+  margin-bottom: 7px;
+}
+.shared-activity-status-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto;
+  background: #a6e3a1; box-shadow: 0 0 7px rgba(166,227,161,.65);
+}
+.shared-activity-connection.disconnected .shared-activity-status-dot {
+  background: #6c7086; box-shadow: none;
+}
+.shared-activity-route {
+  font-weight: 600; line-height: 1.35; overflow-wrap: anywhere;
+}
+.shared-activity-arrow { color: var(--sb-popup-active, var(--sidebar-accent, #b482ff)); padding: 0 4px; }
+.shared-activity-ids {
+  margin-top: 5px; font-family: var(--vscode-editor-font-family, monospace);
+  font-size: var(--ui-font-size-xs); color: var(--sb-popup-header, #a6adc8);
+  overflow-wrap: anywhere;
+}
+.shared-activity-empty {
+  padding: 28px 12px; text-align: center;
+  color: var(--sb-popup-header, #a6adc8); line-height: 1.45;
+}
+.shared-activity-event {
+  border: 1px solid var(--sb-popup-separator, #313244);
+  border-radius: 7px; padding: 8px 10px;
+  background: color-mix(in srgb, var(--sb-popup-bg, #1e1e2e) 84%, white 4%);
+}
+.shared-activity-event.outgoing {
+  border-left: 3px solid var(--sb-popup-active, var(--sidebar-accent, #b482ff));
+}
+.shared-activity-event.incoming { border-left: 3px solid #89b4fa; }
+.shared-activity-event.system { opacity: 0.78; }
+.shared-activity-event.failed { border-color: rgba(243,139,168,.65); }
+.shared-activity-meta {
+  display: flex; align-items: center; gap: 6px;
+  color: var(--sb-popup-header, #a6adc8); font-size: var(--ui-font-size-xs);
+  margin-bottom: 5px;
+}
+.shared-activity-peer { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shared-activity-kind { text-transform: capitalize; }
+.shared-activity-event-route {
+  margin-bottom: 7px; font-size: var(--ui-font-size-sm); font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.shared-activity-body { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.4; }
+.shared-activity-path {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: var(--ui-font-size-sm); color: #89b4fa;
+}
+.shared-activity-badge {
+  display: inline-block; margin-top: 6px; padding: 1px 6px;
+  border-radius: 999px; font-size: var(--ui-font-size-xs);
+  background: var(--sb-popup-hover, rgba(255,255,255,0.08));
+  color: var(--sb-popup-header, #a6adc8);
+}
+#terminal-canvas {
+  width: 100%; height: 100%;
+  display: block; outline: none;
 #terminal-canvas {
   width: 100%; height: 100%;
   display: block; outline: none;

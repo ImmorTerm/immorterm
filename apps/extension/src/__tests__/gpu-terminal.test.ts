@@ -710,3 +710,23 @@ describe('GPU Terminal — Render Loop Safety', () => {
     expect(js).toContain('renderErrorCount = 0');
   });
 });
+
+describe('GPU Terminal — Shared Activity', () => {
+  const html = readHtml();
+  const js = extractInlineScript(html);
+
+  it('requests bounded daemon-owned activity over the active WebSocket', () => {
+    expect(html).toContain('id="shared-activity-panel"');
+    expect(js).toContain("type: 'get_shared_activity'");
+    expect(js).toContain("target === 'shared_activity'");
+  });
+
+  it('renders daemon content through textContent', () => {
+    const start = js.indexOf('function renderSharedActivity');
+    const end = js.indexOf('function toggleSharedActivity', start);
+    const body = js.slice(start, end);
+    expect(body).toContain('textContent = event.message');
+    expect(body).toContain('textContent = event.file_path');
+    expect(body).not.toContain('innerHTML');
+  });
+});

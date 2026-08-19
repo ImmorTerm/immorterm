@@ -1346,6 +1346,14 @@
       <textarea id="kb-input" aria-label="Terminal input" autocorrect="off" autocapitalize="off" spellcheck="false" autocomplete="off" style="position:absolute;opacity:0;width:1px;height:1px;left:0;top:0;z-index:-1;border:0;padding:0;margin:0;resize:none;outline:none;pointer-events:none;"></textarea>
       <div id="title-tooltip"></div>
       <div id="link-tooltip"></div>
+      <section id="shared-activity-panel" aria-label="Shared Activity" aria-hidden="true">
+        <header class="shared-activity-header">
+          <span class="shared-activity-title">Shared Activity</span>
+          <span class="shared-activity-session"></span>
+          <button class="shared-activity-close" type="button" title="Close" aria-label="Close">&times;</button>
+        </header>
+        <div class="shared-activity-list"></div>
+      </section>
       <div id="emoji-overlays" style="position:absolute;pointer-events:none;z-index:5;top:0;left:0;width:100%;height:100%;font-family:'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',sans-serif;"></div>
       <!-- Sidebar pills for inline comments on terminal output. Anchored to the content row
            via display_row + col_end from `terminal.visible_comment_anchors()`. Pills themselves
@@ -7715,6 +7723,11 @@
             } else if (msg.type === 'scratch_info') {
               // Reply to scratch_open/scratch_kill — builds the scratch panel.
               handleScratchInfo(msg, sessionName);
+            } else if (msg.type === 'shared_activity') {
+              if (sessionName === activeSessionName) {
+                finishSharedActivityRequest();
+                renderSharedActivity(msg.events || [], sessionName);
+              }
             } else {
               // Track AI primitive count for non-active sessions too
               if (msg.type === 'ai_layer_update' && msg.data) {
@@ -7833,6 +7846,7 @@
       const silent = !!(opts && opts.silent);
       const session = sessions.get(sessionName);
       if (!session) return;
+      closeSharedActivity();
 
       // Reference model: a dead/shelved session must leave no tile behind.
       // Active space: remove its live tile(s) now (mirrors the ✕ path); persisted
@@ -14594,6 +14608,143 @@
     });
 
     // ── Status Bar Click → Popup Menu ──
+    let sharedActivityRequestTimer = null;
+    let sharedActivityPollTimer = null;
+
+    function finishSharedActivityRequest() {
+      if (sharedActivityRequestTimer) clearTimeout(sharedActivityRequestTimer);
+      sharedActivityRequestTimer = null;
+    }
+
+    function showSharedActivityNotice(message, sessionName) {
+      const panel = document.getElementById('shared-activity-panel');
+      const list = panel?.querySelector('.shared-activity-list');
+      if (!panel || !list) return;
+      panel.querySelector('.shared-activity-session').textContent =
+        sessions.get(sessionName)?.displayName || sessionName || '';
+      list.replaceChildren();
+      const notice = document.createElement('div');
+      notice.className = 'shared-activity-empty';
+      notice.textContent = message;
+      list.appendChild(notice);
+      panel.classList.add('visible');
+      panel.setAttribute('aria-hidden', 'false');
+    }
+
+    function requestSharedActivity() {
+      const session = sessions.get(activeSessionName);
+      if (!session?.ws || session.ws.readyState !== WebSocket.OPEN) return false;
+      session.ws.send(JSON.stringify({
+        type: 'get_shared_activity',
+        request_id: 'shared-activity-' + Date.now()
+      }));
+      finishSharedActivityRequest();
+      sharedActivityRequestTimer = setTimeout(() => {
+        showSharedActivityNotice(
+          'This terminal is running an older ImmorTerm daemon. Create a new terminal session to enable Shared Activity.',
+          activeSessionName
+        );
+      }, 1500);
+      return true;
+    }
+
+    function closeSharedActivity() {
+      const panel = document.getElementById('shared-activity-panel');
+      if (!panel) return;
+      finishSharedActivityRequest();
+      if (sharedActivityPollTimer) clearInterval(sharedActivityPollTimer);
+      sharedActivityPollTimer = null;
+      panel.classList.remove('visible');
+      panel.setAttribute('aria-hidden', 'true');
+      canvas.focus();
+    }
+
+    function renderSharedActivity(events, sessionName) {
+      const panel = document.getElementById('shared-activity-panel');
+      const list = panel?.querySelector('.shared-activity-list');
+      if (!panel || !list) return;
+      panel.querySelector('.shared-activity-session').textContent =
+        sessions.get(sessionName)?.displayName || sessionName || '';
+      list.replaceChildren();
+      if (!events.length) {
+        const empty = document.createElement('div');
+        empty.className = 'shared-activity-empty';
+        empty.textContent = 'No shared messages or files yet.';
+        list.appendChild(empty);
+      }
+      for (const event of events) {
+        const row = document.createElement('article');
+        const direction = ['incoming', 'outgoing', 'system'].includes(event.direction)
+          ? event.direction : 'system';
+        row.className = 'shared-activity-event ' + direction +
+          (event.status === 'failed' ? ' failed' : '');
+        const meta = document.createElement('div');
+        meta.className = 'shared-activity-meta';
+        const kind = document.createElement('span');
+        kind.className = 'shared-activity-kind';
+        kind.textContent = event.event || 'activity';
+        const peer = document.createElement('span');
+        peer.className = 'shared-activity-peer';
+        peer.textContent = event.peer_name || event.peer_id || '';
+        const time = document.createElement('time');
+        const date = new Date(Number(event.timestamp) || 0);
+        time.textContent = Number.isNaN(date.getTime()) ? '' : date.toLocaleString([], {
+          month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+        });
+        meta.append(kind, peer, time);
+        row.appendChild(meta);
+        if (event.message) {
+          const body = document.createElement('div');
+          body.className = 'shared-activity-body';
+          body.textContent = event.message;
+          row.appendChild(body);
+        }
+        if (event.file_path) {
+          const filePath = document.createElement('div');
+          filePath.className = 'shared-activity-body shared-activity-path';
+          filePath.textContent = event.file_path;
+          row.appendChild(filePath);
+        }
+        if (event.delivery_mode || event.media_type) {
+          const badge = document.createElement('span');
+          badge.className = 'shared-activity-badge';
+          badge.textContent = [event.delivery_mode, event.media_type].filter(Boolean).join(' · ');
+          row.appendChild(badge);
+        }
+        list.appendChild(row);
+      }
+      panel.classList.add('visible');
+      panel.setAttribute('aria-hidden', 'false');
+      list.scrollTop = list.scrollHeight;
+      if (!sharedActivityPollTimer) {
+        sharedActivityPollTimer = setInterval(() => {
+          if (panel.classList.contains('visible')) requestSharedActivity();
+        }, 3000);
+      }
+    }
+
+    function toggleSharedActivity() {
+      const panel = document.getElementById('shared-activity-panel');
+      if (panel?.classList.contains('visible')) return closeSharedActivity();
+      showSharedActivityNotice('Loading shared activity…', activeSessionName);
+      if (!requestSharedActivity()) {
+        showSharedActivityNotice(
+          'Shared Activity is unavailable while this terminal is disconnected.',
+          activeSessionName
+        );
+      }
+    }
+
+    document.querySelector('#shared-activity-panel .shared-activity-close')
+      ?.addEventListener('click', closeSharedActivity);
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' &&
+          document.getElementById('shared-activity-panel')?.classList.contains('visible')) {
+        event.preventDefault();
+        closeSharedActivity();
+      }
+    }, true);
+
     canvas.addEventListener('click', (e) => {
       if (!terminal) return;
       const rect = canvas.getBoundingClientRect();
@@ -14626,6 +14777,8 @@
         // Scratch terminal: reveal/refocus if live, else request one from the
         // active session's daemon (panel is built on the scratch_info reply).
         handleScratchClick();
+      } else if (target === 'shared_activity') {
+        toggleSharedActivity();
       } else if (target === 'ai_stats') {
         // Toggle AI stats mode on click
         aiStatsMode = (aiStatsMode + 1) % 2;

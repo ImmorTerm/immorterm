@@ -1839,6 +1839,11 @@ impl TerminalRenderer {
                         && col >= data.scratch_start_col
                         && col < data.scratch_end_col
                 }
+                StatusBarTarget::SharedActivity => {
+                    data.shared_activity_end_col > data.shared_activity_start_col
+                        && col >= data.shared_activity_start_col
+                        && col < data.shared_activity_end_col
+                }
                 StatusBarTarget::Title => {
                     data.title_end_col > data.title_start_col
                         && col >= data.title_start_col
