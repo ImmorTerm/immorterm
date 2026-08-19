@@ -55,6 +55,7 @@ import { TaskStorage } from './tasks';
 import type { Task, TaskContext } from './tasks/types';
 import { PlansStorage } from './plans';
 import { SpacesStorage } from './spaces';
+import { resolveRestoreIdentity } from './restore-identity';
 
 /** Cap on a Codex rollout we will scan for an inline image. Rollouts reach
  *  megabytes and each pasted image is a large base64 blob; past this we skip
@@ -3083,6 +3084,24 @@ Return ONLY a JSON object with these fields:
       } catch (e) { logger.warn(`ImmorTerm AI: failed to read session order: ${e}`); }
       aiSessions.sort((a: any, b: any) => (orderMap[a.window_id] ?? Infinity) - (orderMap[b.window_id] ?? Infinity));
 
+      // The three hot identity fields can come from different writers during
+      // a cold-boot registry race. Reconcile them from the newest append-only
+      // tool-history tuple before deciding which vendor and thread to resume.
+      for (const session of aiSessions as any[]) {
+        const identity = resolveRestoreIdentity(session);
+        if (identity.source === 'tool-history'
+          && (session.tool !== identity.tool || session.ai_session_id !== identity.sessionId)) {
+          logger.info(
+            `ImmorTerm AI: restore identity reconciled for '${session.name}': `
+            + `${session.tool || 'unknown'}:${session.ai_session_id || 'none'} -> `
+            + `${identity.tool}:${identity.sessionId}`,
+          );
+        }
+        if (identity.tool) session.tool = identity.tool;
+        if (identity.sessionId) session.ai_session_id = identity.sessionId;
+        if (identity.transcriptPath) session.ai_transcript_path = identity.transcriptPath;
+      }
+
       // Resolve daemon binary once — shared across all parallel restores
       const binary = await findDaemonBinary();
 
@@ -3135,7 +3154,8 @@ Return ONLY a JSON object with these fields:
         const windowId = session.window_id || '';
         const titleLocked = session.title_locked || false;
         const needsAttention = session.needs_attention || false;
-        const claudeSessionId = session.ai_session_id || '';
+        const agentSessionId = session.ai_session_id || '';
+        const agentTool = session.tool || '';
 
         return (async (): Promise<{ name: string; wsPort: number; displayName: string; windowId: string; titleLocked: boolean; needsAttention: boolean; daemonPid: number | undefined; projectDir: string } | null> => {
           let wsPort: number | null = null;
@@ -3153,7 +3173,7 @@ Return ONLY a JSON object with these fields:
                 // this.projectPath would reattribute a worktree-spawned daemon
                 // to the trunk on respawn, destroying its workspace identity.
                 const respawnProjDir = session.project_dir || this.projectPath;
-                const respawnPid = await spawnDaemon(binary, session.name, respawnProjDir, windowId, displayName, claudeSessionId, titleLocked);
+                const respawnPid = await spawnDaemon(binary, session.name, respawnProjDir, windowId, displayName, agentSessionId, titleLocked, false, agentTool);
                 wsPort = await waitForWsPort(session.name, wsPortTimeoutMs, respawnPid);
                 daemonPid = findDaemonPidFromWsFile(session.name);
               }
@@ -3181,7 +3201,7 @@ Return ONLY a JSON object with these fields:
 
               // Preserve the session's ORIGINAL spawn dir (see warm-branch comment).
               const respawnProjDir2 = session.project_dir || this.projectPath;
-              const respawnPid2 = await spawnDaemon(binary, session.name, respawnProjDir2, windowId, displayName, claudeSessionId, titleLocked);
+              const respawnPid2 = await spawnDaemon(binary, session.name, respawnProjDir2, windowId, displayName, agentSessionId, titleLocked, false, agentTool);
               // Timeout scales with how many peers are also respawning — see
               // wsPortTimeoutMs computation above. With concurrency capped at
               // RESPAWN_CONCURRENCY the actual peer pressure is bounded.
@@ -4964,9 +4984,10 @@ function spawnDaemon(
   projectDir?: string,
   windowId?: string,
   displayName?: string,
-  claudeSessionId?: string,
+  agentSessionId?: string,
   titleLocked?: boolean,
   noAutoResume?: boolean,
+  agentTool?: string,
 ): Promise<number | undefined> {
   const shell = process.env.SHELL || '/bin/zsh';
   const args = ['-dmS', sessionName, '-s', shell];
@@ -5007,9 +5028,16 @@ function spawnDaemon(
   if (projectDir) {
     env.SCREEN_PROJECT_DIR = projectDir;
   }
-  // Pass Claude session ID so the daemon auto-resumes on restore
-  if (claudeSessionId) {
-    env.IMMORTERM_CLAUDE_SESSION_ID = claudeSessionId;
+  // Pass vendor-neutral restore identity. Keep the Claude alias for mixed
+  // extension/daemon versions, but never put a Codex thread into it.
+  if (agentSessionId) {
+    env.IMMORTERM_AI_SESSION_ID = agentSessionId;
+    if (!agentTool || agentTool === 'claude-code') {
+      env.IMMORTERM_CLAUDE_SESSION_ID = agentSessionId;
+    }
+  }
+  if (agentTool) {
+    env.IMMORTERM_AI_TOOL = agentTool;
   }
   // Block ALL recall tiers when shelve detected user explicitly exited claude.
   // Without this, the daemon's tier-4 fallback (`claude-env/*.env` mtime
