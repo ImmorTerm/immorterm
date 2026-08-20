@@ -7,7 +7,7 @@
  * non-allowlisted POSTs).
  *
  * Behavior:
- *   1. If a hub already responds on :1440 \u2192 reuse it (silent, fast).
+ *   1. If a compatible ImmorTerm Hub identifies itself on :1440 \u2192 reuse it.
  *   2. Else if the port is free \u2192 spawn target/release/immorterm-hub
  *      (or target/debug as fallback) with the workspace\u2019s extension
  *      resources as --static-dir.
@@ -28,6 +28,8 @@ import * as vscode from 'vscode';
 import { logger } from './utils/logger';
 
 export const HUB_PORT = 1440;
+export const HUB_API_VERSION = 1;
+export const REQUIRED_HUB_CAPABILITIES = ['bridge-v1', 'human-inbox-v1'] as const;
 
 let hubChild: ChildProcess | null = null;
 let supervisorTimer: NodeJS.Timeout | null = null;
@@ -35,20 +37,95 @@ let restartAttempts = 0;
 const MAX_RESTART_ATTEMPTS = 5;
 const RESTART_BASE_DELAY_MS = 500;
 
-/** Probe :HUB_PORT for a hub. Returns true iff GET /api/info returns 200. */
-function hubIsReachable(timeoutMs = 400): Promise<boolean> {
+interface HubProbe {
+  reachable: boolean;
+  compatible: boolean;
+  details?: string;
+}
+
+/** Validate the bounded, non-secret identity returned by GET /api/info. */
+export function isCompatibleHubInfo(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const info = value as Record<string, unknown>;
+  if (info.service !== 'immorterm-hub' || info.apiVersion !== HUB_API_VERSION) return false;
+  if (!Array.isArray(info.capabilities)) return false;
+  const capabilities = new Set(
+    info.capabilities.filter((item): item is string => typeof item === 'string')
+  );
+  return REQUIRED_HUB_CAPABILITIES.every((capability) => capabilities.has(capability));
+}
+
+/**
+ * Probe :HUB_PORT for a compatible Hub. A listener or legacy /api/info
+ * response is reachable but incompatible; it must never be silently adopted.
+ */
+function probeHub(timeoutMs = 400): Promise<HubProbe> {
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = (probe: HubProbe): void => {
+      if (settled) return;
+      settled = true;
+      resolve(probe);
+    };
     const req = http.get(
       { host: '127.0.0.1', port: HUB_PORT, path: '/api/info', timeout: timeoutMs },
       (res) => {
-        const ok = (res.statusCode ?? 0) >= 200 && (res.statusCode ?? 0) < 300;
-        res.resume();
-        resolve(ok);
+        const status = res.statusCode ?? 0;
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk: string) => {
+          const remaining = 64 * 1024 + 1 - body.length;
+          if (remaining > 0) body += chunk.slice(0, remaining);
+        });
+        res.on('end', () => {
+          if (status < 200 || status >= 300) {
+            finish({
+              reachable: true,
+              compatible: false,
+              details: `/api/info returned HTTP ${status}`,
+            });
+            return;
+          }
+          if (body.length > 64 * 1024) {
+            finish({
+              reachable: true,
+              compatible: false,
+              details: '/api/info response exceeded 64 KiB',
+            });
+            return;
+          }
+          let payload: unknown;
+          try {
+            payload = JSON.parse(body);
+          } catch {
+            finish({
+              reachable: true,
+              compatible: false,
+              details: '/api/info returned invalid JSON',
+            });
+            return;
+          }
+          const compatible = isCompatibleHubInfo(payload);
+          finish({
+            reachable: true,
+            compatible,
+            details: compatible
+              ? undefined
+              : 'Hub identity or capabilities do not match this extension',
+          });
+        });
       }
     );
-    req.on('error', () => resolve(false));
-    req.on('timeout', () => { req.destroy(); resolve(false); });
+    req.on('error', () => finish({ reachable: false, compatible: false }));
+    req.on('timeout', () => {
+      req.destroy();
+      finish({ reachable: false, compatible: false, details: '/api/info timed out' });
+    });
   });
+}
+
+async function hubIsReachable(timeoutMs = 400): Promise<boolean> {
+  return (await probeHub(timeoutMs)).compatible;
 }
 
 /** Returns true iff we can bind :HUB_PORT ourselves. */
@@ -176,10 +253,22 @@ let stopRequested = false;
  * the caller (e.g. the modal's Retry button) can show inline.
  */
 export async function ensureHubRunning(): Promise<HubStatus> {
-  if (await hubIsReachable()) {
+  const existing = await probeHub();
+  if (existing.compatible) {
     logger.info(`[hub-sidecar] reusing running hub on :${HUB_PORT}`);
     restartAttempts = 0;
     return { running: true, reason: 'reused' };
+  }
+  if (existing.reachable) {
+    const reason = `Port ${HUB_PORT} is serving an incompatible or legacy Hub.`;
+    logger.warn(`[hub-sidecar] ${reason} ${existing.details ?? ''}`.trim());
+    return {
+      running: false,
+      reason,
+      details:
+        `${existing.details ?? 'The service identity could not be verified'}. ` +
+        'Stop the old Hub or update the owning ImmorTerm installation, then reload this window.',
+    };
   }
   if (!(await portIsBindable())) {
     const reason = `Port ${HUB_PORT} is bound by another process.`;

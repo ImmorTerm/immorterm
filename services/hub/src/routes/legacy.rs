@@ -7,9 +7,9 @@
 use axum::Json;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::routes::registry::{spawn_session, SpawnRequest};
+use crate::routes::registry::{SpawnRequest, spawn_session};
 
 /// GET /api/gpu-probe — one-shot diagnostic. Hub logs whether navigator.gpu
 /// was defined in the calling webview. Used to verify WKWebView/WebView2
@@ -20,7 +20,12 @@ pub async fn gpu_probe(
     let has = q.get("has").cloned().unwrap_or_else(|| "unknown".into());
     let adapter = q.get("adapter").cloned().unwrap_or_default();
     let ua = q.get("ua").cloned().unwrap_or_default();
-    tracing::info!("[gpu-probe] navigator.gpu={} adapter={} ua={}", has, adapter, ua);
+    tracing::info!(
+        "[gpu-probe] navigator.gpu={} adapter={} ua={}",
+        has,
+        adapter,
+        ua
+    );
     Json(json!({ "ok": true, "has": has }))
 }
 
@@ -28,7 +33,10 @@ pub async fn gpu_probe(
 /// Use for capturing JS stack traces out-of-band when devtools automation
 /// is flaky. Accepts {level, msg, stack} JSON.
 pub async fn dev_log(Json(payload): Json<Value>) -> Json<Value> {
-    let level = payload.get("level").and_then(|v| v.as_str()).unwrap_or("info");
+    let level = payload
+        .get("level")
+        .and_then(|v| v.as_str())
+        .unwrap_or("info");
     let msg = payload.get("msg").and_then(|v| v.as_str()).unwrap_or("");
     let stack = payload.get("stack").and_then(|v| v.as_str()).unwrap_or("");
     tracing::info!("[dev-log] [{}] {} | stack: {}", level, msg, stack);
@@ -47,6 +55,10 @@ pub async fn info() -> Json<Value> {
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "standalone".to_string());
     Json(json!({
+        "service": "immorterm-hub",
+        "apiVersion": 1,
+        "version": env!("CARGO_PKG_VERSION"),
+        "capabilities": ["bridge-v1", "human-inbox-v1"],
         "projectName": project_name,
         "projectDir": project_dir,
     }))
@@ -78,12 +90,17 @@ pub async fn open_file(Json(payload): Json<Value>) -> Json<Value> {
     };
     // `reveal` is only consumed in the macOS cfg branch — linux/windows builds see it unused.
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
-    let reveal = payload.get("reveal").and_then(|v| v.as_bool()).unwrap_or(false);
+    let reveal = payload
+        .get("reveal")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     #[cfg(target_os = "macos")]
     let result = {
         let mut cmd = std::process::Command::new("open");
-        if reveal { cmd.arg("-R"); }
+        if reveal {
+            cmd.arg("-R");
+        }
         cmd.arg(&path).spawn().map(|_| ())
     };
     #[cfg(target_os = "windows")]
@@ -144,14 +161,22 @@ pub async fn url_preview(
     };
     let cap = bytes.len().min(131072);
     let html = String::from_utf8_lossy(&bytes[..cap]).to_string();
-    let head_end = html.to_ascii_lowercase().find("</head>")
+    let head_end = html
+        .to_ascii_lowercase()
+        .find("</head>")
         .map(|i| i + 7)
         .unwrap_or_else(|| html.len().min(50000));
     let head = &html[..head_end.min(html.len())];
 
     fn get_meta(head: &str, prop: &str) -> Option<String> {
-        let a = format!(r#"<meta[^>]+(?:property|name)=["']{0}["'][^>]+content=["']([^"']+)["']"#, regex_escape(prop));
-        let b = format!(r#"<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']{0}["']"#, regex_escape(prop));
+        let a = format!(
+            r#"<meta[^>]+(?:property|name)=["']{0}["'][^>]+content=["']([^"']+)["']"#,
+            regex_escape(prop)
+        );
+        let b = format!(
+            r#"<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']{0}["']"#,
+            regex_escape(prop)
+        );
         let re_a = regex::Regex::new(&a).ok()?;
         let re_b = regex::Regex::new(&b).ok()?;
         re_a.captures(head)
@@ -171,15 +196,22 @@ pub async fn url_preview(
     fn regex_escape(s: &str) -> String {
         let mut out = String::with_capacity(s.len());
         for c in s.chars() {
-            if ".+*?()[]{}|^$\\".contains(c) { out.push('\\'); }
+            if ".+*?()[]{}|^$\\".contains(c) {
+                out.push('\\');
+            }
             out.push(c);
         }
         out
     }
     fn absolute(base: &str, candidate: Option<String>) -> Option<String> {
         let c = candidate?;
-        if c.starts_with("http://") || c.starts_with("https://") { return Some(c); }
-        url::Url::parse(base).ok().and_then(|b| b.join(&c).ok()).map(|u| u.to_string())
+        if c.starts_with("http://") || c.starts_with("https://") {
+            return Some(c);
+        }
+        url::Url::parse(base)
+            .ok()
+            .and_then(|b| b.join(&c).ok())
+            .map(|u| u.to_string())
     }
 
     let title = get_meta(head, "og:title").or_else(|| {
@@ -196,8 +228,11 @@ pub async fn url_preview(
         .or_else(|| get_meta(head, "og:video:url"))
         .or_else(|| get_meta(head, "og:video"));
     let video_type = get_meta(head, "og:video:type");
-    let playable = video_type.as_deref()
-        .map(|t| t.starts_with("video/mp4") || t.starts_with("video/webm") || t.starts_with("video/ogg"))
+    let playable = video_type
+        .as_deref()
+        .map(|t| {
+            t.starts_with("video/mp4") || t.starts_with("video/webm") || t.starts_with("video/ogg")
+        })
         .unwrap_or(true);
 
     Json(json!({
@@ -313,10 +348,7 @@ pub async fn font() -> Json<Value> {
     ];
     #[cfg(target_os = "windows")]
     let candidates: &[(&str, &[&str])] = &[
-        (
-            "Cascadia Mono",
-            &[r"C:\Windows\Fonts\CascadiaMono.ttf"],
-        ),
+        ("Cascadia Mono", &[r"C:\Windows\Fonts\CascadiaMono.ttf"]),
         ("Consolas", &[r"C:\Windows\Fonts\consola.ttf"]),
         ("Lucida Console", &[r"C:\Windows\Fonts\lucon.ttf"]),
     ];
@@ -386,4 +418,21 @@ pub async fn new_session(body: Option<Json<Value>>) -> Json<Value> {
         "wsPort": resp.get("ws_port"),
         "displayName": resp.get("display_name"),
     }))
+}
+
+#[cfg(test)]
+mod info_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn info_has_a_machine_verifiable_compatibility_contract() {
+        let Json(payload) = info().await;
+        assert_eq!(payload["service"], "immorterm-hub");
+        assert_eq!(payload["apiVersion"], 1);
+        assert_eq!(payload["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            payload["capabilities"],
+            json!(["bridge-v1", "human-inbox-v1"])
+        );
+    }
 }
