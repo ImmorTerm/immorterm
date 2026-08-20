@@ -216,34 +216,55 @@ function readPidFromState(): number | undefined {
 	return undefined;
 }
 
-/** Find the gateway binary — check local, global npm, mono-repo */
-function findGatewayBinary(): string | null {
-	// 1. Check common global install location
-	try {
-		const { execFileSync } = await_import_sync();
-		const globalDir = execFileSync("npm", ["root", "-g"], {
-			encoding: "utf-8",
-			timeout: 5000,
-		}).trim();
-		const npmGlobalPath = path.join(globalDir, "immorterm-mcp-gateway", "dist", "index.js");
-		if (fs.existsSync(npmGlobalPath)) return npmGlobalPath;
-	} catch {}
-
-	// 2. Check in the mono-repo during development
-	const monoRepoPath = path.join(
-		os.homedir(),
-		"Development",
-		"immorterm",
-		"services",
-		"mcp-gateway",
-		"dist",
-		"index.js",
+/**
+ * Candidate npm global roots, without shelling out to `npm`.
+ *
+ * `npm root -g` was the only lookup here, and it is a bare `execFileSync("npm", …)`
+ * that depends on PATH. A GUI-launched extension host does not inherit a login
+ * shell's PATH, and version managers frequently shim `node` without shimming
+ * `npm` — so that call threw, selection fell through to the hard-coded
+ * development path below, and the gateway silently ran a STALE VENDORED COPY
+ * for months. Nothing surfaced: the wrong gateway starts and answers happily.
+ *
+ * Global installs live at `<prefix>/lib/node_modules`, and the prefix is the
+ * grandparent of the node binary — derivable from `process.execPath` under nvm,
+ * volta, asdf, proto, Homebrew and system installs alike.
+ */
+function npmGlobalRoots(): string[] {
+	const roots: string[] = [];
+	const nodeDir = path.dirname(process.execPath); // …/bin
+	const prefix = path.dirname(nodeDir); // …/
+	roots.push(path.join(prefix, "lib", "node_modules"));
+	// Homebrew keeps node's real prefix behind a symlinked shim on some setups.
+	roots.push("/opt/homebrew/lib/node_modules", "/usr/local/lib/node_modules");
+	const home = os.homedir();
+	roots.push(
+		path.join(home, ".proto", "tools", "node", "globals", "lib", "node_modules"),
+		path.join(home, ".volta", "tools", "image", "packages"),
+		path.join(home, ".npm-global", "lib", "node_modules"),
 	);
-	if (fs.existsSync(monoRepoPath)) return monoRepoPath;
+	return roots;
+}
 
-	// 3. Check relative to this file (if installed as dependency)
+/** Find the gateway binary — global install first, then a development checkout */
+function findGatewayBinary(): string | null {
+	// 1. Global npm install — the supported location, resolved WITHOUT `npm`.
+	for (const root of npmGlobalRoots()) {
+		const candidate = path.join(root, "immorterm-mcp-gateway", "dist", "index.js");
+		if (fs.existsSync(candidate)) return candidate;
+	}
+
+	// 2. Relative to this file, when the gateway ships as a dependency.
 	const localPath = path.join(__dirname, "..", "..", "services", "mcp-gateway", "dist", "index.js");
 	if (fs.existsSync(localPath)) return localPath;
+
+	// 3. A sibling checkout of the standalone repo, for development only.
+	//    NOTE: the old code hard-coded ~/Development/immorterm/services/mcp-gateway
+	//    — one developer's layout, and a path this repo no longer even contains
+	//    since the gateway was extracted. It is gone deliberately: preferring a
+	//    stale vendored copy over the installed one is worse than finding nothing.
+	const siblingRepo = path.join(__dirname, "..", "..", "..", "immorterm-mcp-gateway", "dist", "index.js");
+	if (fs.existsSync(siblingRepo)) return siblingRepo;
 
 	return null;
 }

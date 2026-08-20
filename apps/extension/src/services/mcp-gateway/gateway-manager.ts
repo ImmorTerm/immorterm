@@ -531,6 +531,24 @@ export async function killOldMcpProcesses(): Promise<{ killed: number }> {
  * 4. Workspace root (monorepo development)
  * 5. Legacy __dirname-based (dev only)
  */
+/**
+ * Candidate npm global roots, derived from the running node rather than `npm`.
+ * See findGatewayBinary step 3 for why shelling out to `npm` is not safe here.
+ */
+function npmGlobalRoots(): string[] {
+  const nodeDir = path.dirname(process.execPath); // …/bin
+  const prefix = path.dirname(nodeDir);
+  const home = os.homedir();
+  return [
+    path.join(prefix, 'lib', 'node_modules'),
+    '/opt/homebrew/lib/node_modules',
+    '/usr/local/lib/node_modules',
+    path.join(home, '.proto', 'tools', 'node', 'globals', 'lib', 'node_modules'),
+    path.join(home, '.volta', 'tools', 'image', 'packages'),
+    path.join(home, '.npm-global', 'lib', 'node_modules'),
+  ];
+}
+
 function findGatewayBinary(): string | null {
   // 1. Extension bundled (when published as vsix)
   const localPath = path.join(__dirname, '..', '..', '..', 'node_modules', 'immorterm-mcp-gateway', 'dist', 'index.js');
@@ -540,13 +558,24 @@ function findGatewayBinary(): string | null {
   const homePath = path.join(os.homedir(), '.immorterm', 'mcp-gateway', 'dist', 'index.js');
   if (fs.existsSync(homePath)) return homePath;
 
-  // 3. npm global install
-  try {
-    const { execFileSync } = require('child_process');
-    const globalDir = execFileSync('npm', ['root', '-g'], { encoding: 'utf-8', timeout: 5000 }).trim();
-    const npmGlobalPath = path.join(globalDir, 'immorterm-mcp-gateway', 'dist', 'index.js');
+  // 3. npm global install — resolved WITHOUT shelling out to `npm`.
+  //
+  // This used to be `execFileSync('npm', ['root','-g'])`, which depends on PATH.
+  // A GUI-launched extension host does not inherit a login shell's PATH, and
+  // version managers routinely shim `node` without shimming `npm` — so the call
+  // threw, selection fell through to step 4, and the gateway silently ran a
+  // STALE VENDORED COPY out of whichever workspace happened to be open. That
+  // copy predated the gateway's extraction into its own repo and still had a
+  // long-fixed bug, which surfaced as HTTP 502 "Child <name> is not alive" for
+  // every npx-based MCP server, on both Claude Code and Codex.
+  //
+  // Global installs live at `<prefix>/lib/node_modules`, and the prefix is the
+  // grandparent of the node binary — derivable from process.execPath under nvm,
+  // volta, asdf, proto, Homebrew and system installs alike.
+  for (const root of npmGlobalRoots()) {
+    const npmGlobalPath = path.join(root, 'immorterm-mcp-gateway', 'dist', 'index.js');
     if (fs.existsSync(npmGlobalPath)) return npmGlobalPath;
-  } catch {}
+  }
 
   // 4. Development: check workspace root (for monorepo development)
   if (cachedWorkspacePath) {
