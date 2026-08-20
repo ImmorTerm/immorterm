@@ -102,9 +102,36 @@ export function showTransientPopover(text, target, duration = 3000) {
 /**
  * Creates the tasks panel system. Returns { render, setTasks, dispose, startQuickAdd, openNewTaskModal }.
  */
-export function createTasksPanel({ taskListEl, tasksHeaderEl, postMessage, onDragState, getActiveSessionName, getTasksMode, onAttachToTerminal }) {
+export function createTasksPanel({ taskListEl, tasksHeaderEl, postMessage, onDragState, getActiveSessionName, getActiveSessionId, getSessionDisplayName, getTasksMode, onAttachToTerminal }) {
   let _tasks = [];
   let _selectedTaskId = null;
+  let _currentSessionOnly = false;
+  const sessionFilterBtn = document.getElementById('task-session-filter-btn');
+
+  function taskBelongsToCurrentSession(task) {
+    const activeId = getActiveSessionId ? getActiveSessionId() : getActiveSessionName?.();
+    if (!activeId) return false;
+    return task.context?.sourceImmorTermId === activeId
+      || (task.linkedSessions || []).some(session => session.immortermId === activeId);
+  }
+
+  function refreshSessionFilterButton() {
+    if (!sessionFilterBtn) return;
+    sessionFilterBtn.classList.toggle('active', _currentSessionOnly);
+    sessionFilterBtn.setAttribute('aria-pressed', _currentSessionOnly ? 'true' : 'false');
+    sessionFilterBtn.title = _currentSessionOnly
+      ? 'Showing current-session tasks — click to show all tasks'
+      : 'Showing all tasks — click to show only the current session';
+  }
+  if (sessionFilterBtn) {
+    sessionFilterBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      _currentSessionOnly = !_currentSessionOnly;
+      refreshSessionFilterButton();
+      render();
+    });
+    refreshSessionFilterButton();
+  }
 
   // ── Drag state ───────────────────────────────────────────────
   let _taskDragState = null;
@@ -162,8 +189,9 @@ export function createTasksPanel({ taskListEl, tasksHeaderEl, postMessage, onDra
     taskListEl.textContent = '';
 
     // Separate active tasks from archived (done) tasks
-    const activeTasks = _tasks.filter(t => t.status !== 'done');
-    const archivedTasks = _tasks.filter(t => t.status === 'done');
+    const visibleTasks = _currentSessionOnly ? _tasks.filter(taskBelongsToCurrentSession) : _tasks;
+    const activeTasks = visibleTasks.filter(t => t.status !== 'done');
+    const archivedTasks = visibleTasks.filter(t => t.status === 'done');
 
     // Show/hide archive button based on archived task count
     const archiveBtn = document.getElementById('archive-tasks-btn');
@@ -429,6 +457,22 @@ export function createTasksPanel({ taskListEl, tasksHeaderEl, postMessage, onDra
       if (task.updatedAt !== task.createdAt) meta.textContent += ' · Updated ' + relativeTime(task.updatedAt);
       if (task.completedAt) meta.textContent += ' · Completed ' + relativeTime(task.completedAt);
       body.appendChild(meta);
+
+      const sourceId = task.context?.sourceImmorTermId;
+      if (sourceId) {
+        const provenance = el('div', 'task-modal-provenance');
+        provenance.appendChild(el('span', 'task-modal-provenance-label', 'Created by'));
+        const sourceButton = el('button', 'task-modal-source-link',
+          getSessionDisplayName ? getSessionDisplayName(sourceId) : sourceId);
+        sourceButton.title = 'Open ImmorTerm session ' + sourceId;
+        sourceButton.addEventListener('click', () => {
+          postMessage({ type: 'switch-to-task-session', immortermId: sourceId });
+          overlay.remove();
+        });
+        provenance.appendChild(sourceButton);
+        provenance.appendChild(el('code', 'task-modal-source-id', sourceId));
+        body.appendChild(provenance);
+      }
     }
 
     modal.appendChild(body);

@@ -2341,7 +2341,9 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
    * and OpenMemory session UUID (from claude-env files).
    */
   private getTaskOriginContext(): TaskContext {
-    const activeSession = [...this.sessions.values()].find(s => s.windowId);
+    const activeSession = [...this.sessions.values()].find(
+      session => !!this.activeWindowId && session.windowId === this.activeWindowId,
+    ) || [...this.sessions.values()].find(session => session.windowId);
     const ctx: TaskContext = {
       cwd: this.projectPath || process.cwd(),
       sourceImmorTermId: activeSession?.windowId,
