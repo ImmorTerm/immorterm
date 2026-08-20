@@ -78,6 +78,7 @@ step "wasm-pack build (release)..."
 # rewrites them to /build at compile time.
 RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/build" \
   wasm-pack build "$WASM_SRC" --target web --release 2>&1 | grep -E '(Compiling|Optimizing|Done|error)'
+node scripts/verify-wasm-pair.mjs "$WASM_PKG"
 echo "  OK"
 
 step "Copy ALL artifacts to extension resources..."
@@ -100,6 +101,7 @@ if [[ "$PKG_LINES" -ne "$DEST_LINES" ]]; then
   echo "  FAIL: JS glue line count mismatch (pkg=$PKG_LINES, dest=$DEST_LINES)"
   exit 1
 fi
+node scripts/verify-wasm-pair.mjs "$WASM_DEST"
 echo "  OK: 4 files + snippets synced ($PKG_LINES lines in JS glue)"
 
 step "Oxlint: terminal HTML embedded JS..."
@@ -126,7 +128,20 @@ echo "  OK: No JS errors"
 
 step "Deploy to installed extension..."
 if [ -d "$EXT_DIR" ]; then
-  cp -r "$WASM_DEST/"* "$EXT_DIR/resources/wasm/"
+  # Never expose a half-updated glue/binary pair to a live WebView. Validate a
+  # complete staging directory, then swap the directory as one unit.
+  EXT_WASM_DIR="$EXT_DIR/resources/wasm"
+  EXT_WASM_STAGE="$EXT_DIR/resources/.wasm-stage.$$"
+  EXT_WASM_BACKUP="$EXT_DIR/resources/.wasm-backup.$$"
+  mkdir -p "$EXT_WASM_STAGE"
+  cp -R "$WASM_DEST/." "$EXT_WASM_STAGE/"
+  node scripts/verify-wasm-pair.mjs "$EXT_WASM_STAGE"
+  mv "$EXT_WASM_DIR" "$EXT_WASM_BACKUP"
+  if ! mv "$EXT_WASM_STAGE" "$EXT_WASM_DIR"; then
+    mv "$EXT_WASM_BACKUP" "$EXT_WASM_DIR"
+    exit 1
+  fi
+  rm -rf "$EXT_WASM_BACKUP"
   # Also deploy terminal HTML resources (oxlint-checked in step 7)
   cp "$REPO_ROOT/apps/extension/resources/"*-terminal.html "$EXT_DIR/resources/" 2>/dev/null || true
   cp "$REPO_ROOT/apps/extension/resources/"*-terminal.css "$EXT_DIR/resources/" 2>/dev/null || true

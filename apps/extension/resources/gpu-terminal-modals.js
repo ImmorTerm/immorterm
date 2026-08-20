@@ -56,6 +56,9 @@ function modalStatusRow(name, status, detail) {
  * @param {Function} deps.getPrefs      - () => { prefBorderEnabled, prefBorderOpacity, ... }
  * @param {Function} deps.setPrefs      - (partial) => void — updates pref state + calls WASM
  * @param {Function} deps.getTerminal   - () => terminal instance (or null)
+ * @param {Function} deps.getProjectDir - () => active project root
+ * @param {Function} deps.getActiveSessionIdentity - () => {sessionName, immortermId}
+ * @param {Function} deps.onSelectSession - (sessionName, immortermId) => boolean
  */
 export function createModalSystem({
   modalBackdrop,
@@ -70,6 +73,8 @@ export function createModalSystem({
   getPrefs,
   setPrefs,
   getTerminal,
+  getProjectDir,
+  getActiveSessionIdentity,
   getBackgroundControlMode,
   setBackgroundControlMode,
   getSessionCount,
@@ -77,6 +82,9 @@ export function createModalSystem({
   getCharacters,
   getActiveSpeakMode,
   getProjectSpeakMode,
+  onInboxChanged,
+  onSelectSession,
+  wakeAgent,
   hubBaseUrl,
   remoteName,
 }) {
@@ -114,9 +122,24 @@ export function createModalSystem({
       ? HUB + '/api/v1/remotes/' + encodeURIComponent(remoteName) + '/config/preferences'
       : HUB + '/api/v1/config/preferences';
   }
+  function inboxUrl(rest, projectDir) {
+    const base = remoteName
+      ? HUB + '/api/v1/remotes/' + encodeURIComponent(remoteName) + '/inbox'
+      : HUB + '/api/v1/inbox';
+    const suffix = rest ? '/' + rest.replace(/^\//, '') : '';
+    return base + suffix + (projectDir ? '?project_dir=' + encodeURIComponent(projectDir) : '');
+  }
+  function resolveProjectDir() {
+    const injected = typeof getProjectDir === 'function' ? getProjectDir() : '';
+    if (typeof injected === 'string' && injected.trim()) return Promise.resolve(injected.trim());
+    return fetch(HUB + '/api/info')
+      .then(r => r.json()).catch(() => ({}))
+      .then(info => (info && (info.projectDir || info.project_dir)) || '');
+  }
   let activeModal = null;
   let modalStack = [];  // stack of parent modals to return to on dismiss
   let pomodoroModule = null; // set by setPomodoroModule() after lazy import
+  let inboxScope = 'all';
 
   // ── Core show/dismiss ──
 
@@ -143,6 +166,7 @@ export function createModalSystem({
       'performance': 'Performance',
       'session-info': 'Session Info',
       'digest-llm': 'Digest LLM',
+      inbox: 'Human Inbox',
     };
     // If opened from stack (sub-page), add back button
     if (_fromStack && modalStack.length > 0) {
@@ -173,6 +197,7 @@ export function createModalSystem({
     else if (kind === 'pomodoro' && pomodoroModule) pomodoroModule.renderInModal(modalBody, modalFooter);
     else if (kind === 'digest-llm') renderDigestLlmModal();
     else if (kind === 'digest-llm-test') renderDigestLlmTestModal();
+    else if (kind === 'inbox') renderInboxModal();
   }
 
   function dismissModal() {
@@ -2704,6 +2729,200 @@ export function createModalSystem({
       container.appendChild(el('p', 'ss-search-md-p', trimmed));
     }
     return container;
+  }
+
+  // ── Human Inbox ──
+
+  function inboxPost(url, body) {
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(async response => {
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || payload.error) throw new Error(payload.error || ('HTTP ' + response.status));
+      return payload;
+    });
+  }
+
+  async function renderInboxModal() {
+    clearEl(modalBody);
+    modalBody.appendChild(modalSpinner('Loading your inbox...'));
+    try {
+      const projectDir = await resolveProjectDir();
+      if (!projectDir) throw new Error('No active project is available for this inbox.');
+      const response = await fetch(inboxUrl('', projectDir));
+      const payload = await response.json();
+      if (!response.ok || payload.error) throw new Error(payload.error || ('HTTP ' + response.status));
+      const allMessages = Array.isArray(payload.messages) ? payload.messages : [];
+
+      // Opening the Inbox is the acknowledgement boundary. Do this before
+      // painting so the status-bar badge and the modal never disagree for a
+      // whole interaction. If the write fails we keep the unread treatment and
+      // retain the explicit retry button below.
+      let unread = Number(payload.unread) || 0;
+      if (unread > 0) {
+        try {
+          await inboxPost(inboxUrl('read-all'), { project_dir: projectDir });
+          unread = 0;
+          for (const item of allMessages) item.status = 'read';
+          if (onInboxChanged) onInboxChanged();
+        } catch (_) {
+          // Non-fatal: the messages are still useful and "Mark all read" is a
+          // visible retry path.
+        }
+      }
+      clearEl(modalBody);
+
+      const activeIdentity = typeof getActiveSessionIdentity === 'function'
+        ? (getActiveSessionIdentity() || {}) : {};
+      const messages = inboxScope === 'current'
+        ? allMessages.filter(item => {
+            const source = item.source || {};
+            return (activeIdentity.sessionName && source.session_name === activeIdentity.sessionName)
+              || (activeIdentity.immortermId && source.immorterm_id === activeIdentity.immortermId);
+          })
+        : allMessages;
+
+      const toolbar = el('div', 'inbox-toolbar');
+      const summary = el('div', 'inbox-summary');
+      summary.appendChild(el('strong', '', String(unread)));
+      summary.appendChild(document.createTextNode(' unread · ' + messages.length + (inboxScope === 'current' ? ' current' : ' total')));
+      toolbar.appendChild(summary);
+      const scope = el('div', 'inbox-scope');
+      for (const [value, label] of [['all', 'All'], ['current', 'Current']]) {
+        const button = el('button', 'inbox-scope-button' + (inboxScope === value ? ' active' : ''), label);
+        button.type = 'button';
+        button.setAttribute('aria-pressed', String(inboxScope === value));
+        button.addEventListener('click', () => {
+          inboxScope = value;
+          renderInboxModal();
+        });
+        scope.appendChild(button);
+      }
+      toolbar.appendChild(scope);
+      if (unread > 0) {
+        const readAll = el('button', 'inbox-text-button', 'Mark all read');
+        readAll.addEventListener('click', async () => {
+          readAll.disabled = true;
+          try {
+            await inboxPost(inboxUrl('read-all'), { project_dir: projectDir });
+            if (onInboxChanged) onInboxChanged();
+            renderInboxModal();
+          } catch (error) {
+            readAll.disabled = false;
+            readAll.textContent = error.message || 'Could not mark read';
+          }
+        });
+        toolbar.appendChild(readAll);
+      }
+      modalBody.appendChild(toolbar);
+
+      if (!messages.length) {
+        const empty = el('div', 'inbox-empty');
+        empty.appendChild(el('div', 'inbox-empty-icon', '🔔'));
+        empty.appendChild(el('div', 'inbox-empty-title', inboxScope === 'current' ? 'No messages from this terminal' : 'Nothing needs your attention'));
+        empty.appendChild(el('div', 'inbox-empty-copy', inboxScope === 'current'
+          ? 'Switch back to All to review messages from the rest of this project.'
+          : 'AI summaries, decisions, blockers, and requests will collect here.'));
+        modalBody.appendChild(empty);
+        return;
+      }
+
+      const list = el('div', 'inbox-list');
+      for (const item of messages) {
+        const kind = ['info', 'success', 'warning', 'action_required'].includes(item.kind) ? item.kind : 'info';
+        const card = el('article', 'inbox-card kind-' + kind + (item.status === 'unread' ? ' unread' : ''));
+        const header = el('div', 'inbox-card-header');
+        const titleWrap = el('div', 'inbox-title-wrap');
+        titleWrap.appendChild(el('span', 'inbox-kind', kind.replace('_', ' ')));
+        titleWrap.appendChild(el('h3', 'inbox-title', item.title || 'Notification'));
+        header.appendChild(titleWrap);
+        header.appendChild(el('time', 'inbox-time', new Date(Number(item.created_at) || 0).toLocaleString([], {
+          month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+        })));
+        card.appendChild(header);
+
+        const source = item.source || {};
+        const sourceBits = [source.display_name || source.immorterm_id, source.tool].filter(Boolean);
+        if (sourceBits.length) {
+          const sourceRow = el('div', 'inbox-source');
+          sourceRow.appendChild(document.createTextNode('From ' + sourceBits.join(' · ')));
+          if (source.session_name && typeof onSelectSession === 'function') {
+            const viewTerminal = el('button', 'inbox-session-link', 'View terminal →');
+            viewTerminal.type = 'button';
+            viewTerminal.addEventListener('click', event => {
+              event.stopPropagation();
+              if (onSelectSession(source.session_name, source.immorterm_id)) dismissModal();
+            });
+            sourceRow.appendChild(viewTerminal);
+            card.classList.add('has-session');
+            card.tabIndex = 0;
+            card.setAttribute('role', 'button');
+            card.setAttribute('aria-label', (item.title || 'Inbox message') + '. View originating terminal.');
+            const openOrigin = event => {
+              if (event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return;
+              if (event.target && event.target.closest && event.target.closest('button')) return;
+              if (event.type === 'keydown') event.preventDefault();
+              if (onSelectSession(source.session_name, source.immorterm_id)) dismissModal();
+            };
+            card.addEventListener('click', openOrigin);
+            card.addEventListener('keydown', openOrigin);
+          }
+          card.appendChild(sourceRow);
+        }
+        card.appendChild(renderMarkdown(String(item.message || '')));
+
+        if (Array.isArray(item.pills) && item.pills.length) {
+          const pills = el('div', 'inbox-pills');
+          for (const pill of item.pills) {
+            const tone = ['neutral', 'blue', 'green', 'yellow', 'red', 'purple'].includes(pill.tone) ? pill.tone : 'neutral';
+            pills.appendChild(el('span', 'inbox-pill tone-' + tone, String(pill.label || '')));
+          }
+          card.appendChild(pills);
+        }
+
+        const result = item.action_result;
+        if (result && result.label) {
+          card.appendChild(el('div', 'inbox-action-result', '✓ You replied: ' + result.label));
+        } else if (Array.isArray(item.actions) && item.actions.length) {
+          const actions = el('div', 'inbox-actions');
+          for (const action of item.actions) {
+            const style = ['primary', 'secondary', 'success', 'danger'].includes(action.style) ? action.style : 'secondary';
+            const button = el('button', 'inbox-action style-' + style, String(action.label || action.id || 'Respond'));
+            button.addEventListener('click', async () => {
+              actions.querySelectorAll('button').forEach(other => { other.disabled = true; });
+              button.textContent = 'Sending...';
+              try {
+                const response = await inboxPost(inboxUrl(encodeURIComponent(item.id) + '/action'), {
+                  project_dir: projectDir,
+                  action_id: action.id,
+                });
+                const sourceSession = response && response.source && response.source.session_name;
+                const delivered = wakeAgent && wakeAgent(sourceSession, response.reply_prompt || (
+                  'Human Inbox response: ' + (action.label || action.id)
+                ));
+                if (onInboxChanged) onInboxChanged();
+                await renderInboxModal();
+                if (!delivered) {
+                  modalBody.prepend(el('div', 'modal-error', 'Response saved, but the owning AI session is not connected, so it could not be woken.'));
+                }
+              } catch (error) {
+                actions.querySelectorAll('button').forEach(other => { other.disabled = false; });
+                button.textContent = error.message || 'Could not send';
+              }
+            });
+            actions.appendChild(button);
+          }
+          card.appendChild(actions);
+        }
+        list.appendChild(card);
+      }
+      modalBody.appendChild(list);
+    } catch (error) {
+      clearEl(modalBody);
+      modalBody.appendChild(el('div', 'modal-error', error.message || 'Could not load the Human Inbox.'));
+    }
   }
 
   /** Render a single search result as a collapsible card. */

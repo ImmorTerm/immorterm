@@ -1121,6 +1121,24 @@ pub async fn proxy_remote_tasks(
     proxy_remote_tasks_inner(name, rest, method, query, body).await
 }
 
+pub async fn proxy_remote_inbox_root(
+    Path(name): Path<String>,
+    method: axum::http::Method,
+    query: axum::extract::RawQuery,
+    body: axum::body::Bytes,
+) -> (StatusCode, Json<Value>) {
+    proxy_remote_inbox_inner(name, String::new(), method, query, body).await
+}
+
+pub async fn proxy_remote_inbox(
+    Path((name, rest)): Path<(String, String)>,
+    method: axum::http::Method,
+    query: axum::extract::RawQuery,
+    body: axum::body::Bytes,
+) -> (StatusCode, Json<Value>) {
+    proxy_remote_inbox_inner(name, rest, method, query, body).await
+}
+
 /// Generic SSH-proxy for `/api/v1/registry/*` writes. Local hub has a
 /// dozen registry actions (shelve, close, reattach, rename, reorder,
 /// title-lock, speak-mode, …) — instead of mirroring each as its own
@@ -1302,6 +1320,80 @@ async fn proxy_remote_tasks_inner(
     let raw = String::from_utf8_lossy(&out.stdout);
     let v: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({ "raw": raw }));
     (StatusCode::OK, Json(v))
+}
+
+async fn proxy_remote_inbox_inner(
+    name: String,
+    rest: String,
+    method: axum::http::Method,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+    body: axum::body::Bytes,
+) -> (StatusCode, Json<Value>) {
+    let Some(entry) = lookup_remote(&name) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("no remote named '{name}'") })),
+        );
+    };
+    let qs = query.map(|value| format!("?{value}")).unwrap_or_default();
+    let rest_path = if rest.is_empty() {
+        String::new()
+    } else {
+        format!("/{rest}")
+    };
+    let method_str = method.as_str().to_string();
+    let body_str = String::from_utf8_lossy(&body);
+    let body_escaped = body_str.replace('\'', "'\\''");
+    let url = shell_quote(&format!(
+        "{}/api/v1/inbox{rest_path}{qs}",
+        remote_hub_base(&entry)
+    ));
+    let curl_command = if method_str == "POST" {
+        format!(
+            "curl -sS -f --max-time 8 -X POST -H 'content-type: application/json' \
+             -d '{body_escaped}' {url}"
+        )
+    } else {
+        format!("curl -sS -f --max-time 8 {url}")
+    };
+    let probe = tokio::task::spawn_blocking(move || {
+        Command::new("ssh")
+            .args([
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-p",
+                &entry.ssh_port.to_string(),
+                &entry.ssh_target,
+                &curl_command,
+            ])
+            .output()
+    })
+    .await;
+    let output = match probe {
+        Ok(Ok(output)) => output,
+        _ => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "ssh proxy failed" })),
+            );
+        }
+    };
+    if !output.status.success() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "error": "remote inbox endpoint failed",
+                "stderr": String::from_utf8_lossy(&output.stderr),
+            })),
+        );
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({ "raw": raw }));
+    (StatusCode::OK, Json(value))
 }
 
 /// `GET /api/v1/remotes/{name}/files/index` — SSH-proxy the file-browser

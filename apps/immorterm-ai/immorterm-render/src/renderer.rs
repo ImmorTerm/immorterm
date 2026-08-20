@@ -1834,6 +1834,11 @@ impl TerminalRenderer {
                         && col >= data.theme_area_start_col
                         && col < data.theme_area_end_col
                 }
+                StatusBarTarget::Inbox => {
+                    data.inbox_end_col > data.inbox_start_col
+                        && col >= data.inbox_start_col
+                        && col < data.inbox_end_col
+                }
                 StatusBarTarget::Scratch => {
                     data.scratch_end_col > data.scratch_start_col
                         && col >= data.scratch_start_col
@@ -1956,10 +1961,34 @@ impl TerminalRenderer {
         let right_start_col = cols.saturating_sub(right_total);
         let mut right_cursor = right_start_col;
 
-        for section in &data.right_sections {
+        for (section_index, section) in data.right_sections.iter().enumerate() {
             let is_brand = right_cursor >= data.brand_start_col;
             let mut fg = section.fg;
             fg[3] *= reveal;
+
+            if section_index == 0 {
+                self.render_text_at(
+                    "✉", right_cursor + 1, display_row, cw, ch,
+                    [text_offset[0] - cw * 0.10, text_offset[1] - ch * 0.08],
+                    fg, 1.24, 0, 0, time, queue, glyph_instances,
+                );
+                if data.inbox_unread > 0 {
+                    let label = if data.inbox_unread > 99 { "99+".to_string() } else { data.inbox_unread.to_string() };
+                    let badge_col = right_cursor + 2;
+                    self.render_text_at(
+                        &"●".repeat(label.chars().count()), badge_col, display_row, cw, ch,
+                        [text_offset[0], text_offset[1] - ch * 0.24],
+                        [0.96, 0.16, 0.25, reveal], 0.92, 0, 0, time, queue, glyph_instances,
+                    );
+                    self.render_text_at(
+                        &label, badge_col, display_row, cw, ch,
+                        [text_offset[0] + cw * 0.18, text_offset[1] - ch * 0.20],
+                        [1.0, 1.0, 1.0, reveal], 0.58, 0, 0, time, queue, glyph_instances,
+                    );
+                }
+                right_cursor += section.text.chars().count();
+                continue;
+            }
 
             // Soft drop shadow on the brand: stack 4 low-alpha passes at slight
             // pixel offsets to fake a gaussian falloff. No shimmer on shadow

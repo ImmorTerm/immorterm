@@ -1423,6 +1423,7 @@
         <span class="codicon codicon-chevron-right sec-chevron"></span>
         <span class="sec-title">Tasks</span>
         <span class="sec-actions">
+          <button class="sec-action codicon codicon-filter" id="task-session-filter-btn" title="Show only tasks created by or linked to the current session" aria-pressed="false"></button>
           <button class="sec-action codicon codicon-table" id="task-board-btn" title="Open task board"></button>
           <button class="sec-action codicon codicon-archive" id="archive-tasks-btn" title="Archived tasks" style="display:none"></button>
           <button class="sec-action codicon codicon-add" id="new-task-btn" title="New Task"></button>
@@ -3139,6 +3140,25 @@
     const sidebarExpandBtn = document.getElementById('sidebar-expand-btn');
     const resizeHandle = document.getElementById('sidebar-resize-handle');
 
+    function humanInboxUrl(projectDir) {
+      const base = _remoteName
+        ? HUB_BASE_URL + '/api/v1/remotes/' + encodeURIComponent(_remoteName) + '/inbox'
+        : HUB_BASE_URL + '/api/v1/inbox';
+      return base + '?project_dir=' + encodeURIComponent(projectDir || '');
+    }
+    async function refreshHumanInboxCount() {
+      const session = sessions.get(activeSessionName);
+      const projectDir = fileBrowserRoot || (session && session.projectDir) || '';
+      if (!projectDir) return;
+      try {
+        const response = await fetch(humanInboxUrl(projectDir));
+        const payload = await response.json();
+        const unread = Number(payload.unread) || 0;
+        if (terminal && terminal.set_inbox_unread) terminal.set_inbox_unread(unread);
+      } catch (_) { /* hub/remote may be temporarily unavailable */ }
+    }
+    setInterval(refreshHumanInboxCount, 15000);
+
     // No-op in the flex layout. Kept as a named export so call sites we
     // added during an earlier (absolute-positioned) CSS experiment stay
     // compilable. `#container { display: flex }` already gives terminal-area
@@ -4590,11 +4610,37 @@
       return vendor ? vendor + ' ' + body : body;
     }
 
+    function compactTokenCount(value) {
+      const n = Number(value) || 0;
+      if (n >= 1000000) return (n / 1000000).toFixed(n % 1000000 ? 1 : 0) + 'm';
+      if (n >= 1000) return Math.round(n / 1000) + 'k';
+      return String(n);
+    }
+
     /** Mode 1 — context window: Claude CTX: 42% */
     function formatApiStats(c) {
       const vendor = vendorLabel(c);
       const pct = c.context_pct != null ? Math.round(c.context_pct) : 0;
-      return vendor ? vendor + ' CTX: ' + pct + '%' : 'CTX: ' + pct + '%';
+      const used = Number(c.context_used_tokens) || 0;
+      const window = Number(c.context_window_tokens) || 0;
+      const range = used > 0 && window > 0
+        ? ' (' + compactTokenCount(used) + '/' + compactTokenCount(window) + ')'
+        : '';
+      return (vendor ? vendor + ' ' : '') + 'CTX: ' + pct + '%' + range;
+    }
+
+    let codexStatsSeq = 0;
+    const codexStatsPending = new Map();
+    function refreshCodexStats(sessionName, session, force) {
+      const c = session && session.claudeRaw;
+      const transcriptPath = c && c.transcript_path;
+      if (!c || c.tool !== 'codex' || !transcriptPath || IS_STANDALONE) return;
+      const now = Date.now();
+      if (!force && now - (session.lastCodexStatsRequest || 0) < 5000) return;
+      session.lastCodexStatsRequest = now;
+      const requestId = 'codex-stats-' + (++codexStatsSeq);
+      codexStatsPending.set(requestId, sessionName);
+      vscode.postMessage({ type: 'resolve-codex-stats', requestId, transcriptPath });
     }
 
     // ── Emoji Overlay System ──
@@ -6994,6 +7040,7 @@
         aiStatsMode = (aiStatsMode + 1) % 2;
         const s = sessions.get(activeSessionName);
         if (s && s.claudeRaw) {
+          refreshCodexStats(activeSessionName, s, true);
           s.aiStats = formatCurrentStats(s.claudeRaw);
           if (terminal) setAiStatsWithOverlay(s.aiStats);
           if (terminal) terminal.set_ai_ctx_pct(aiStatsMode === 1 ? s.claudeRaw.context_pct : 0);
@@ -7590,6 +7637,7 @@
                   if (!anyActive) { stopAutoCycle(); stopHealthChecks(); }
                 } else if (s && msg.claude.active) {
                   s.claudeRaw = msg.claude;
+                  refreshCodexStats(sessionName, s, false);
                   s.aiStats = formatCurrentStats(msg.claude);
                   // Tell the renderer whose TUI it is reading (`❯` vs `›`, rule
                   // row vs none, `[Image #N]` vs nothing).
@@ -8197,6 +8245,8 @@
       }
 
       activeSessionName = sessionName;
+      refreshHumanInboxCount();
+      if (tasksPanel) tasksPanel.render();
 
       // Push the active session's branch label to the renderer. The branch
       // string itself was already stored on the most recent control_event
@@ -8673,7 +8723,11 @@
             const c = msg.claude;
             const s = sessions.get(activeSessionName);
             if (c.active) {
-              if (s) { s.claudeRaw = c; s.aiStats = formatCurrentStats(c); }
+              if (s) {
+                s.claudeRaw = c;
+                refreshCodexStats(activeSessionName, s, true);
+                s.aiStats = formatCurrentStats(c);
+              }
               if (terminal) terminal.set_ai_tool(c.tool || '');
               setAiStatsWithOverlay(s ? s.aiStats : formatCurrentStats(c));
               if (terminal) terminal.set_ai_ctx_pct(c.context_pct || 0);
@@ -8708,7 +8762,11 @@
             const c = msg.claude;
             const s = sessions.get(activeSessionName);
             if (c.active) {
-              if (s) { s.claudeRaw = c; s.aiStats = formatCurrentStats(c); }
+              if (s) {
+                s.claudeRaw = c;
+                refreshCodexStats(activeSessionName, s, false);
+                s.aiStats = formatCurrentStats(c);
+              }
               setAiStatsWithOverlay(s ? s.aiStats : formatCurrentStats(c));
               if (terminal) terminal.set_ai_ctx_pct(c.context_pct || 0);
               startHealthChecks();
@@ -10918,6 +10976,7 @@
       // separate WS messages are processed atomically in the same frame.
       if (terminal && pendingPtyChunks.length > 0) {
         const sbBefore = userScrollLock ? terminal.scrollback_len() : 0;
+        const offsetBefore = userScrollLock ? terminal.scroll_offset() : 0;
         if (pendingPtyChunks.length === 1) {
           terminal.process(pendingPtyChunks[0]);
         } else {
@@ -10934,7 +10993,12 @@
         pendingPtyLen = 0;
         if (userScrollLock) {
           const sbGrown = terminal.scrollback_len() - sbBefore;
-          if (sbGrown > 0) terminal.scroll(sbGrown);
+          // Codex-aware WASM may already have relocated the viewport by its
+          // content anchor. Apply legacy append compensation only when the
+          // processor left the numeric offset unchanged.
+          if (sbGrown > 0 && terminal.scroll_offset() === offsetBefore) {
+            terminal.scroll(sbGrown);
+          }
         } else if (!(termInput && termInput.isMouseDown()) && terminal.scroll_offset() > 0) {
           terminal.scroll_to_bottom();
         }
@@ -12909,7 +12973,7 @@
     const dirListPending = new Map(); // requestId → resolve fn (VS Code list-dir round-trip)
     const wsPortResolvePending = new Map(); // sessionName → resolve fn (VS Code resolve-ws-port round-trip)
     const filePreviewPending = new Map(); // requestId → resolve fn (VS Code file-preview round-trip)
-    const claudeImagePending = new Map(); // requestId → { cacheKey, n } (VS Code [Image #N] resolve)
+    const claudeImagePending = new Map(); // requestId → { cacheKey, linkKey } ([Image #N] resolve)
     let dirListSeq = 0;
     let linkCursorActive = false;
     let linkStatReqSeq = 0;
@@ -13095,7 +13159,10 @@
       renderRendered();
       return mdContainer;
     };
-    const linkIdentity = (l) => (l ? l.kind + ':' + l.text + ':' + (l.line || 0) + ':' + (l.col || 0) : '');
+    const linkIdentity = (l) => (l
+      ? l.kind + ':' + l.text + ':' + (l.line || 0) + ':' + (l.col || 0)
+        + ':' + (l.promptText || '') + ':' + (l.promptReverseOrdinal || 0)
+      : '');
     const showLinkTooltip = (link, clientX, clientY, meta) => {
       if (typeof cancelLinkHide === 'function') cancelLinkHide();
       const sameLink = linkHoverState && linkIdentity(linkHoverState.link) === linkIdentity(link) && linkTooltip.classList.contains('visible');
@@ -14367,7 +14434,12 @@
           // tabs keep the strict UUID check — there the tracker is
           // reliable, and ambiguity isn't worth the extra cost.
           const effectiveUuid = uuid || (_remoteName ? 'auto' : null);
-          const cacheKey = 'claude-image:' + (effectiveUuid || 'scan') + '/' + link.n;
+          const promptText = typeof link.promptText === 'string' ? link.promptText : '';
+          const promptReverseOrdinal = Number(link.promptReverseOrdinal) || 1;
+          const cacheKey = promptText && sess && sess.claudeRaw && sess.claudeRaw.tool === 'codex'
+            ? 'codex-image-prompt:' + (sess.claudeRaw.transcript_path || 'unknown')
+              + '/' + promptText + '/' + promptReverseOrdinal + '/' + link.n
+            : 'claude-image:' + (effectiveUuid || 'scan') + '/' + link.n;
           const cached = linkExistCache.get(cacheKey);
           if (cached && cached.exists) { activate(cached); }
           else if (cached && !cached.exists) { deactivate(); }
@@ -14382,7 +14454,8 @@
             fetch(url, { method: 'HEAD' }).then(r => {
               const stillHovering = linkHoverState && linkHoverState.link
                 && linkHoverState.link.kind === 'claude-image'
-                && linkHoverState.link.n === link.n;
+                && linkHoverState.link.n === link.n
+                && linkIdentity(linkHoverState.link) === linkIdentity(link);
               if (r.ok) {
                 const meta = { exists: true, imageDataUrl: url };
                 linkExistCache.set(cacheKey, meta);
@@ -14399,9 +14472,11 @@
             // dir and otherwise picks the newest matching <N>.png.
             activate(null);
             const requestId = 'cimg-' + (++linkStatReqSeq);
-            claudeImagePending.set(requestId, { cacheKey, n: link.n });
+            claudeImagePending.set(requestId, { cacheKey, linkKey: linkIdentity(link) });
             vscode.postMessage({
               type: 'resolve-claude-image', requestId, n: link.n,
+              promptText: promptText || undefined,
+              promptReverseOrdinal,
               uuid: uuid || undefined, windowId: windowId || undefined,
               // Codex keeps pasted images inline in its rollout, so the host
               // resolves them from there rather than from any cache dir.
@@ -14777,6 +14852,8 @@
         // Scratch terminal: reveal/refocus if live, else request one from the
         // active session's daemon (panel is built on the scratch_info reply).
         handleScratchClick();
+      } else if (target === 'inbox') {
+        if (modals) modals.showModal('inbox');
       } else if (target === 'shared_activity') {
         toggleSharedActivity();
       } else if (target === 'ai_stats') {
@@ -15713,7 +15790,7 @@
             linkExistCache.set(pend.cacheKey, meta);
             if (linkHoverState && linkHoverState.link
                 && linkHoverState.link.kind === 'claude-image'
-                && linkHoverState.link.n === pend.n) {
+                && linkIdentity(linkHoverState.link) === pend.linkKey) {
               if (meta.exists) {
                 setLinkCursor(true);
                 showLinkTooltip(linkHoverState.link, linkHoverState.clientX, linkHoverState.clientY, meta);
@@ -15721,6 +15798,27 @@
                 setLinkCursor(false);
                 linkTooltipPinned = false;
                 hideLinkTooltip();
+              }
+            }
+          }
+          break;
+        }
+        case 'codex-stats-result': {
+          const sessionName = codexStatsPending.get(msg.requestId);
+          if (sessionName) {
+            codexStatsPending.delete(msg.requestId);
+            const s = sessions.get(sessionName);
+            const stats = msg.stats || {};
+            if (s && s.claudeRaw && s.claudeRaw.tool === 'codex') {
+              if (stats.model) s.claudeRaw.model = stats.model;
+              if (stats.contextPct != null) s.claudeRaw.context_pct = stats.contextPct;
+              if (stats.contextUsedTokens != null) s.claudeRaw.context_used_tokens = stats.contextUsedTokens;
+              if (stats.contextWindowTokens != null) s.claudeRaw.context_window_tokens = stats.contextWindowTokens;
+              s.aiStats = formatCurrentStats(s.claudeRaw);
+              if (sessionName === activeSessionName && terminal) {
+                setAiStatsWithOverlay(s.aiStats);
+                terminal.set_ai_ctx_pct(aiStatsMode === 1 ? s.claudeRaw.context_pct : 0);
+                dirty = true;
               }
             }
           }
@@ -16033,6 +16131,35 @@
                 // server (which returns 403 for non-GETs). Absolute URL
                 // routes through CSP\u2019s connect-src to the actual hub.
                 hubBaseUrl: HUB_BASE_URL,
+                getProjectDir: () => {
+                  if (fileBrowserRoot) return fileBrowserRoot;
+                  const session = sessions.get(activeSessionName);
+                  return (session && session.projectDir) || '';
+                },
+                onInboxChanged: refreshHumanInboxCount,
+                getActiveSessionIdentity: () => {
+                  const session = sessions.get(activeSessionName);
+                  return {
+                    sessionName: activeSessionName,
+                    immortermId: session && session.windowId,
+                  };
+                },
+                onSelectSession: (sessionName, immortermId) => {
+                  if (sessionName && sessions.has(sessionName)) {
+                    switchSession(sessionName);
+                    return true;
+                  }
+                  if (immortermId) {
+                    for (const [name, session] of sessions) {
+                      if (session.windowId === immortermId) {
+                        switchSession(name);
+                        return true;
+                      }
+                    }
+                  }
+                  return false;
+                },
+                wakeAgent: wakePlanAgent,
                 dismissPopup,
                 getPrefs: () => ({ ...prefs }),
                 setPrefs: (p) => {
@@ -16133,6 +16260,16 @@
                   }
                 },
                 getActiveSessionName: () => activeSessionName,
+                getActiveSessionId: () => {
+                  const active = activeSessionName ? sessions.get(activeSessionName) : null;
+                  return (active && active.windowId) || activeSessionName;
+                },
+                getSessionDisplayName: (immortermId) => {
+                  for (const [name, session] of sessions) {
+                    if (session.windowId === immortermId) return session.displayName || name;
+                  }
+                  return immortermId;
+                },
                 getTasksMode: () => tasksMode,
                 onAttachToTerminal: ({ taskId, taskTitle, targetName }) => {
                   if (_remoteName || IS_STANDALONE) {
@@ -16209,6 +16346,7 @@
             try {
               filesModule = await import(msg.filesUri);
               if (msg.projectDir) fileBrowserRoot = msg.projectDir;
+              refreshHumanInboxCount();
               fileBrowserPanel = filesModule.createFileBrowser({
                 treeEl: document.getElementById('file-tree'),
                 searchInput: document.getElementById('file-search-input'),
@@ -16802,6 +16940,44 @@
     };
 
     focusInput();
+    requestAnimationFrame(() => {
+      const styleTags = Array.from(document.querySelectorAll('style[data-immorterm-style]'));
+      const sidebar = document.getElementById('sidebar');
+      const fileBrowser = document.getElementById('file-browser');
+      const styleSheets = Array.from(document.styleSheets).map((sheet) => {
+        let ruleCount = null;
+        let error = null;
+        try { ruleCount = sheet.cssRules.length; }
+        catch (e) { error = String(e && e.message ? e.message : e); }
+        return { href: sheet.href || null, ruleCount, error };
+      });
+      const computed = (element) => {
+        if (!element) return null;
+        const style = getComputedStyle(element);
+        return {
+          display: style.display,
+          width: style.width,
+          minWidth: style.minWidth,
+          overflow: style.overflow,
+          fontSize: style.fontSize,
+        };
+      };
+      vscode.postMessage({
+        type: 'style-health',
+        inlineStyles: styleTags.map((style) => ({
+          name: style.dataset.immortermStyle || '',
+          textLength: style.textContent.length,
+          ruleCount: (() => {
+            try { return style.sheet ? style.sheet.cssRules.length : null; }
+            catch (_) { return null; }
+          })(),
+        })),
+        styleSheets,
+        sidebar: computed(sidebar),
+        fileBrowser: computed(fileBrowser),
+        body: computed(document.body),
+      });
+    });
     vscode.postMessage({ type: 'loaded' });
   </script>
 </body>

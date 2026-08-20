@@ -711,6 +711,96 @@ describe('GPU Terminal — Render Loop Safety', () => {
   });
 });
 
+describe('GPU Terminal — Codex Viewport Anchoring', () => {
+  const html = readHtml();
+  const js = extractInlineScript(html);
+
+  it('does not double-compensate after WASM relocates a Codex viewport', () => {
+    expect(js).toContain('const offsetBefore = userScrollLock ? terminal.scroll_offset() : 0');
+    expect(js).toContain('terminal.scroll_offset() === offsetBefore');
+  });
+
+  it('retains legacy scrollback compensation when WASM leaves the offset unchanged', () => {
+    const start = js.indexOf('const sbGrown = terminal.scrollback_len() - sbBefore');
+    const body = js.slice(start, start + 500);
+    expect(body).toContain('if (sbGrown > 0 && terminal.scroll_offset() === offsetBefore)');
+    expect(body).toContain('terminal.scroll(sbGrown)');
+  });
+});
+
+describe('GPU Terminal — Codex image hover routing', () => {
+  it('counts only images from real user messages, not compactions or tool output', async () => {
+    const {
+      extractCodexPromptImageDataUrlByPrompt,
+      extractCodexPromptImagePathByPrompt,
+      extractCodexContextStats,
+    } = await import('../gpu-terminal');
+    const records = [
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [
+        { type: 'input_text', text: 'first' },
+        { type: 'input_image', image_url: 'data:image/png;base64,FIRST' },
+      ] } },
+      { type: 'compacted', payload: { content: [
+        { type: 'input_image', image_url: 'data:image/png;base64,DUPLICATE' },
+      ] } },
+      { type: 'response_item', payload: { type: 'custom_tool_call_output', output: {
+        type: 'input_image', image_url: 'data:image/png;base64,TOOL',
+      } } },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [
+        { type: 'input_text', text: 'second' },
+        { type: 'input_image', image_url: 'data:image/jpeg;base64,SECOND' },
+      ] } },
+    ];
+    const rollout = records.map(record => JSON.stringify(record)).join('\n');
+
+    expect(extractCodexPromptImageDataUrlByPrompt(rollout, 'second', 1))
+      .toBe('data:image/jpeg;base64,SECOND');
+
+    const stats = extractCodexContextStats([
+      JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-5.6-sol' } }),
+      JSON.stringify({ type: 'event_msg', payload: { type: 'token_count', info: {
+        last_token_usage: { total_tokens: 129200 }, model_context_window: 258400,
+      } } }),
+    ].join('\n'));
+    expect(stats).toEqual({
+      model: 'gpt-5.6-sol', contextPct: 50,
+      contextUsedTokens: 129200, contextWindowTokens: 258400,
+    });
+  });
+
+  it('keys repeated per-prompt image labels by owning prompt', () => {
+    const html = readHtml();
+    const js = extractInlineScript(html);
+    expect(js).toContain("'codex-image-prompt:'");
+    expect(js).toContain('promptText: promptText || undefined');
+  });
+
+  it('recovers the exact source path for an image in a Codex prompt', async () => {
+    const { extractCodexPromptImagePathByPrompt } = await import('../gpu-terminal');
+    const prompt = '<image name=[Image #1] path="/tmp/first.png">\n</image>\n'
+      + '<image name=[Image #2] path="/tmp/second.png">\n</image>\ncompare these';
+    const record = { type: 'response_item', payload: {
+      type: 'message', role: 'user', content: [
+        { type: 'input_text', text: prompt },
+        { type: 'input_image', image_url: 'data:image/png;base64,FIRST' },
+        { type: 'input_image', image_url: 'data:image/png;base64,SECOND' },
+      ],
+    } };
+    const older = JSON.parse(JSON.stringify(record));
+    older.payload.content[0].text = older.payload.content[0].text
+      .replace('/tmp/first.png', '/tmp/older-first.png')
+      .replace('/tmp/second.png', '/tmp/older-second.png');
+    const rollout = [older, record].map(JSON.stringify).join('\n');
+
+    expect(extractCodexPromptImagePathByPrompt(
+      rollout, '[Image #1] [Image #2] compare these', 2,
+    )).toBe('/tmp/second.png');
+    expect(extractCodexPromptImagePathByPrompt(
+      rollout, '[Image #1] [Image #2] compare these', 2, 2,
+    )).toBe('/tmp/older-second.png');
+  });
+});
+
 describe('GPU Terminal — Shared Activity', () => {
   const html = readHtml();
   const js = extractInlineScript(html);

@@ -13,6 +13,7 @@ pub enum StatusBarTarget {
     Brand,     // "ImmorTerm" text → session picker
     AiStats,   // AI stats text → toggle mode
     ThemeArea, // Dot + time area → theme picker
+    Inbox,     // Mail icon → project Human Inbox
     Scratch,   // ">_" icon → scratch terminal toggle
     SharedActivity, // "⇄" icon → shared conversation/activity panel
     Title,     // Session title → tooltip with last user prompt
@@ -256,6 +257,12 @@ pub struct StatusBarData {
     pub theme_area_start_col: usize,
     /// Theme area end column (exclusive)
     pub theme_area_end_col: usize,
+    /// Human Inbox icon start column.
+    pub inbox_start_col: usize,
+    /// Human Inbox icon end column (exclusive).
+    pub inbox_end_col: usize,
+    /// Unread count rendered as a notification badge over the Inbox segment.
+    pub inbox_unread: u32,
     /// Scratch terminal icon start column (">_" region)
     pub scratch_start_col: usize,
     /// Scratch terminal icon end column (exclusive)
@@ -350,7 +357,7 @@ pub fn build_default_sections(
     cols: usize,
     ctx_pct: f32,
 ) -> StatusBarData {
-    build_sections_with_theme(project, title, ai_stats, last_active, dot, cols, ctx_pct, &StatusBarTheme::default(), 0, 0.0)
+    build_sections_with_theme(project, title, ai_stats, last_active, dot, cols, ctx_pct, 0, &StatusBarTheme::default(), 0, 0.0)
 }
 
 /// Marquee scroll speed: characters per second.
@@ -431,6 +438,7 @@ pub fn build_sections_with_theme(
     dot: char,
     cols: usize,
     ctx_pct: f32,
+    inbox_unread: u32,
     theme: &StatusBarTheme,
     scroll_offset: usize,
     scroll_fract: f32,
@@ -438,12 +446,19 @@ pub fn build_sections_with_theme(
     let title_hovered = scroll_offset == usize::MAX;
 
     // ── Pre-compute right total width (needed for title budget) ──
+    let badge_chars = match inbox_unread { 0 => 0, 1..=9 => 1, 10..=99 => 2, _ => 3 };
+    let right_text_inbox = if inbox_unread == 0 {
+        " ✉ ".to_string()
+    } else {
+        format!(" ✉{} ", " ".repeat(badge_chars))
+    };
     let right_text_scratch = " >_ ";
     let right_text_shared_activity = " ⇄ ";
     let right_text_last = format!(" Last: {} ", last_active);
     let right_text_dot = format!(" {} ", dot);
     let right_text_brand = " ImmorTerm ";
-    let right_total_chars = right_text_scratch.chars().count()
+    let right_total_chars = right_text_inbox.chars().count()
+        + right_text_scratch.chars().count()
         + right_text_shared_activity.chars().count()
         + right_text_last.chars().count()
         + right_text_dot.chars().count()
@@ -547,11 +562,19 @@ pub fn build_sections_with_theme(
         if ctx_pct > 0.0 {
             // CTX mode: ▰▱ bar matching the C binary exactly.
             // Format: "CTX: ▰▰▰▰▱▱▱▱▱▱ 42%"
-            const BAR_WIDTH: usize = 10;
+            let range = ai_stats.rsplit_once('(')
+                .and_then(|(_, tail)| tail.strip_suffix(')'))
+                .filter(|value| value.contains('/'))
+                .unwrap_or("");
+            const BAR_WIDTH: usize = 5;
             let pct_int = ctx_pct.round() as usize;
             let filled = (pct_int * BAR_WIDTH + 50) / 100; // round
             let empty = BAR_WIDTH - filled;
-            let pct_str = format!(" {}%", pct_int);
+            let pct_str = if range.is_empty() {
+                format!(" {}%", pct_int)
+            } else {
+                format!(" {} {}%", range, pct_int)
+            };
             let label = "CTX: ";
 
             // Total display width: "CTX: " + bar + " NN%"
@@ -622,6 +645,11 @@ pub fn build_sections_with_theme(
     // ── Right sections (no AI stats — they moved to center) ──
     let mut right_sections = Vec::new();
 
+    right_sections.push(StatusBarSection {
+        text: right_text_inbox,
+        fg: theme.fg_accent,
+    });
+
     // Scratch terminal icon (theme accent color)
     right_sections.push(StatusBarSection {
         text: right_text_scratch.to_string(),
@@ -664,14 +692,15 @@ pub fn build_sections_with_theme(
         cursor += sec.text.chars().count();
     }
 
-    // Scratch icon = first right section
-    let scratch_start_col = starts[0];
-    let scratch_end_col = if n > 1 { starts[1] } else { 0 };
-    let shared_activity_start_col = starts.get(1).copied().unwrap_or(0);
-    let shared_activity_end_col = starts.get(2).copied().unwrap_or(0);
+    let inbox_start_col = starts[0];
+    let inbox_end_col = starts.get(1).copied().unwrap_or(0);
+    let scratch_start_col = starts.get(1).copied().unwrap_or(0);
+    let scratch_end_col = starts.get(2).copied().unwrap_or(0);
+    let shared_activity_start_col = starts.get(2).copied().unwrap_or(0);
+    let shared_activity_end_col = starts.get(3).copied().unwrap_or(0);
     // Theme area = Last/time only (dot is independent, not part of any hover zone)
-    let theme_area_start_col = starts.get(2).copied().unwrap_or(0);
-    let theme_area_end_col = starts.get(3).copied().unwrap_or(0);
+    let theme_area_start_col = starts.get(3).copied().unwrap_or(0);
+    let theme_area_end_col = starts.get(4).copied().unwrap_or(0);
     let brand_start_col = starts.last().copied().unwrap_or(0);
 
     // Project column range: left_sections[0] (project name, starts at col 0)
@@ -693,6 +722,9 @@ pub fn build_sections_with_theme(
         ctx_pct: if has_ai { ctx_pct } else { 0.0 },
         theme_area_start_col,
         theme_area_end_col,
+        inbox_start_col,
+        inbox_end_col,
+        inbox_unread,
         scratch_start_col,
         scratch_end_col,
         shared_activity_start_col,
@@ -772,6 +804,11 @@ pub fn hit_test(data: &StatusBarData, col: usize) -> StatusBarTarget {
         && col < data.theme_area_end_col
     {
         StatusBarTarget::ThemeArea
+    } else if data.inbox_end_col > data.inbox_start_col
+        && col >= data.inbox_start_col
+        && col < data.inbox_end_col
+    {
+        StatusBarTarget::Inbox
     } else if data.scratch_end_col > data.scratch_start_col
         && col >= data.scratch_start_col
         && col < data.scratch_end_col
@@ -919,5 +956,29 @@ mod tests {
             hit_test(&data, data.scratch_start_col),
             StatusBarTarget::Scratch
         );
+    }
+
+    #[test]
+    fn human_inbox_has_a_stable_target_and_bounded_badge() {
+        let data = build_sections_with_theme(
+            "project", "title", "", "now", '·', 120, 0.0, 123,
+            &StatusBarTheme::default(), 0, 0.0,
+        );
+        assert_eq!(hit_test(&data, data.inbox_start_col), StatusBarTarget::Inbox);
+        assert_eq!(data.inbox_unread, 123);
+        assert_eq!(data.right_sections[0].text, " ✉    ");
+        assert_eq!(hit_test(&data, data.scratch_start_col), StatusBarTarget::Scratch);
+        assert_eq!(hit_test(&data, data.shared_activity_start_col), StatusBarTarget::SharedActivity);
+    }
+
+    #[test]
+    fn context_bar_keeps_used_and_max_window_visible() {
+        let data = build_sections_with_theme(
+            "project", "title", "Codex CTX: 50% (129k/258k)", "now", '·', 120,
+            50.0, 0, &StatusBarTheme::default(), 0, 0.0,
+        );
+        let center = data.center_sections.iter().map(|s| s.text.as_str()).collect::<String>();
+        assert!(center.contains("129k/258k"), "got {center}");
+        assert!(center.contains("50%"), "got {center}");
     }
 }

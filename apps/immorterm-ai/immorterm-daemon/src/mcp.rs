@@ -1898,6 +1898,45 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "immorterm_send_to_inbox",
+            "description": "Publish a durable human-facing message to this project's ImmorTerm Inbox. Use for summaries, important notifications, decisions, blockers, or anything that should still need attention after the user returns. Markdown is supported. Optional pills add compact context; action buttons correlate the human's response back to this same session.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "maxLength": 200, "description": "Short human-readable card title." },
+                    "message": { "type": "string", "maxLength": 64000, "description": "Message body in Markdown." },
+                    "kind": { "type": "string", "enum": ["info", "success", "warning", "action_required"], "default": "info", "description": "Visual importance and intent of the message." },
+                    "pills": {
+                        "type": "array",
+                        "maxItems": 8,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string", "maxLength": 160 },
+                                "tone": { "type": "string", "enum": ["neutral", "blue", "green", "yellow", "red", "purple"], "default": "neutral" }
+                            },
+                            "required": ["label"]
+                        }
+                    },
+                    "actions": {
+                        "type": "array",
+                        "maxItems": 6,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string", "maxLength": 128, "description": "Stable machine-readable response id, e.g. human_back or task_done." },
+                                "label": { "type": "string", "maxLength": 160, "description": "Button text shown to the human." },
+                                "style": { "type": "string", "enum": ["primary", "secondary", "success", "danger"], "default": "secondary" }
+                            },
+                            "required": ["id", "label"]
+                        }
+                    },
+                    "session": { "type": "string", "description": "Current ImmorTerm session. Normally auto-resolved." }
+                },
+                "required": ["title", "message"]
+            }
+        }),
+        json!({
             "name": "immorterm_send_file",
             "description": "Send a local file to the live session currently connected through ImmorTerm Interactive sharing. The active share determines the recipient. ImmorTerm prefers a zero-copy canonical path and transfers bounded bytes only when the receiver cannot access it.",
             "inputSchema": {
@@ -2160,13 +2199,13 @@ fn tool_definitions() -> Vec<Value> {
         // ── Task management tools ──────────────────────────────────────
         json!({
             "name": "immorterm_create_task",
-            "description": "Create a new task in the project's task list. Tasks help track bugs, features, and investigations. Created tasks appear in the IDE sidebar.",
+            "description": "Create a new task in the project's task list. Always use a stable workstream prefix like '[release #1]'; if omitted, ImmorTerm adds a deterministic session prefix and sequence number. Created tasks retain their creator-session provenance and appear in the IDE sidebar.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "title": {
                         "type": "string",
-                        "description": "Short description of the task."
+                        "description": "Short description. Prefer '[workstream #N] Action'; reuse the same concise prefix and increment N for related work."
                     },
                     "type": {
                         "type": "string",
@@ -2811,6 +2850,7 @@ fn handle_tool_call(
         "immorterm_project_sessions" => handle_project_sessions(&arguments),
         "immorterm_acknowledge_message" => handle_acknowledge_message(&arguments, rt),
         "immorterm_reply_to_message" => handle_reply_to_message(&arguments, rt),
+        "immorterm_send_to_inbox" => handle_send_to_inbox(&arguments),
         "immorterm_send_file" => handle_send_file(&arguments, rt),
         // Agent Teams tools
         "immorterm_list_primitives" => handle_list_primitives(&arguments, rt),
@@ -5429,6 +5469,87 @@ fn handle_reply_to_message(
     ))
 }
 
+fn handle_send_to_inbox(args: &Value) -> Result<String, String> {
+    let title = args
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or("'title' is required")?;
+    if title.chars().count() > 200 {
+        return Err("'title' must not exceed 200 characters".into());
+    }
+    let message = args
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or("'message' is required")?;
+    if message.chars().count() > 64_000 {
+        return Err("'message' must not exceed 64000 characters".into());
+    }
+
+    let session = resolve_session(args)?;
+    let registry = crate::registry::Registry::load();
+    let entry = registry
+        .sessions
+        .iter()
+        .find(|entry| entry.name == session || entry.window_id == session)
+        .ok_or_else(|| format!("session '{session}' is not present in the ImmorTerm registry"))?;
+    let project_dir = entry
+        .owner_project_dir
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or(&entry.project_dir);
+    if project_dir.trim().is_empty() {
+        return Err(format!("session '{session}' has no project directory"));
+    }
+
+    let body = json!({
+        "project_dir": project_dir,
+        "title": title,
+        "message": message,
+        "kind": args.get("kind").cloned().unwrap_or_else(|| json!("info")),
+        "pills": args.get("pills").cloned().unwrap_or_else(|| json!([])),
+        "actions": args.get("actions").cloned().unwrap_or_else(|| json!([])),
+        "source": {
+            "session_name": entry.name,
+            "immorterm_id": entry.window_id,
+            "display_name": entry.display_name,
+            "tool": entry.tool.as_deref().unwrap_or("unknown"),
+        },
+    });
+    let hub = std::env::var("IMMORTERM_HUB_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:1440".to_string())
+        .trim_end_matches('/')
+        .to_string();
+    let url = format!("{hub}/api/v1/inbox");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|error| format!("failed to build inbox client: {error}"))?;
+    let response = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .map_err(|error| format!("ImmorTerm Inbox is unavailable at {url}: {error}"))?;
+    let status = response.status();
+    let text = response.text().map_err(|error| error.to_string())?;
+    if !status.is_success() {
+        return Err(format!("inbox publish failed ({status}): {text}"));
+    }
+    let payload: Value = serde_json::from_str(&text)
+        .map_err(|error| format!("inbox returned invalid JSON: {error}"))?;
+    if let Some(error) = payload.get("error").and_then(Value::as_str) {
+        return Err(format!("inbox publish failed: {error}"));
+    }
+    let message_id = payload
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or("inbox response omitted message id")?;
+    Ok(format!("Published Human Inbox message {message_id}."))
+}
+
 fn handle_send_file(args: &Value, rt: &tokio::runtime::Runtime) -> Result<String, String> {
     let session = resolve_session(args)?;
     let path_arg = args
@@ -6289,8 +6410,71 @@ fn write_tasks(project_id: &str, tasks: &[Value]) -> Result<(), String> {
     Ok(())
 }
 
+fn sanitize_task_prefix(value: &str) -> String {
+    let mut prefix = String::new();
+    let mut last_was_separator = false;
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            prefix.push(ch.to_ascii_lowercase());
+            last_was_separator = false;
+        } else if !last_was_separator && !prefix.is_empty() {
+            prefix.push('-');
+            last_was_separator = true;
+        }
+    }
+    prefix.trim_matches('-').chars().take(32).collect()
+}
+
+fn current_task_prefix() -> String {
+    if let Ok(value) = std::env::var("IMMORTERM_TASK_PREFIX") {
+        let prefix = sanitize_task_prefix(&value);
+        if !prefix.is_empty() {
+            return prefix;
+        }
+    }
+    let current_id = std::env::var("IMMORTERM_WINDOW_ID")
+        .or_else(|_| std::env::var("IMMORTERM_ID"))
+        .ok();
+    if let Some(current_id) = current_id {
+        let registry = crate::registry::Registry::load();
+        if let Some(entry) = registry.sessions.iter().find(|entry| entry.window_id == current_id) {
+            let prefix = sanitize_task_prefix(&entry.display_name);
+            if !prefix.is_empty() {
+                return prefix;
+            }
+        }
+    }
+    "agent".into()
+}
+
+fn task_title_has_prefix(title: &str) -> bool {
+    let title = title.trim();
+    let Some(close) = title.find(']') else { return false };
+    let Some(inner) = title.strip_prefix('[').map(|value| &value[..close.saturating_sub(1)]) else {
+        return false;
+    };
+    inner.rsplit_once(" #").is_some_and(|(_, number)| {
+        !number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit())
+    })
+}
+
+fn ensure_task_title_prefix(title: &str, tasks: &[Value], prefix: &str) -> String {
+    let title = title.trim();
+    if task_title_has_prefix(title) {
+        return title.to_string();
+    }
+    let marker = format!("[{} #", prefix).to_ascii_lowercase();
+    let next = tasks.iter().filter_map(|task| {
+        let existing = task.get("title")?.as_str()?.trim();
+        let lower = existing.to_ascii_lowercase();
+        let rest = lower.strip_prefix(&marker)?;
+        rest.split(']').next()?.parse::<u64>().ok()
+    }).max().unwrap_or(0) + 1;
+    format!("[{prefix} #{next}] {title}")
+}
+
 fn handle_create_task(args: &Value) -> Result<String, String> {
-    let title = args
+    let requested_title = args
         .get("title")
         .and_then(|v| v.as_str())
         .ok_or("Missing required field: title")?;
@@ -6299,6 +6483,8 @@ fn handle_create_task(args: &Value) -> Result<String, String> {
 
     let project_id = get_stable_project_id()?;
     let mut tasks = read_tasks(&project_id)?;
+    let prefix = current_task_prefix();
+    let title = ensure_task_title_prefix(requested_title, &tasks, &prefix);
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -7105,6 +7291,24 @@ mod tests {
     }
 
     #[test]
+    fn agent_tasks_always_receive_a_stable_incrementing_prefix() {
+        let tasks = vec![
+            json!({"title":"[release #1] First"}),
+            json!({"title":"[release #3] Third"}),
+            json!({"title":"plain legacy task"}),
+        ];
+        assert_eq!(
+            ensure_task_title_prefix("Ship marketplaces", &tasks, "release"),
+            "[release #4] Ship marketplaces"
+        );
+        assert_eq!(
+            ensure_task_title_prefix("[ui #7] Keep explicit", &tasks, "release"),
+            "[ui #7] Keep explicit"
+        );
+        assert_eq!(sanitize_task_prefix("Factory / Codex!"), "factory-codex");
+    }
+
+    #[test]
     fn session_message_tool_does_not_accept_an_arbitrary_target() {
         let tools = tool_definitions();
         let tool = tools
@@ -7130,6 +7334,24 @@ mod tests {
         assert_eq!(tool["inputSchema"]["required"], json!(["path"]));
         assert!(is_raster_image_name("shot.webp"));
         assert!(!is_raster_image_name("notes.md"));
+    }
+
+    #[test]
+    fn human_inbox_tool_requires_bounded_content_and_offers_structured_context() {
+        let tools = tool_definitions();
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == "immorterm_send_to_inbox")
+            .expect("human inbox tool definition");
+        let schema = &tool["inputSchema"];
+        let properties = schema["properties"].as_object().unwrap();
+        assert_eq!(schema["required"], json!(["title", "message"]));
+        assert_eq!(properties["title"]["maxLength"], 200);
+        assert_eq!(properties["message"]["maxLength"], 64_000);
+        assert!(properties.contains_key("pills"));
+        assert!(properties.contains_key("actions"));
+        assert!(properties.contains_key("session"));
+        assert!(!properties.contains_key("project_dir"));
     }
 
     #[test]

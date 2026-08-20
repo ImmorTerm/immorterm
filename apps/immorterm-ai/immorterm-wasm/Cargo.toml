@@ -8,6 +8,13 @@ description = "Browser target — WASM bridge for ImmorTerm"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# wasm-pack 0.15 currently bundles a wasm-opt build that rejects the bulk-memory
+# and saturating-conversion instructions emitted by the current Rust toolchain.
+# Keep release builds deterministic and valid; optimization can be re-enabled
+# once wasm-pack's bundled Binaryen supports the emitted feature set.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
 [dependencies]
 immorterm-core = { workspace = true }
 immorterm-render = { workspace = true }

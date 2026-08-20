@@ -128,4 +128,116 @@ impl Comments {
             false
         }
     }
+
+    /// Relocate comments after an in-place TUI redraw. Stable numeric line ids
+    /// handle ordinary scrollback growth and eviction, but Codex can replace
+    /// rows above an anchor without changing either counter.
+    pub fn reanchor_by_text(
+        &mut self,
+        row_count: usize,
+        net_shift: i64,
+        mut row_text: impl FnMut(usize) -> String,
+    ) {
+        for comment in &mut self.items {
+            if comment.line_text.is_empty() {
+                continue;
+            }
+            if let Some(found) = resolve_row_anchor(
+                row_count,
+                net_shift,
+                comment.line_id,
+                &comment.line_text,
+                &mut row_text,
+            ) {
+                comment.line_id = found as i64 - net_shift;
+            }
+        }
+    }
+}
+
+/// Resolve a stable line id and captured row text to its current content row.
+/// The line id is the cheap path; nearby text matching repairs in-place redraws.
+pub(crate) fn resolve_row_anchor(
+    row_count: usize,
+    net_shift: i64,
+    line_id: i64,
+    needle: &str,
+    mut row_text: impl FnMut(usize) -> String,
+) -> Option<usize> {
+    let expected = line_id + net_shift;
+    if expected >= 0 && (expected as usize) < row_count && row_text(expected as usize) == needle {
+        return Some(expected as usize);
+    }
+    // A blank row has no useful identity. Searching would attach it to an
+    // arbitrary nearby spacer, so leave its caller's numeric anchor unchanged.
+    if needle.trim().is_empty() {
+        return None;
+    }
+    closest_matching_row(row_count, expected.max(0) as usize, needle, &mut row_text)
+}
+
+pub(crate) fn closest_matching_row(
+    row_count: usize,
+    expected: usize,
+    needle: &str,
+    mut row_text: impl FnMut(usize) -> String,
+) -> Option<usize> {
+    const SEARCH_RADIUS: usize = 2_048;
+    if row_count == 0 {
+        return None;
+    }
+    let center = expected.min(row_count - 1);
+    for distance in 0..=SEARCH_RADIUS.min(row_count - 1) {
+        let before = center.saturating_sub(distance);
+        if row_text(before) == needle {
+            return Some(before);
+        }
+        let after = center.saturating_add(distance);
+        if distance > 0 && after < row_count && row_text(after) == needle {
+            return Some(after);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_redraw_reanchors_comment_to_same_text() {
+        let mut comments = Comments::new();
+        comments.add(1, 0, 4, "keep me".into(), "keep".into(), "note".into(), 0.0);
+        let rows = ["new top", "different", "keep me", "footer"];
+        comments.reanchor_by_text(rows.len(), 0, |idx| rows[idx].to_string());
+        assert_eq!(comments.items[0].line_id, 2);
+    }
+
+    #[test]
+    fn closest_duplicate_prefers_original_neighborhood() {
+        let rows = ["same", "x", "x", "same"];
+        assert_eq!(
+            closest_matching_row(rows.len(), 2, "same", |i| rows[i].into()),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn selection_endpoints_follow_inserted_codex_rows() {
+        let rows = ["new status", "new progress", "selected start", "selected end"];
+        assert_eq!(
+            resolve_row_anchor(rows.len(), 0, 0, "selected start", |i| rows[i].into()),
+            Some(2)
+        );
+        assert_eq!(
+            resolve_row_anchor(rows.len(), 0, 1, "selected end", |i| rows[i].into()),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn blank_rows_do_not_jump_to_an_arbitrary_spacer() {
+        let rows = ["", "content", ""];
+        assert_eq!(resolve_row_anchor(rows.len(), 0, 1, "", |i| rows[i].into()), None);
+    }
 }

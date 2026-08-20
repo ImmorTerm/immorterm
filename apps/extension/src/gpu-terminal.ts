@@ -23,6 +23,7 @@ import * as os from 'os';
 import * as readline from 'readline';
 import { execFile, spawn } from 'child_process';
 import { logger } from './utils/logger';
+import { inlineWebviewStyles } from './webview-styles';
 import { generateWindowId } from './utils/process';
 import { updateRegistryNameAndCommand, updateRegistryTitleLocked, updateRegistrySessionOrder, removeTerminalFromRegistry, removeSessionStatus, getRegistryTheme, updateRegistryTheme, updateSessionStatus, updateSessionSpeakMode, getSessionSpeakMode, markSpeakModeReset, getCurrentClaudeSessionId, getRegistryEntryByWindowId, getShelvedSessions, getClaudeResumeId, getClaudeExplicitlyExited, setActiveTerminal, getActiveTerminal, updateClaudeSessionId, removeClaudeSessionId, moveToShelvedRegistry, moveFromShelvedRegistry, removeShelvedRegistryEntry, readProjectId, resolveOwnerProjectFromPath, readSessionsFromDir, mergeRegistryDOverGlobal } from './registry-client';
 import { getDescendantPids, killDescendants, findClaudePidInTree } from './utils/screen-commands';
@@ -58,10 +59,151 @@ import { SpacesStorage } from './spaces';
 import { resolveRestoreIdentity } from './restore-identity';
 import { acquireGlobalRestoreSlot } from './restore-semaphore';
 
-/** Cap on a Codex rollout we will scan for an inline image. Rollouts reach
- *  megabytes and each pasted image is a large base64 blob; past this we skip
- *  rather than block a hover. */
-const CODEX_ROLLOUT_MAX_BYTES = 24 * 1024 * 1024;
+/** Bounded tail window for Codex context stats. */
+const CODEX_ROLLOUT_TAIL_BYTES = 24 * 1024 * 1024;
+
+function readFileTailSync(filePath: string, maxBytes: number): string {
+  const size = fs.statSync(filePath).size;
+  const bytes = Math.min(size, maxBytes);
+  const buffer = Buffer.allocUnsafe(bytes);
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    fs.readSync(fd, buffer, 0, bytes, size - bytes);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const raw = buffer.toString('utf8');
+  // A tail normally starts inside a JSON record. Drop that partial record so a
+  // base64 fragment can never be mistaken for a complete event.
+  if (size <= bytes) return raw;
+  const newline = raw.indexOf('\n');
+  return newline >= 0 ? raw.slice(newline + 1) : '';
+}
+
+/** Normalize the prompt as Codex displays it in the TUI. Rollout input text
+ * keeps image XML with temporary paths, while the terminal renders only the
+ * per-prompt `[Image #N]` labels. */
+export function normalizeCodexPromptText(text: string): string {
+  let imageNumber = 0;
+  return text
+    .replace(/<image\b[^>]*>[\s\S]*?<\/image>/gi, () => `[Image #${++imageNumber}]`)
+    .replace(/^\s*›\s*/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+type CodexPromptImageSource = { filePath?: string; dataUrl?: string };
+
+function codexImagePaths(inputText: string): string[] {
+  const paths: string[] = [];
+  const imageTag = /<image\b([^>]*)>[\s\S]*?<\/image>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = imageTag.exec(inputText)) !== null) {
+    const pathMatch = /\bpath=(?:"([^"]+)"|'([^']+)'|([^\s>]+))/.exec(match[1]);
+    const filePath = pathMatch?.[1] || pathMatch?.[2] || pathMatch?.[3];
+    if (filePath) paths.push(filePath);
+  }
+  return paths;
+}
+
+function codexImageFromUserRecord(
+  record: any, promptText: string, imageNumber: number,
+): CodexPromptImageSource | undefined {
+  const payload = record?.type === 'response_item' ? record.payload : undefined;
+  if (payload?.type !== 'message' || payload?.role !== 'user' || !Array.isArray(payload.content)) {
+    return undefined;
+  }
+  const inputText = payload.content
+    .filter((item: any) => item?.type === 'input_text' && typeof item.text === 'string')
+    .map((item: any) => item.text)
+    .join('\n');
+  if (normalizeCodexPromptText(inputText) !== normalizeCodexPromptText(promptText)) return undefined;
+  const images = payload.content.filter((item: any) =>
+    item?.type === 'input_image' && typeof item.image_url === 'string'
+      && item.image_url.startsWith('data:image/'));
+  const filePath = codexImagePaths(inputText)[imageNumber - 1];
+  const dataUrl = images[imageNumber - 1]?.image_url;
+  return filePath || dataUrl ? { filePath, dataUrl } : undefined;
+}
+
+/** Resolve an attachment by its owning prompt and its per-prompt image number.
+ * This is stable when `[Image #1]` resets and when terminal scrollback prunes. */
+export function extractCodexPromptImageDataUrlByPrompt(
+  raw: string, promptText: string, imageNumber: number, promptReverseOrdinal = 1,
+): string | undefined {
+  return codexImageSourceFromRollout(
+    raw, promptText, imageNumber, promptReverseOrdinal,
+  )?.dataUrl;
+}
+
+export function extractCodexPromptImagePathByPrompt(
+  raw: string, promptText: string, imageNumber: number, promptReverseOrdinal = 1,
+): string | undefined {
+  return codexImageSourceFromRollout(
+    raw, promptText, imageNumber, promptReverseOrdinal,
+  )?.filePath;
+}
+
+function codexImageSourceFromRollout(
+  raw: string, promptText: string, imageNumber: number, promptReverseOrdinal: number,
+): CodexPromptImageSource | undefined {
+  if (!promptText || !Number.isInteger(imageNumber) || imageNumber < 1
+      || !Number.isInteger(promptReverseOrdinal) || promptReverseOrdinal < 1) return undefined;
+  const found: CodexPromptImageSource[] = [];
+  for (const line of raw.split('\n')) {
+    if (!line.includes('input_image')) continue;
+    let record: any;
+    try { record = JSON.parse(line); } catch { continue; }
+    const source = codexImageFromUserRecord(record, promptText, imageNumber);
+    if (source) found.push(source);
+  }
+  return found[found.length - promptReverseOrdinal];
+}
+
+async function resolveCodexPromptImageFromFile(
+  filePath: string, promptText: string, imageNumber: number, promptReverseOrdinal: number,
+): Promise<CodexPromptImageSource | undefined> {
+  const found: CodexPromptImageSource[] = [];
+  const lines = readline.createInterface({
+    input: fs.createReadStream(filePath),
+    crlfDelay: Infinity,
+  });
+  for await (const line of lines) {
+    if (!line.includes('input_image')) continue;
+    let record: any;
+    try { record = JSON.parse(line); } catch { continue; }
+    const source = codexImageFromUserRecord(record, promptText, imageNumber);
+    if (source) found.push(source);
+  }
+  return found[found.length - promptReverseOrdinal];
+}
+
+export function extractCodexContextStats(raw: string): {
+  model?: string; contextPct?: number; contextUsedTokens?: number; contextWindowTokens?: number;
+} {
+  let model: string | undefined;
+  let used = 0;
+  let window = 0;
+  for (const line of raw.split('\n')) {
+    if (!line.includes('token_count') && !line.includes('"model"')) continue;
+    let record: any;
+    try { record = JSON.parse(line); } catch { continue; }
+    const payload = record?.payload ?? record;
+    if (typeof payload?.model === 'string' && payload.model) model = payload.model;
+    if (payload?.type !== 'token_count') continue;
+    const info = payload.info;
+    const nextUsed = Number(info?.last_token_usage?.total_tokens);
+    const nextWindow = Number(info?.model_context_window);
+    if (Number.isFinite(nextUsed) && nextUsed > 0) used = nextUsed;
+    if (Number.isFinite(nextWindow) && nextWindow > 0) window = nextWindow;
+  }
+  return {
+    model,
+    contextPct: used > 0 && window > 0 ? Math.min(100, used / window * 100) : undefined,
+    contextUsedTokens: used || undefined,
+    contextWindowTokens: window || undefined,
+  };
+}
 
 const SOCKET_DIR = path.join(process.env.HOME || '~', '.immorterm', 'sockets');
 const WASM_RESOURCE_DIR = 'resources/wasm';
@@ -715,11 +857,14 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
     let html = fs.readFileSync(htmlPath, 'utf-8');
 
     const nonce = getNonce();
-    const cssUri = webview.asWebviewUri(
-      vscode.Uri.file(path.join(this.context.extensionPath, 'resources', 'gpu-terminal.css')),
+    const resourcesPath = path.join(this.context.extensionPath, 'resources');
+    const mainCss = fs.readFileSync(path.join(resourcesPath, 'gpu-terminal.css'), 'utf-8');
+    const codiconCss = fs.readFileSync(
+      path.join(resourcesPath, 'vendor', 'codicons', 'codicon.css'),
+      'utf-8',
     );
-    const codiconCssUri = webview.asWebviewUri(
-      vscode.Uri.file(path.join(this.context.extensionPath, 'resources', 'vendor', 'codicons', 'codicon.css')),
+    const codiconFont = fs.readFileSync(
+      path.join(resourcesPath, 'vendor', 'codicons', 'codicon.ttf'),
     );
 
     const csp = [
@@ -728,7 +873,7 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
       `style-src 'unsafe-inline' ${webview.cspSource}`,
       // codicon.ttf is fetched by codicon.css via a relative url() —
       // same cspSource origin as the stylesheet itself.
-      `font-src ${webview.cspSource}`,
+      `font-src ${webview.cspSource} data:`,
       // connect-src needs to include the hub on 127.0.0.1:1440 so the
       // host-agnostic modals (digest LLM, etc.) can talk to it via
       // fetch(). Without HTTP allowed here, every webview HTTP call
@@ -746,12 +891,24 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
       `frame-src 'self' ${webview.cspSource} https://www.google.com https://*.google.com`,
     ].join('; ');
 
-    html = html.replace('__CSS_URI__', cssUri.toString());
-    html = html.replace('__CODICON_CSS_URI__', codiconCssUri.toString());
+    html = inlineWebviewStyles(html, mainCss, codiconCss, codiconFont);
     html = html.replace(
       '<script type="module">',
       `<meta http-equiv="Content-Security-Policy" content="${csp}">\n  <script type="module" nonce="${nonce}">`,
     );
+
+    // Opt-in boundary diagnostic for reload/packaging incidents. The generated
+    // document contains the static terminal shell only (no PTY/session content)
+    // and is overwritten on every render.
+    if (process.env.IMMORTERM_WEBVIEW_DIAGNOSTICS === '1') {
+      const safeProjectName = this.projectName.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const generatedHtmlPath = path.join(
+        os.tmpdir(),
+        `immorterm-webview-${safeProjectName}-${process.pid}.html`,
+      );
+      fs.writeFileSync(generatedHtmlPath, html, 'utf8');
+      logger.info(`ImmorTerm AI: generated WebView HTML: ${generatedHtmlPath} (${html.length} chars)`);
+    }
 
     webview.html = html;
   }
@@ -952,6 +1109,17 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         })().catch(err => {
           logger.error(`ImmorTerm AI: loaded handler failed: ${err}`);
         });
+        break;
+      }
+      case 'style-health': {
+        const safeProjectName = this.projectName.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const reportPath = path.join(
+          os.tmpdir(),
+          `immorterm-webview-style-health-${safeProjectName}-${process.pid}.json`,
+        );
+        const report = { receivedAt: new Date().toISOString(), ...msg };
+        fs.writeFileSync(reportPath, JSON.stringify(report, null, 2), 'utf8');
+        logger.info(`ImmorTerm AI: WebView style health: ${JSON.stringify(msg)} (${reportPath})`);
         break;
       }
       case 'ready':
@@ -1632,37 +1800,43 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         // webview can't always learn the active session's Claude UUID (the
         // jsonl-tail tracker is flaky), so scan ~/.claude/image-cache/*/<N>.png
         // and pick the newest — preferring the known UUID's dir when supplied.
-        const { requestId, n, uuid, windowId, transcriptPath } = msg as {
+        const { requestId, n, promptText, promptReverseOrdinal, uuid, windowId, transcriptPath } = msg as {
           requestId: string; n: number; uuid?: string; windowId?: string;
+          promptText?: string; promptReverseOrdinal?: number;
           transcriptPath?: string; type: string;
         };
-        // Codex embeds pasted images INLINE in its rollout as a data URI
-        // (`input_image` → `image_url: "data:image/png;base64,…"`) rather than
-        // writing a cache file the way Claude does. So for Codex the native
-        // resolution is "decode the Nth input_image", with no file to find.
-        // Bounded read: rollouts reach megabytes and each image is a large
-        // base64 blob, so give up rather than stall the hover.
+        // Codex records both the original local path in the user input's
+        // `<image ... path="…">` tag and an inline fallback in `input_image`.
+        // Match the owning prompt first; `[Image #N]` itself resets every turn.
         if (transcriptPath && /\.codex[/\\]sessions[/\\]/.test(transcriptPath)) {
-          try {
-            if (fs.statSync(transcriptPath).size <= CODEX_ROLLOUT_MAX_BYTES) {
-              const raw = fs.readFileSync(transcriptPath, 'utf8');
-              let seen = 0;
-              let found: string | undefined;
-              for (const line of raw.split('\n')) {
-                if (!line.includes('input_image')) continue;
-                for (const m of line.matchAll(/"image_url"\s*:\s*"(data:image\/[^"]+)"/g)) {
-                  if (++seen === n) { found = m[1]; break; }
+          if (promptText) {
+            resolveCodexPromptImageFromFile(
+              transcriptPath, promptText, n, promptReverseOrdinal || 1,
+            )
+              .then((found) => {
+                let imageDataUrl = found?.dataUrl;
+                if (found?.filePath && fs.existsSync(found.filePath)) {
+                  try {
+                    imageDataUrl = this.view?.webview
+                      .asWebviewUri(vscode.Uri.file(found.filePath)).toString() || imageDataUrl;
+                  } catch { /* retain the authoritative inline fallback */ }
                 }
-                if (found) break;
-              }
-              if (found) {
-                this.view?.webview.postMessage({
-                  type: 'claude-image-result', requestId, exists: true, imageDataUrl: found,
+                return this.view?.webview.postMessage({
+                  type: 'claude-image-result', requestId,
+                  exists: !!imageDataUrl, imageDataUrl,
                 });
-                break;
-              }
-            }
-          } catch { /* unreadable rollout — fall through to the file lookups */ }
+              })
+              .catch(() => this.view?.webview.postMessage({
+                type: 'claude-image-result', requestId, exists: false,
+              }));
+            break;
+          }
+          // Codex has an authoritative inline source. Never substitute an
+          // unrelated Claude/ImmorTerm paste cache if prompt identity is absent.
+          this.view?.webview.postMessage({
+            type: 'claude-image-result', requestId, exists: false,
+          });
+          break;
         }
         const cacheRoot = path.join(os.homedir(), '.claude', 'image-cache');
         const fname = String(n) + '.png';
@@ -1705,6 +1879,19 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
           }
           reply(best ? best.p : undefined);
         });
+        break;
+      }
+      case 'resolve-codex-stats': {
+        const { requestId, transcriptPath } = msg as {
+          requestId: string; transcriptPath?: string; type: string;
+        };
+        let stats: ReturnType<typeof extractCodexContextStats> = {};
+        try {
+          if (transcriptPath && /\.codex[/\\]sessions[/\\]/.test(transcriptPath)) {
+            stats = extractCodexContextStats(readFileTailSync(transcriptPath, 4 * 1024 * 1024));
+          }
+        } catch { /* a partial/in-flight rollout is a normal retryable state */ }
+        this.view?.webview.postMessage({ type: 'codex-stats-result', requestId, stats });
         break;
       }
       case 'request-preview-range': {
@@ -2300,7 +2487,9 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
    * and OpenMemory session UUID (from claude-env files).
    */
   private getTaskOriginContext(): TaskContext {
-    const activeSession = [...this.sessions.values()].find(s => s.windowId);
+    const activeSession = [...this.sessions.values()].find(
+      session => !!this.activeWindowId && session.windowId === this.activeWindowId,
+    ) || [...this.sessions.values()].find(session => session.windowId);
     const ctx: TaskContext = {
       cwd: this.projectPath || process.cwd(),
       sourceImmorTermId: activeSession?.windowId,
