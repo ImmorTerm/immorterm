@@ -2330,7 +2330,7 @@ impl WasmTerminalInner {
                     // Cmd+Opt+V writes ~/.immorterm/paste/<window>/<n>.png
                     // using the same 1-based numbering. The vendor difference
                     // is only WHERE the bytes live, which the host resolves.
-                    let ordinal = if self.ai_dialect == AiDialect::Codex {
+                    let (ordinal, reverse_ordinal) = if self.ai_dialect == AiDialect::Codex {
                         let mut rows = Vec::with_capacity(
                             self.terminal.scrollback.len() + self.terminal.grid.num_rows()
                         );
@@ -2340,17 +2340,21 @@ impl WasmTerminalInner {
                                 rows.push(row);
                             }
                         }
-                        immorterm_core::dialect::codex_image_ordinal(
-                            &rows, content_row, click_col
+                        (
+                            immorterm_core::dialect::codex_image_ordinal(&rows, content_row, click_col),
+                            immorterm_core::dialect::codex_image_reverse_ordinal(&rows, content_row, click_col),
                         )
                     } else {
-                        None
+                        (None, None)
                     };
                     let ordinal_json = ordinal
                         .map(|value| value.to_string())
                         .unwrap_or_else(|| "null".into());
+                    let reverse_ordinal_json = reverse_ordinal
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "null".into());
                     format!(
-                        "{{\"kind\":\"claude-image\",\"text\":\"[Image #{n}]\",\"n\":{n},\"ordinal\":{ordinal_json},\"row\":{},\"start\":{},\"end\":{}}}",
+                        "{{\"kind\":\"claude-image\",\"text\":\"[Image #{n}]\",\"n\":{n},\"ordinal\":{ordinal_json},\"reverseOrdinal\":{reverse_ordinal_json},\"row\":{},\"start\":{},\"end\":{}}}",
                         display_row, span.start, span.end
                     )
                 }

@@ -59,10 +59,28 @@ import { SpacesStorage } from './spaces';
 import { resolveRestoreIdentity } from './restore-identity';
 import { acquireGlobalRestoreSlot } from './restore-semaphore';
 
-/** Cap on a Codex rollout we will scan for an inline image. Rollouts reach
- *  megabytes and each pasted image is a large base64 blob; past this we skip
- *  rather than block a hover. */
-const CODEX_ROLLOUT_MAX_BYTES = 24 * 1024 * 1024;
+/** Bounded tail window for Codex rollout enrichment. Long-lived sessions can
+ * exceed 100 MB; refusing the whole file made image hover and CTX reporting
+ * silently fail exactly when they were most useful. */
+const CODEX_ROLLOUT_TAIL_BYTES = 24 * 1024 * 1024;
+
+function readFileTailSync(filePath: string, maxBytes: number): string {
+  const size = fs.statSync(filePath).size;
+  const bytes = Math.min(size, maxBytes);
+  const buffer = Buffer.allocUnsafe(bytes);
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    fs.readSync(fd, buffer, 0, bytes, size - bytes);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const raw = buffer.toString('utf8');
+  // A tail normally starts inside a JSON record. Drop that partial record so a
+  // base64 fragment can never be mistaken for a complete event.
+  if (size <= bytes) return raw;
+  const newline = raw.indexOf('\n');
+  return newline >= 0 ? raw.slice(newline + 1) : '';
+}
 
 /** Resolve the chronological Nth image attached by a real Codex user message.
  * Deliberately ignores compaction snapshots and tool outputs: both can contain
@@ -84,6 +102,53 @@ export function extractCodexPromptImageDataUrl(raw: string, ordinal: number): st
     }
   }
   return undefined;
+}
+
+/** Resolve an image counted from the newest real user attachment. Used with a
+ * bounded file tail, so terminal scrollback pruning and huge rollouts do not
+ * shift `[Image #N]` onto an unrelated cache entry. */
+export function extractCodexPromptImageDataUrlFromEnd(raw: string, reverseOrdinal: number): string | undefined {
+  if (!Number.isInteger(reverseOrdinal) || reverseOrdinal < 1) return undefined;
+  const images: string[] = [];
+  for (const line of raw.split('\n')) {
+    if (!line.includes('input_image')) continue;
+    let record: any;
+    try { record = JSON.parse(line); } catch { continue; }
+    const payload = record?.type === 'response_item' ? record.payload : undefined;
+    if (payload?.type !== 'message' || payload?.role !== 'user' || !Array.isArray(payload.content)) continue;
+    for (const item of payload.content) {
+      if (item?.type === 'input_image' && typeof item.image_url === 'string'
+          && item.image_url.startsWith('data:image/')) images.push(item.image_url);
+    }
+  }
+  return images[images.length - reverseOrdinal];
+}
+
+export function extractCodexContextStats(raw: string): {
+  model?: string; contextPct?: number; contextUsedTokens?: number; contextWindowTokens?: number;
+} {
+  let model: string | undefined;
+  let used = 0;
+  let window = 0;
+  for (const line of raw.split('\n')) {
+    if (!line.includes('token_count') && !line.includes('"model"')) continue;
+    let record: any;
+    try { record = JSON.parse(line); } catch { continue; }
+    const payload = record?.payload ?? record;
+    if (typeof payload?.model === 'string' && payload.model) model = payload.model;
+    if (payload?.type !== 'token_count') continue;
+    const info = payload.info;
+    const nextUsed = Number(info?.last_token_usage?.total_tokens);
+    const nextWindow = Number(info?.model_context_window);
+    if (Number.isFinite(nextUsed) && nextUsed > 0) used = nextUsed;
+    if (Number.isFinite(nextWindow) && nextWindow > 0) window = nextWindow;
+  }
+  return {
+    model,
+    contextPct: used > 0 && window > 0 ? Math.min(100, used / window * 100) : undefined,
+    contextUsedTokens: used || undefined,
+    contextWindowTokens: window || undefined,
+  };
 }
 
 const SOCKET_DIR = path.join(process.env.HOME || '~', '.immorterm', 'sockets');
@@ -1681,9 +1746,9 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         // webview can't always learn the active session's Claude UUID (the
         // jsonl-tail tracker is flaky), so scan ~/.claude/image-cache/*/<N>.png
         // and pick the newest — preferring the known UUID's dir when supplied.
-        const { requestId, n, ordinal, uuid, windowId, transcriptPath } = msg as {
+        const { requestId, n, ordinal, reverseOrdinal, uuid, windowId, transcriptPath } = msg as {
           requestId: string; n: number; uuid?: string; windowId?: string;
-          ordinal?: number; transcriptPath?: string; type: string;
+          ordinal?: number; reverseOrdinal?: number; transcriptPath?: string; type: string;
         };
         // Codex embeds pasted images INLINE in its rollout as a data URI
         // (`input_image` → `image_url: "data:image/png;base64,…"`) rather than
@@ -1693,17 +1758,25 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         // base64 blob, so give up rather than stall the hover.
         if (transcriptPath && /\.codex[/\\]sessions[/\\]/.test(transcriptPath)) {
           try {
-            if (fs.statSync(transcriptPath).size <= CODEX_ROLLOUT_MAX_BYTES) {
-              const raw = fs.readFileSync(transcriptPath, 'utf8');
-              const found = extractCodexPromptImageDataUrl(raw, ordinal || n);
-              if (found) {
-                this.view?.webview.postMessage({
-                  type: 'claude-image-result', requestId, exists: true, imageDataUrl: found,
-                });
-                break;
-              }
+            const raw = readFileTailSync(transcriptPath, CODEX_ROLLOUT_TAIL_BYTES);
+            const found = reverseOrdinal
+              ? extractCodexPromptImageDataUrlFromEnd(raw, reverseOrdinal)
+              : extractCodexPromptImageDataUrl(raw, ordinal || n);
+            if (found) {
+              this.view?.webview.postMessage({
+                type: 'claude-image-result', requestId, exists: true, imageDataUrl: found,
+              });
+              break;
             }
-          } catch { /* unreadable rollout — fall through to the file lookups */ }
+          } catch { /* unreadable/in-flight rollout — return a clean miss below */ }
+          // Codex has an authoritative inline source. Never substitute an
+          // unrelated Claude/ImmorTerm paste cache merely because the bounded
+          // lookup missed (for example while the JSONL record is still being
+          // flushed).
+          this.view?.webview.postMessage({
+            type: 'claude-image-result', requestId, exists: false,
+          });
+          break;
         }
         const cacheRoot = path.join(os.homedir(), '.claude', 'image-cache');
         const fname = String(n) + '.png';
@@ -1746,6 +1819,19 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
           }
           reply(best ? best.p : undefined);
         });
+        break;
+      }
+      case 'resolve-codex-stats': {
+        const { requestId, transcriptPath } = msg as {
+          requestId: string; transcriptPath?: string; type: string;
+        };
+        let stats: ReturnType<typeof extractCodexContextStats> = {};
+        try {
+          if (transcriptPath && /\.codex[/\\]sessions[/\\]/.test(transcriptPath)) {
+            stats = extractCodexContextStats(readFileTailSync(transcriptPath, 4 * 1024 * 1024));
+          }
+        } catch { /* a partial/in-flight rollout is a normal retryable state */ }
+        this.view?.webview.postMessage({ type: 'codex-stats-result', requestId, stats });
         break;
       }
       case 'request-preview-range': {

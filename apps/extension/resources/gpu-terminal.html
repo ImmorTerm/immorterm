@@ -4610,11 +4610,37 @@
       return vendor ? vendor + ' ' + body : body;
     }
 
+    function compactTokenCount(value) {
+      const n = Number(value) || 0;
+      if (n >= 1000000) return (n / 1000000).toFixed(n % 1000000 ? 1 : 0) + 'm';
+      if (n >= 1000) return Math.round(n / 1000) + 'k';
+      return String(n);
+    }
+
     /** Mode 1 — context window: Claude CTX: 42% */
     function formatApiStats(c) {
       const vendor = vendorLabel(c);
       const pct = c.context_pct != null ? Math.round(c.context_pct) : 0;
-      return vendor ? vendor + ' CTX: ' + pct + '%' : 'CTX: ' + pct + '%';
+      const used = Number(c.context_used_tokens) || 0;
+      const window = Number(c.context_window_tokens) || 0;
+      const range = used > 0 && window > 0
+        ? ' (' + compactTokenCount(used) + '/' + compactTokenCount(window) + ')'
+        : '';
+      return (vendor ? vendor + ' ' : '') + 'CTX: ' + pct + '%' + range;
+    }
+
+    let codexStatsSeq = 0;
+    const codexStatsPending = new Map();
+    function refreshCodexStats(sessionName, session, force) {
+      const c = session && session.claudeRaw;
+      const transcriptPath = c && c.transcript_path;
+      if (!c || c.tool !== 'codex' || !transcriptPath || IS_STANDALONE) return;
+      const now = Date.now();
+      if (!force && now - (session.lastCodexStatsRequest || 0) < 5000) return;
+      session.lastCodexStatsRequest = now;
+      const requestId = 'codex-stats-' + (++codexStatsSeq);
+      codexStatsPending.set(requestId, sessionName);
+      vscode.postMessage({ type: 'resolve-codex-stats', requestId, transcriptPath });
     }
 
     // ── Emoji Overlay System ──
@@ -7014,6 +7040,7 @@
         aiStatsMode = (aiStatsMode + 1) % 2;
         const s = sessions.get(activeSessionName);
         if (s && s.claudeRaw) {
+          refreshCodexStats(activeSessionName, s, true);
           s.aiStats = formatCurrentStats(s.claudeRaw);
           if (terminal) setAiStatsWithOverlay(s.aiStats);
           if (terminal) terminal.set_ai_ctx_pct(aiStatsMode === 1 ? s.claudeRaw.context_pct : 0);
@@ -7610,6 +7637,7 @@
                   if (!anyActive) { stopAutoCycle(); stopHealthChecks(); }
                 } else if (s && msg.claude.active) {
                   s.claudeRaw = msg.claude;
+                  refreshCodexStats(sessionName, s, false);
                   s.aiStats = formatCurrentStats(msg.claude);
                   // Tell the renderer whose TUI it is reading (`❯` vs `›`, rule
                   // row vs none, `[Image #N]` vs nothing).
@@ -8695,7 +8723,11 @@
             const c = msg.claude;
             const s = sessions.get(activeSessionName);
             if (c.active) {
-              if (s) { s.claudeRaw = c; s.aiStats = formatCurrentStats(c); }
+              if (s) {
+                s.claudeRaw = c;
+                refreshCodexStats(activeSessionName, s, true);
+                s.aiStats = formatCurrentStats(c);
+              }
               if (terminal) terminal.set_ai_tool(c.tool || '');
               setAiStatsWithOverlay(s ? s.aiStats : formatCurrentStats(c));
               if (terminal) terminal.set_ai_ctx_pct(c.context_pct || 0);
@@ -8730,7 +8762,11 @@
             const c = msg.claude;
             const s = sessions.get(activeSessionName);
             if (c.active) {
-              if (s) { s.claudeRaw = c; s.aiStats = formatCurrentStats(c); }
+              if (s) {
+                s.claudeRaw = c;
+                refreshCodexStats(activeSessionName, s, false);
+                s.aiStats = formatCurrentStats(c);
+              }
               setAiStatsWithOverlay(s ? s.aiStats : formatCurrentStats(c));
               if (terminal) terminal.set_ai_ctx_pct(c.context_pct || 0);
               startHealthChecks();
@@ -12937,7 +12973,7 @@
     const dirListPending = new Map(); // requestId → resolve fn (VS Code list-dir round-trip)
     const wsPortResolvePending = new Map(); // sessionName → resolve fn (VS Code resolve-ws-port round-trip)
     const filePreviewPending = new Map(); // requestId → resolve fn (VS Code file-preview round-trip)
-    const claudeImagePending = new Map(); // requestId → { cacheKey, n } (VS Code [Image #N] resolve)
+    const claudeImagePending = new Map(); // requestId → { cacheKey, n, reverseOrdinal } ([Image #N] resolve)
     let dirListSeq = 0;
     let linkCursorActive = false;
     let linkStatReqSeq = 0;
@@ -13123,7 +13159,10 @@
       renderRendered();
       return mdContainer;
     };
-    const linkIdentity = (l) => (l ? l.kind + ':' + l.text + ':' + (l.line || 0) + ':' + (l.col || 0) : '');
+    const linkIdentity = (l) => (l
+      ? l.kind + ':' + l.text + ':' + (l.line || 0) + ':' + (l.col || 0)
+        + ':' + (l.ordinal || 0) + ':' + (l.reverseOrdinal || 0)
+      : '');
     const showLinkTooltip = (link, clientX, clientY, meta) => {
       if (typeof cancelLinkHide === 'function') cancelLinkHide();
       const sameLink = linkHoverState && linkIdentity(linkHoverState.link) === linkIdentity(link) && linkTooltip.classList.contains('visible');
@@ -14396,7 +14435,10 @@
           // reliable, and ambiguity isn't worth the extra cost.
           const effectiveUuid = uuid || (_remoteName ? 'auto' : null);
           const imageOrdinal = Number(link.ordinal) || link.n;
-          const cacheKey = 'claude-image:' + (effectiveUuid || 'scan') + '/' + imageOrdinal;
+          const reverseOrdinal = Number(link.reverseOrdinal) || 0;
+          const cacheKey = reverseOrdinal && sess && sess.claudeRaw && sess.claudeRaw.tool === 'codex'
+            ? 'codex-image-tail:' + (sess.claudeRaw.transcript_path || 'unknown') + '/' + reverseOrdinal
+            : 'claude-image:' + (effectiveUuid || 'scan') + '/' + imageOrdinal;
           const cached = linkExistCache.get(cacheKey);
           if (cached && cached.exists) { activate(cached); }
           else if (cached && !cached.exists) { deactivate(); }
@@ -14412,7 +14454,8 @@
               const stillHovering = linkHoverState && linkHoverState.link
                 && linkHoverState.link.kind === 'claude-image'
                 && linkHoverState.link.n === link.n
-                && (Number(linkHoverState.link.ordinal) || linkHoverState.link.n) === imageOrdinal;
+                && (Number(linkHoverState.link.ordinal) || linkHoverState.link.n) === imageOrdinal
+                && (Number(linkHoverState.link.reverseOrdinal) || 0) === reverseOrdinal;
               if (r.ok) {
                 const meta = { exists: true, imageDataUrl: url };
                 linkExistCache.set(cacheKey, meta);
@@ -14429,10 +14472,11 @@
             // dir and otherwise picks the newest matching <N>.png.
             activate(null);
             const requestId = 'cimg-' + (++linkStatReqSeq);
-            claudeImagePending.set(requestId, { cacheKey, n: link.n });
+            claudeImagePending.set(requestId, { cacheKey, n: link.n, reverseOrdinal });
             vscode.postMessage({
               type: 'resolve-claude-image', requestId, n: link.n,
               ordinal: imageOrdinal,
+              reverseOrdinal: reverseOrdinal || undefined,
               uuid: uuid || undefined, windowId: windowId || undefined,
               // Codex keeps pasted images inline in its rollout, so the host
               // resolves them from there rather than from any cache dir.
@@ -15746,7 +15790,8 @@
             linkExistCache.set(pend.cacheKey, meta);
             if (linkHoverState && linkHoverState.link
                 && linkHoverState.link.kind === 'claude-image'
-                && linkHoverState.link.n === pend.n) {
+                && linkHoverState.link.n === pend.n
+                && (Number(linkHoverState.link.reverseOrdinal) || 0) === (pend.reverseOrdinal || 0)) {
               if (meta.exists) {
                 setLinkCursor(true);
                 showLinkTooltip(linkHoverState.link, linkHoverState.clientX, linkHoverState.clientY, meta);
@@ -15754,6 +15799,27 @@
                 setLinkCursor(false);
                 linkTooltipPinned = false;
                 hideLinkTooltip();
+              }
+            }
+          }
+          break;
+        }
+        case 'codex-stats-result': {
+          const sessionName = codexStatsPending.get(msg.requestId);
+          if (sessionName) {
+            codexStatsPending.delete(msg.requestId);
+            const s = sessions.get(sessionName);
+            const stats = msg.stats || {};
+            if (s && s.claudeRaw && s.claudeRaw.tool === 'codex') {
+              if (stats.model) s.claudeRaw.model = stats.model;
+              if (stats.contextPct != null) s.claudeRaw.context_pct = stats.contextPct;
+              if (stats.contextUsedTokens != null) s.claudeRaw.context_used_tokens = stats.contextUsedTokens;
+              if (stats.contextWindowTokens != null) s.claudeRaw.context_window_tokens = stats.contextWindowTokens;
+              s.aiStats = formatCurrentStats(s.claudeRaw);
+              if (sessionName === activeSessionName && terminal) {
+                setAiStatsWithOverlay(s.aiStats);
+                terminal.set_ai_ctx_pct(aiStatsMode === 1 ? s.claudeRaw.context_pct : 0);
+                dirty = true;
               }
             }
           }
@@ -16072,6 +16138,28 @@
                   return (session && session.projectDir) || '';
                 },
                 onInboxChanged: refreshHumanInboxCount,
+                getActiveSessionIdentity: () => {
+                  const session = sessions.get(activeSessionName);
+                  return {
+                    sessionName: activeSessionName,
+                    immortermId: session && session.windowId,
+                  };
+                },
+                onSelectSession: (sessionName, immortermId) => {
+                  if (sessionName && sessions.has(sessionName)) {
+                    switchSession(sessionName);
+                    return true;
+                  }
+                  if (immortermId) {
+                    for (const [name, session] of sessions) {
+                      if (session.windowId === immortermId) {
+                        switchSession(name);
+                        return true;
+                      }
+                    }
+                  }
+                  return false;
+                },
                 wakeAgent: wakePlanAgent,
                 dismissPopup,
                 getPrefs: () => ({ ...prefs }),

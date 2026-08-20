@@ -119,7 +119,9 @@ pub fn codex_prompt_highlight_mask(rows: &[&Row]) -> Vec<bool> {
             let next = rows[next_idx];
             if row_is_blank(next) {
                 highlighted[next_idx] = true;
-                break;
+                // Submitted prompts may contain explicit blank lines. Keep
+                // them inside the card until a structural boundary arrives.
+                continue;
             }
 
             let first = next.cells.iter()
@@ -130,7 +132,10 @@ pub fn codex_prompt_highlight_mask(rows: &[&Row]) -> Vec<bool> {
             // the prompt from the next assistant turn with a blank padding row;
             // these sentinels are a defensive stop for transient redraws where
             // that row has not arrived yet.
-            if matches!(first, Some('\u{2022}' | '\u{203A}')) {
+            if matches!(first, Some('\u{2022}' | '\u{203A}'))
+                || row_is_codex_footer(next)
+                || row_is_rule(next)
+            {
                 break;
             }
             highlighted[next_idx] = true;
@@ -138,6 +143,23 @@ pub fn codex_prompt_highlight_mask(rows: &[&Row]) -> Vec<bool> {
     }
 
     highlighted
+}
+
+fn row_text(row: &Row) -> String {
+    row.cells.iter().filter(|cell| cell.width > 0).map(|cell| cell.grapheme).collect()
+}
+
+fn row_is_codex_footer(row: &Row) -> bool {
+    let text = row_text(row);
+    let trimmed = text.trim();
+    trimmed.contains(" · ") && (trimmed.contains("~/") || trimmed.contains(" context left"))
+}
+
+fn row_is_rule(row: &Row) -> bool {
+    let text = row_text(row);
+    let trimmed = text.trim();
+    !trimmed.is_empty()
+        && trimmed.chars().all(|c| matches!(c, '\u{2500}' | '\u{2501}' | '\u{2504}' | '\u{2505}'))
 }
 
 /// Return the 1-based image occurrence for a Codex prompt marker at a grid
@@ -175,6 +197,29 @@ pub fn codex_image_ordinal(rows: &[&Row], target_row: usize, target_col: usize) 
         }
     }
     None
+}
+
+/// Image occurrence counted from the newest visible prompt. This lets the
+/// host resolve from a bounded rollout tail even after old scrollback prunes.
+pub fn codex_image_reverse_ordinal(rows: &[&Row], target_row: usize, target_col: usize) -> Option<usize> {
+    if target_row >= rows.len() { return None; }
+    let prompt_rows = codex_prompt_highlight_mask(rows);
+    let mut occurrences = Vec::new();
+    for (row_idx, row) in rows.iter().enumerate() {
+        if !prompt_rows[row_idx] || row_is_blank(row) { continue; }
+        let text = row_text(row);
+        let mut spans = Vec::new();
+        crate::links::scan_row(&text, 0, &mut spans);
+        for span in spans {
+            if matches!(span.kind, crate::links::LinkKind::ClaudeImage(_)) {
+                occurrences.push((row_idx, span.start as usize, span.end as usize));
+            }
+        }
+    }
+    let index = occurrences.iter().position(|(row_idx, start, end)| {
+        *row_idx == target_row && *start <= target_col && target_col < *end
+    })?;
+    Some(occurrences.len() - index)
 }
 
 #[cfg(test)]
@@ -257,6 +302,20 @@ mod tests {
     }
 
     #[test]
+    fn codex_prompt_cards_keep_explicit_blank_lines_until_the_assistant_turn() {
+        let rows = [row(""), row("› first paragraph"), row(""), row("second paragraph"), row(""), row("• response")];
+        let refs: Vec<&Row> = rows.iter().collect();
+        assert_eq!(codex_prompt_highlight_mask(&refs), vec![true, true, true, true, true, false]);
+    }
+
+    #[test]
+    fn codex_live_composer_stops_before_model_footer() {
+        let rows = [row("› draft prompt"), row(""), row("  gpt-5.6-sol medium · ~/Development/immorterm-org")];
+        let refs: Vec<&Row> = rows.iter().collect();
+        assert_eq!(codex_prompt_highlight_mask(&refs), vec![true, true, false]);
+    }
+
+    #[test]
     fn codex_menu_choices_are_not_prompt_cards() {
         let top = row("");
         let choice = row("› 1. Yes, continue");
@@ -277,5 +336,8 @@ mod tests {
         assert_eq!(codex_image_ordinal(&refs, 0, 10), Some(1));
         assert_eq!(codex_image_ordinal(&refs, 4, 11), Some(2));
         assert_eq!(codex_image_ordinal(&refs, 4, 26), Some(3));
+        assert_eq!(codex_image_reverse_ordinal(&refs, 0, 10), Some(3));
+        assert_eq!(codex_image_reverse_ordinal(&refs, 4, 11), Some(2));
+        assert_eq!(codex_image_reverse_ordinal(&refs, 4, 26), Some(1));
     }
 }

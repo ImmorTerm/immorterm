@@ -261,6 +261,8 @@ pub struct StatusBarData {
     pub inbox_start_col: usize,
     /// Human Inbox icon end column (exclusive).
     pub inbox_end_col: usize,
+    /// Unread count rendered as a notification badge over the Inbox segment.
+    pub inbox_unread: u32,
     /// Scratch terminal icon start column (">_" region)
     pub scratch_start_col: usize,
     /// Scratch terminal icon end column (exclusive)
@@ -444,10 +446,11 @@ pub fn build_sections_with_theme(
     let title_hovered = scroll_offset == usize::MAX;
 
     // ── Pre-compute right total width (needed for title budget) ──
-    let right_text_inbox = match inbox_unread {
-        0 => " ✉ ".to_string(),
-        1..=99 => format!(" ✉{inbox_unread} "),
-        _ => " ✉99+ ".to_string(),
+    let badge_chars = match inbox_unread { 0 => 0, 1..=9 => 1, 10..=99 => 2, _ => 3 };
+    let right_text_inbox = if inbox_unread == 0 {
+        " ✉ ".to_string()
+    } else {
+        format!(" ✉{} ", " ".repeat(badge_chars))
     };
     let right_text_scratch = " >_ ";
     let right_text_shared_activity = " ⇄ ";
@@ -559,11 +562,19 @@ pub fn build_sections_with_theme(
         if ctx_pct > 0.0 {
             // CTX mode: ▰▱ bar matching the C binary exactly.
             // Format: "CTX: ▰▰▰▰▱▱▱▱▱▱ 42%"
-            const BAR_WIDTH: usize = 10;
+            let range = ai_stats.rsplit_once('(')
+                .and_then(|(_, tail)| tail.strip_suffix(')'))
+                .filter(|value| value.contains('/'))
+                .unwrap_or("");
+            const BAR_WIDTH: usize = 5;
             let pct_int = ctx_pct.round() as usize;
             let filled = (pct_int * BAR_WIDTH + 50) / 100; // round
             let empty = BAR_WIDTH - filled;
-            let pct_str = format!(" {}%", pct_int);
+            let pct_str = if range.is_empty() {
+                format!(" {}%", pct_int)
+            } else {
+                format!(" {} {}%", range, pct_int)
+            };
             let label = "CTX: ";
 
             // Total display width: "CTX: " + bar + " NN%"
@@ -713,6 +724,7 @@ pub fn build_sections_with_theme(
         theme_area_end_col,
         inbox_start_col,
         inbox_end_col,
+        inbox_unread,
         scratch_start_col,
         scratch_end_col,
         shared_activity_start_col,
@@ -953,8 +965,20 @@ mod tests {
             &StatusBarTheme::default(), 0, 0.0,
         );
         assert_eq!(hit_test(&data, data.inbox_start_col), StatusBarTarget::Inbox);
-        assert_eq!(data.right_sections[0].text, " ✉99+ ");
+        assert_eq!(data.inbox_unread, 123);
+        assert_eq!(data.right_sections[0].text, " ✉    ");
         assert_eq!(hit_test(&data, data.scratch_start_col), StatusBarTarget::Scratch);
         assert_eq!(hit_test(&data, data.shared_activity_start_col), StatusBarTarget::SharedActivity);
+    }
+
+    #[test]
+    fn context_bar_keeps_used_and_max_window_visible() {
+        let data = build_sections_with_theme(
+            "project", "title", "Codex CTX: 50% (129k/258k)", "now", '·', 120,
+            50.0, 0, &StatusBarTheme::default(), 0, 0.0,
+        );
+        let center = data.center_sections.iter().map(|s| s.text.as_str()).collect::<String>();
+        assert!(center.contains("129k/258k"), "got {center}");
+        assert!(center.contains("50%"), "got {center}");
     }
 }
