@@ -414,7 +414,7 @@ impl GraphicsState {
                 }
                 // Convert RGB → RGBA
                 let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-                for pixel in data[..expected].chunks_exact(3) {
+                for pixel in data[..expected].as_chunks::<3>().0 {
                     rgba.extend_from_slice(pixel);
                     rgba.push(255);
                 }
