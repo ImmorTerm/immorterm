@@ -3139,6 +3139,25 @@
     const sidebarExpandBtn = document.getElementById('sidebar-expand-btn');
     const resizeHandle = document.getElementById('sidebar-resize-handle');
 
+    function humanInboxUrl(projectDir) {
+      const base = _remoteName
+        ? HUB_BASE_URL + '/api/v1/remotes/' + encodeURIComponent(_remoteName) + '/inbox'
+        : HUB_BASE_URL + '/api/v1/inbox';
+      return base + '?project_dir=' + encodeURIComponent(projectDir || '');
+    }
+    async function refreshHumanInboxCount() {
+      const session = sessions.get(activeSessionName);
+      const projectDir = fileBrowserRoot || (session && session.projectDir) || '';
+      if (!projectDir) return;
+      try {
+        const response = await fetch(humanInboxUrl(projectDir));
+        const payload = await response.json();
+        const unread = Number(payload.unread) || 0;
+        if (terminal && terminal.set_inbox_unread) terminal.set_inbox_unread(unread);
+      } catch (_) { /* hub/remote may be temporarily unavailable */ }
+    }
+    setInterval(refreshHumanInboxCount, 15000);
+
     // No-op in the flex layout. Kept as a named export so call sites we
     // added during an earlier (absolute-positioned) CSS experiment stay
     // compilable. `#container { display: flex }` already gives terminal-area
@@ -8197,6 +8216,7 @@
       }
 
       activeSessionName = sessionName;
+      refreshHumanInboxCount();
 
       // Push the active session's branch label to the renderer. The branch
       // string itself was already stored on the most recent control_event
@@ -14783,6 +14803,8 @@
         // Scratch terminal: reveal/refocus if live, else request one from the
         // active session's daemon (panel is built on the scratch_info reply).
         handleScratchClick();
+      } else if (target === 'inbox') {
+        if (modals) modals.showModal('inbox');
       } else if (target === 'shared_activity') {
         toggleSharedActivity();
       } else if (target === 'ai_stats') {
@@ -16039,6 +16061,13 @@
                 // server (which returns 403 for non-GETs). Absolute URL
                 // routes through CSP\u2019s connect-src to the actual hub.
                 hubBaseUrl: HUB_BASE_URL,
+                getProjectDir: () => {
+                  if (fileBrowserRoot) return fileBrowserRoot;
+                  const session = sessions.get(activeSessionName);
+                  return (session && session.projectDir) || '';
+                },
+                onInboxChanged: refreshHumanInboxCount,
+                wakeAgent: wakePlanAgent,
                 dismissPopup,
                 getPrefs: () => ({ ...prefs }),
                 setPrefs: (p) => {
@@ -16215,6 +16244,7 @@
             try {
               filesModule = await import(msg.filesUri);
               if (msg.projectDir) fileBrowserRoot = msg.projectDir;
+              refreshHumanInboxCount();
               fileBrowserPanel = filesModule.createFileBrowser({
                 treeEl: document.getElementById('file-tree'),
                 searchInput: document.getElementById('file-search-input'),

@@ -929,6 +929,7 @@ impl ApplicationHandler for App {
                             dot,
                             cols,
                             0.0, // no CTX bar in native window
+                            0,   // Human Inbox count is supplied by WebView host
                             &self.status_bar_theme,
                             0, 0.0, // no scroll for hit-testing
                         );
@@ -1014,7 +1015,7 @@ impl ApplicationHandler for App {
                                         self.ai_stats_mode = self.ai_stats_mode.next();
                                         return;
                                     }
-                                    StatusBarTarget::Title | StatusBarTarget::ThemeArea | StatusBarTarget::Project | StatusBarTarget::Scratch | StatusBarTarget::SharedActivity | StatusBarTarget::None => {
+                                    StatusBarTarget::Title | StatusBarTarget::ThemeArea | StatusBarTarget::Project | StatusBarTarget::Inbox | StatusBarTarget::Scratch | StatusBarTarget::SharedActivity | StatusBarTarget::None => {
                                         // No action for title, theme area, project click, or
                                         // empty space. Scratch toggle is webview-only — the
                                         // native window has no second-terminal surface.
@@ -1486,7 +1487,7 @@ impl ApplicationHandler for App {
                         if self.title_marquee_overflow == 0 {
                             let probe = statusbar::build_sections_with_theme(
                                 &project, &title, &ai_stats, &last_active, dot, cols,
-                                0.0, &self.status_bar_theme, 0, 0.0,
+                                0.0, 0, &self.status_bar_theme, 0, 0.0,
                             );
                             if probe.title_truncated {
                                 let full_len = probe.full_title.chars().count();
@@ -1511,6 +1512,7 @@ impl ApplicationHandler for App {
                         dot,
                         cols,
                         0.0, // no CTX bar in native window
+                        0,   // Human Inbox count is supplied by WebView host
                         &self.status_bar_theme,
                         title_scroll,
                         title_scroll_fract,
