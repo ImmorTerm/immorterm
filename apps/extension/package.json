@@ -497,13 +497,14 @@
     }
   },
   "scripts": {
-    "compile": "tsc --noEmit -p ./ && esbuild src/extension.ts --bundle --platform=node --target=node18 --external:vscode --external:@immorterm/license --external:@immorterm/config --format=cjs --outfile=out/extension.js --sourcemap --minify --log-level=warning",
+    "compile": "bun run lint:css && tsc --noEmit -p ./ && esbuild src/extension.ts --bundle --platform=node --target=node18 --external:vscode --external:@immorterm/license --external:@immorterm/config --format=cjs --outfile=out/extension.js --sourcemap --minify --log-level=warning",
     "compile:tsc": "tsc -p ./",
     "watch": "esbuild src/extension.ts --bundle --platform=node --target=node18 --external:vscode --external:@immorterm/license --external:@immorterm/config --format=cjs --outfile=out/extension.js --sourcemap --watch",
     "lint": "eslint src --ext ts",
+    "lint:css": "node scripts/validate-webview-css.mjs resources/gpu-terminal.css",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:run": "vitest run",
+    "test": "bun run lint:css && vitest run",
+    "test:run": "bun run lint:css && vitest run",
     "test:watch": "vitest",
     "build:immorterm-ai": "../../scripts/build-immorterm-ai.sh",
     "build:immorterm-ai:quick": "../../scripts/build-immorterm-ai.sh --quick"
@@ -514,6 +515,7 @@
     "@types/vscode": "^1.96.0",
     "esbuild": "^0.28.0",
     "jsdom": "^28.1.0",
+    "postcss": "^8.5.6",
     "typescript": "^5.0.0",
     "vitest": "^3.0.0"
   },
