@@ -96,8 +96,22 @@ pub struct ClaudeApiStats {
     pub cost_usd: f64,
     /// Context window usage percentage (0-100)
     pub context_pct: f64,
+    /// Tokens currently occupying the model context window, when reported.
+    pub context_used_tokens: u64,
+    /// Maximum model context window, when reported.
+    pub context_window_tokens: u64,
     /// Path to the JSONL transcript
     pub transcript_path: String,
+}
+
+fn compact_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}m", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{}k", (tokens as f64 / 1_000.0).round() as u64)
+    } else {
+        tokens.to_string()
+    }
 }
 
 /// Tracks AI coding tool processes running inside this terminal session.
@@ -311,7 +325,7 @@ impl ClaudeTracker {
     ///
     /// Everything needed is already in the rollout, which the SessionStart hook
     /// recorded in the registry:
-    ///   `token_count` → info.total_token_usage.total_tokens + model_context_window
+    ///   `token_count` → info.last_token_usage.total_tokens + model_context_window
     ///   `turn_context` / `session_meta` → model slug
     /// Only the tail is read (rollouts grow to megabytes) and the last matching
     /// record wins, so this stays cheap enough for the 10s scan tick.
@@ -340,7 +354,7 @@ impl ClaudeTracker {
                 && let Some(info) = payload.get("info")
             {
                 if let Some(t) = info
-                    .get("total_token_usage")
+                    .get("last_token_usage")
                     .and_then(|u| u.get("total_tokens"))
                     .and_then(|t| t.as_f64())
                 {
@@ -357,6 +371,8 @@ impl ClaudeTracker {
         }
         if used > 0.0 && window > 0.0 {
             self.api_stats.context_pct = (used / window * 100.0).clamp(0.0, 100.0);
+            self.api_stats.context_used_tokens = used as u64;
+            self.api_stats.context_window_tokens = window as u64;
         }
         self.api_stats.transcript_path = path;
     }
@@ -438,7 +454,18 @@ impl ClaudeTracker {
         } else {
             "$0".into()
         };
-        let ctx = format!("{:.0}%", self.api_stats.context_pct);
+        let ctx = if self.api_stats.context_used_tokens > 0
+            && self.api_stats.context_window_tokens > 0
+        {
+            format!(
+                "{:.0}% ({}/{})",
+                self.api_stats.context_pct,
+                compact_tokens(self.api_stats.context_used_tokens),
+                compact_tokens(self.api_stats.context_window_tokens),
+            )
+        } else {
+            format!("{:.0}%", self.api_stats.context_pct)
+        };
 
         match self.detected_tool {
             Some(tool) => format!(
@@ -669,6 +696,8 @@ fn find_session_by_window_id(window_id: &str) -> Option<ContextFileMatch> {
                 .get("CTX_PCT")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.0),
+            context_used_tokens: 0,
+            context_window_tokens: 0,
             transcript_path: vars.get("TRANSCRIPT_PATH").cloned().unwrap_or_default(),
         };
 
@@ -826,9 +855,9 @@ mod codex_stats_tests {
     const ROLLOUT: &str = concat!(
         r#"{"type":"turn_context","payload":{"turn_id":"t1","cwd":"/x","model":"gpt-5.6-sol"}}"#,
         "\n",
-        r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":31819},"model_context_window":258400}}}"#,
+        r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":1031819},"last_token_usage":{"total_tokens":31819},"model_context_window":258400}}}"#,
         "\n",
-        r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":129200},"model_context_window":258400}}}"#,
+        r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":9129200},"last_token_usage":{"total_tokens":129200},"model_context_window":258400}}}"#,
         "\n",
     );
 
@@ -853,6 +882,8 @@ mod codex_stats_tests {
         assert_eq!(s.model, "gpt-5.6-sol");
         // Last token_count wins: 129200 / 258400 = 50%.
         assert!((s.context_pct - 50.0).abs() < 0.01, "got {}", s.context_pct);
+        assert_eq!(s.context_used_tokens, 129200);
+        assert_eq!(s.context_window_tokens, 258400);
     }
 
     #[test]
@@ -862,6 +893,16 @@ mod codex_stats_tests {
         let s = stats_from("partial", &text);
         assert_eq!(s.model, "gpt-5.6-sol");
         assert!(s.context_pct > 0.0);
+    }
+
+    #[test]
+    fn codex_status_shows_current_and_max_context_not_lifetime_usage() {
+        let mut t = ClaudeTracker::new("test-window");
+        t.detected_tool = Some(AiTool::Codex);
+        t.api_stats = stats_from("label", ROLLOUT);
+        let label = t.format_api_stats();
+        assert!(label.contains("50% (129k/258k) ctx"), "got {label}");
+        assert!(!label.contains("9129k"));
     }
 
     #[test]

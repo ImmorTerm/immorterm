@@ -1419,6 +1419,8 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                             model: ai_event.model,
                             cost_usd: ai_event.cost_usd,
                             context_pct: ai_event.context_pct,
+                            context_used_tokens: 0,
+                            context_window_tokens: 0,
                             transcript_path: ai_event.transcript_path,
                         };
                         if let Some(mode) = ai_event.permission_mode {
@@ -3159,6 +3161,8 @@ async fn handle_client_connection(
                 model,
                 cost_usd,
                 context_pct,
+                context_used_tokens: 0,
+                context_window_tokens: 0,
                 transcript_path,
             };
 

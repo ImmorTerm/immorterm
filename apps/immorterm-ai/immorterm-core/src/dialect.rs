@@ -122,18 +122,59 @@ pub fn codex_prompt_highlight_mask(rows: &[&Row]) -> Vec<bool> {
                 break;
             }
 
-            let leading_blanks = next.cells.iter()
-                .take_while(|cell| matches!(cell.grapheme, ' ' | '\0' | '\u{a0}'))
-                .count();
-            if leading_blanks >= 2 || rows[next_idx - 1].wrapped {
-                highlighted[next_idx] = true;
-                continue;
+            let first = next.cells.iter()
+                .find(|cell| !matches!(cell.grapheme, ' ' | '\0' | '\u{a0}'))
+                .map(|cell| cell.grapheme);
+            // Explicit newlines in a submitted Codex prompt start at column 0,
+            // so indentation cannot define the card boundary. Codex separates
+            // the prompt from the next assistant turn with a blank padding row;
+            // these sentinels are a defensive stop for transient redraws where
+            // that row has not arrived yet.
+            if matches!(first, Some('\u{2022}' | '\u{203A}')) {
+                break;
             }
-            break;
+            highlighted[next_idx] = true;
         }
     }
 
     highlighted
+}
+
+/// Return the 1-based image occurrence for a Codex prompt marker at a grid
+/// location. Codex restarts the visible `[Image #N]` counter for each prompt,
+/// while its rollout stores images in chronological order. The occurrence is
+/// therefore the stable key the extension host needs for hover resolution.
+pub fn codex_image_ordinal(rows: &[&Row], target_row: usize, target_col: usize) -> Option<usize> {
+    if target_row >= rows.len() {
+        return None;
+    }
+    let prompt_rows = codex_prompt_highlight_mask(rows);
+    let mut ordinal = 0usize;
+
+    for (row_idx, row) in rows.iter().enumerate().take(target_row + 1) {
+        if !prompt_rows[row_idx] || row_is_blank(row) {
+            continue;
+        }
+        let text: String = row.cells.iter()
+            .filter(|cell| cell.width > 0)
+            .map(|cell| cell.grapheme)
+            .collect();
+        let mut spans = Vec::new();
+        crate::links::scan_row(&text, 0, &mut spans);
+        for span in spans {
+            if !matches!(span.kind, crate::links::LinkKind::ClaudeImage(_)) {
+                continue;
+            }
+            ordinal += 1;
+            if row_idx == target_row
+                && span.start as usize <= target_col
+                && target_col < span.end as usize
+            {
+                return Some(ordinal);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -200,6 +241,22 @@ mod tests {
     }
 
     #[test]
+    fn codex_prompt_cards_include_unindented_explicit_newlines() {
+        let top = row("");
+        let prompt = row("› first line");
+        let second = row("second line begins at column zero");
+        let third = row("third line too");
+        let bottom = row("");
+        let assistant = row("• response");
+        let rows = [&top, &prompt, &second, &third, &bottom, &assistant];
+
+        assert_eq!(
+            codex_prompt_highlight_mask(&rows),
+            vec![true, true, true, true, true, false]
+        );
+    }
+
+    #[test]
     fn codex_menu_choices_are_not_prompt_cards() {
         let top = row("");
         let choice = row("› 1. Yes, continue");
@@ -207,5 +264,18 @@ mod tests {
         let rows = [&top, &choice, &bottom];
 
         assert_eq!(codex_prompt_highlight_mask(&rows), vec![false; 3]);
+    }
+
+    #[test]
+    fn codex_image_ordinal_survives_per_prompt_number_resets() {
+        let rows = [
+            row("› first [Image #1]"), row(""), row("• response"), row(""),
+            row("› second [Image #1] and [Image #2]"), row(""),
+        ];
+        let refs: Vec<&Row> = rows.iter().collect();
+
+        assert_eq!(codex_image_ordinal(&refs, 0, 10), Some(1));
+        assert_eq!(codex_image_ordinal(&refs, 4, 11), Some(2));
+        assert_eq!(codex_image_ordinal(&refs, 4, 26), Some(3));
     }
 }

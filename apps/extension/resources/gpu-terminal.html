@@ -14393,7 +14393,8 @@
           // tabs keep the strict UUID check — there the tracker is
           // reliable, and ambiguity isn't worth the extra cost.
           const effectiveUuid = uuid || (_remoteName ? 'auto' : null);
-          const cacheKey = 'claude-image:' + (effectiveUuid || 'scan') + '/' + link.n;
+          const imageOrdinal = Number(link.ordinal) || link.n;
+          const cacheKey = 'claude-image:' + (effectiveUuid || 'scan') + '/' + imageOrdinal;
           const cached = linkExistCache.get(cacheKey);
           if (cached && cached.exists) { activate(cached); }
           else if (cached && !cached.exists) { deactivate(); }
@@ -14408,7 +14409,8 @@
             fetch(url, { method: 'HEAD' }).then(r => {
               const stillHovering = linkHoverState && linkHoverState.link
                 && linkHoverState.link.kind === 'claude-image'
-                && linkHoverState.link.n === link.n;
+                && linkHoverState.link.n === link.n
+                && (Number(linkHoverState.link.ordinal) || linkHoverState.link.n) === imageOrdinal;
               if (r.ok) {
                 const meta = { exists: true, imageDataUrl: url };
                 linkExistCache.set(cacheKey, meta);
@@ -14428,6 +14430,7 @@
             claudeImagePending.set(requestId, { cacheKey, n: link.n });
             vscode.postMessage({
               type: 'resolve-claude-image', requestId, n: link.n,
+              ordinal: imageOrdinal,
               uuid: uuid || undefined, windowId: windowId || undefined,
               // Codex keeps pasted images inline in its rollout, so the host
               // resolves them from there rather than from any cache dir.

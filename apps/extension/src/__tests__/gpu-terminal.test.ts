@@ -728,6 +728,33 @@ describe('GPU Terminal — Codex Viewport Anchoring', () => {
   });
 });
 
+describe('GPU Terminal — Codex image hover routing', () => {
+  it('counts only images from real user messages, not compactions or tool output', async () => {
+    const { extractCodexPromptImageDataUrl } = await import('../gpu-terminal');
+    const records = [
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [
+        { type: 'input_text', text: 'first' },
+        { type: 'input_image', image_url: 'data:image/png;base64,FIRST' },
+      ] } },
+      { type: 'compacted', payload: { content: [
+        { type: 'input_image', image_url: 'data:image/png;base64,DUPLICATE' },
+      ] } },
+      { type: 'response_item', payload: { type: 'custom_tool_call_output', output: {
+        type: 'input_image', image_url: 'data:image/png;base64,TOOL',
+      } } },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [
+        { type: 'input_text', text: 'second' },
+        { type: 'input_image', image_url: 'data:image/jpeg;base64,SECOND' },
+      ] } },
+    ];
+    const rollout = records.map(record => JSON.stringify(record)).join('\n');
+
+    expect(extractCodexPromptImageDataUrl(rollout, 1)).toBe('data:image/png;base64,FIRST');
+    expect(extractCodexPromptImageDataUrl(rollout, 2)).toBe('data:image/jpeg;base64,SECOND');
+    expect(extractCodexPromptImageDataUrl(rollout, 3)).toBeUndefined();
+  });
+});
+
 describe('GPU Terminal — Shared Activity', () => {
   const html = readHtml();
   const js = extractInlineScript(html);

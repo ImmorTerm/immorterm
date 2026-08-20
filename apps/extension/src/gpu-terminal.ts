@@ -64,6 +64,28 @@ import { acquireGlobalRestoreSlot } from './restore-semaphore';
  *  rather than block a hover. */
 const CODEX_ROLLOUT_MAX_BYTES = 24 * 1024 * 1024;
 
+/** Resolve the chronological Nth image attached by a real Codex user message.
+ * Deliberately ignores compaction snapshots and tool outputs: both can contain
+ * copies of older `input_image` values and used to shift every later hover. */
+export function extractCodexPromptImageDataUrl(raw: string, ordinal: number): string | undefined {
+  if (!Number.isInteger(ordinal) || ordinal < 1) return undefined;
+  let seen = 0;
+  for (const line of raw.split('\n')) {
+    if (!line.includes('input_image')) continue;
+    let record: any;
+    try { record = JSON.parse(line); } catch { continue; }
+    const payload = record?.type === 'response_item' ? record.payload : undefined;
+    if (payload?.type !== 'message' || payload?.role !== 'user' || !Array.isArray(payload.content)) {
+      continue;
+    }
+    for (const item of payload.content) {
+      if (item?.type !== 'input_image' || typeof item.image_url !== 'string') continue;
+      if (++seen === ordinal && item.image_url.startsWith('data:image/')) return item.image_url;
+    }
+  }
+  return undefined;
+}
+
 const SOCKET_DIR = path.join(process.env.HOME || '~', '.immorterm', 'sockets');
 const WASM_RESOURCE_DIR = 'resources/wasm';
 
@@ -1659,9 +1681,9 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         // webview can't always learn the active session's Claude UUID (the
         // jsonl-tail tracker is flaky), so scan ~/.claude/image-cache/*/<N>.png
         // and pick the newest — preferring the known UUID's dir when supplied.
-        const { requestId, n, uuid, windowId, transcriptPath } = msg as {
+        const { requestId, n, ordinal, uuid, windowId, transcriptPath } = msg as {
           requestId: string; n: number; uuid?: string; windowId?: string;
-          transcriptPath?: string; type: string;
+          ordinal?: number; transcriptPath?: string; type: string;
         };
         // Codex embeds pasted images INLINE in its rollout as a data URI
         // (`input_image` → `image_url: "data:image/png;base64,…"`) rather than
@@ -1673,15 +1695,7 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
           try {
             if (fs.statSync(transcriptPath).size <= CODEX_ROLLOUT_MAX_BYTES) {
               const raw = fs.readFileSync(transcriptPath, 'utf8');
-              let seen = 0;
-              let found: string | undefined;
-              for (const line of raw.split('\n')) {
-                if (!line.includes('input_image')) continue;
-                for (const m of line.matchAll(/"image_url"\s*:\s*"(data:image\/[^"]+)"/g)) {
-                  if (++seen === n) { found = m[1]; break; }
-                }
-                if (found) break;
-              }
+              const found = extractCodexPromptImageDataUrl(raw, ordinal || n);
               if (found) {
                 this.view?.webview.postMessage({
                   type: 'claude-image-result', requestId, exists: true, imageDataUrl: found,
