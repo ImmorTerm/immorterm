@@ -68,6 +68,12 @@ describe('inlineWebviewStyles', () => {
     // the file as nested under the canvas. The terminal still renders, but all
     // following sidebar/file/status rules silently stop matching.
     expect(mainCss.match(/^#terminal-canvas\s*\{/gm)).toHaveLength(1);
+
+    // Summary cards contain a header, title, source, and preview. Keep an
+    // explicit content-height floor so a crowded Inbox scrolls the list
+    // instead of clipping each card's title inside a compressed row.
+    expect(mainCss).toMatch(/\.inbox-card-summary\s*\{[^}]*min-block-size:\s*120px[^}]*height:\s*auto/s);
+    expect(mainCss).toMatch(/\.inbox-card-summary \.ss-search-md\s*\{[^}]*-webkit-line-clamp:\s*1/s);
   });
 });
 
