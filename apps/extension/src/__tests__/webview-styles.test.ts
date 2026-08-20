@@ -49,9 +49,10 @@ describe('inlineWebviewStyles', () => {
 
   it('makes the real packaged WebView self-contained', () => {
     const resources = path.resolve(__dirname, '../../resources');
+    const mainCss = fs.readFileSync(path.join(resources, 'gpu-terminal.css'), 'utf8');
     const result = inlineWebviewStyles(
       fs.readFileSync(path.join(resources, 'gpu-terminal.html'), 'utf8'),
-      fs.readFileSync(path.join(resources, 'gpu-terminal.css'), 'utf8'),
+      mainCss,
       fs.readFileSync(path.join(resources, 'vendor/codicons/codicon.css'), 'utf8'),
       fs.readFileSync(path.join(resources, 'vendor/codicons/codicon.ttf')),
     );
@@ -61,5 +62,10 @@ describe('inlineWebviewStyles', () => {
     expect(result).not.toContain('<link rel="stylesheet"');
     expect(result).not.toContain('__CSS_URI__');
     expect(result).not.toContain('__CODICON_CSS_URI__');
+
+    // A duplicated opener here makes modern Chromium treat the remainder of
+    // the file as nested under the canvas. The terminal still renders, but all
+    // following sidebar/file/status rules silently stop matching.
+    expect(mainCss.match(/^#terminal-canvas\s*\{/gm)).toHaveLength(1);
   });
 });

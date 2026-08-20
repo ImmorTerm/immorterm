@@ -756,6 +756,19 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
       `<meta http-equiv="Content-Security-Policy" content="${csp}">\n  <script type="module" nonce="${nonce}">`,
     );
 
+    // Opt-in boundary diagnostic for reload/packaging incidents. The generated
+    // document contains the static terminal shell only (no PTY/session content)
+    // and is overwritten on every render.
+    if (process.env.IMMORTERM_WEBVIEW_DIAGNOSTICS === '1') {
+      const safeProjectName = this.projectName.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const generatedHtmlPath = path.join(
+        os.tmpdir(),
+        `immorterm-webview-${safeProjectName}-${process.pid}.html`,
+      );
+      fs.writeFileSync(generatedHtmlPath, html, 'utf8');
+      logger.info(`ImmorTerm AI: generated WebView HTML: ${generatedHtmlPath} (${html.length} chars)`);
+    }
+
     webview.html = html;
   }
 
@@ -955,6 +968,17 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         })().catch(err => {
           logger.error(`ImmorTerm AI: loaded handler failed: ${err}`);
         });
+        break;
+      }
+      case 'style-health': {
+        const safeProjectName = this.projectName.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const reportPath = path.join(
+          os.tmpdir(),
+          `immorterm-webview-style-health-${safeProjectName}-${process.pid}.json`,
+        );
+        const report = { receivedAt: new Date().toISOString(), ...msg };
+        fs.writeFileSync(reportPath, JSON.stringify(report, null, 2), 'utf8');
+        logger.info(`ImmorTerm AI: WebView style health: ${JSON.stringify(msg)} (${reportPath})`);
         break;
       }
       case 'ready':
