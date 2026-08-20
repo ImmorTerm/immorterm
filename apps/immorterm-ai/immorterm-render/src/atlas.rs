@@ -10,6 +10,21 @@ use cosmic_text::{
 };
 use immorterm_core::cell::CellAttrs;
 
+/// Target ink width for Unicode dash punctuation inside one terminal cell.
+///
+/// Some monospace fonts (notably Menlo) intentionally give hyphen, en dash,
+/// and em dash nearly identical one-cell outlines. Renderers can preserve the
+/// selected font's stroke and vertical metrics while normalizing horizontal
+/// ink extent to this conventional typographic progression.
+pub fn dash_ink_ratio(ch: char) -> Option<f64> {
+    match ch {
+        '-' | '\u{2010}' | '\u{2011}' => Some(0.45), // hyphen-minus / hyphens
+        '\u{2012}' | '\u{2013}' => Some(0.70),      // figure dash / en dash
+        '\u{2014}' | '\u{2015}' => Some(0.95),      // em dash / horizontal bar
+        _ => None,
+    }
+}
+
 /// Size of the atlas texture in pixels (2048x2048 = 4MB at R8Unorm).
 const ATLAS_SIZE: u32 = 2048;
 
@@ -1182,5 +1197,23 @@ fn measure_cell(
         cell_width,
         cell_height: line_height,
         baseline_y,
+    }
+}
+
+#[cfg(test)]
+mod dash_tests {
+    use super::dash_ink_ratio;
+
+    #[test]
+    fn unicode_dash_family_has_distinct_typographic_widths() {
+        let hyphen = dash_ink_ratio('-').unwrap();
+        let en = dash_ink_ratio('\u{2013}').unwrap();
+        let em = dash_ink_ratio('\u{2014}').unwrap();
+
+        assert!(hyphen < en);
+        assert!(en < em);
+        assert_eq!(dash_ink_ratio('\u{2012}'), Some(en));
+        assert_eq!(dash_ink_ratio('\u{2015}'), Some(em));
+        assert_eq!(dash_ink_ratio('A'), None);
     }
 }
