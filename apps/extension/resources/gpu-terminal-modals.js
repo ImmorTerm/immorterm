@@ -2745,6 +2745,98 @@ export function createModalSystem({
     });
   }
 
+  function renderInboxSource(item, linkToSession) {
+    const source = item.source || {};
+    const sourceBits = [source.display_name || source.immorterm_id, source.tool].filter(Boolean);
+    if (!sourceBits.length) return null;
+    const sourceRow = el('div', 'inbox-source');
+    sourceRow.appendChild(document.createTextNode('From ' + sourceBits.join(' · ')));
+    if (linkToSession && source.session_name && typeof onSelectSession === 'function') {
+      const viewTerminal = el('button', 'inbox-session-link', 'View terminal →');
+      viewTerminal.type = 'button';
+      viewTerminal.addEventListener('click', () => {
+        if (onSelectSession(source.session_name, source.immorterm_id)) dismissModal();
+      });
+      sourceRow.appendChild(viewTerminal);
+    }
+    return sourceRow;
+  }
+
+  function appendInboxMessageDetails(card, item, projectDir) {
+    card.appendChild(renderMarkdown(String(item.message || '')));
+
+    if (Array.isArray(item.pills) && item.pills.length) {
+      const pills = el('div', 'inbox-pills');
+      for (const pill of item.pills) {
+        const tone = ['neutral', 'blue', 'green', 'yellow', 'red', 'purple'].includes(pill.tone) ? pill.tone : 'neutral';
+        pills.appendChild(el('span', 'inbox-pill tone-' + tone, String(pill.label || '')));
+      }
+      card.appendChild(pills);
+    }
+
+    const result = item.action_result;
+    if (result && result.label) {
+      card.appendChild(el('div', 'inbox-action-result', '✓ You replied: ' + result.label));
+    } else if (Array.isArray(item.actions) && item.actions.length) {
+      const actions = el('div', 'inbox-actions');
+      for (const action of item.actions) {
+        const style = ['primary', 'secondary', 'success', 'danger'].includes(action.style) ? action.style : 'secondary';
+        const button = el('button', 'inbox-action style-' + style, String(action.label || action.id || 'Respond'));
+        button.addEventListener('click', async () => {
+          actions.querySelectorAll('button').forEach(other => { other.disabled = true; });
+          button.textContent = 'Sending...';
+          try {
+            const response = await inboxPost(inboxUrl(encodeURIComponent(item.id) + '/action'), {
+              project_dir: projectDir,
+              action_id: action.id,
+            });
+            const sourceSession = response && response.source && response.source.session_name;
+            const delivered = wakeAgent && wakeAgent(sourceSession, response.reply_prompt || (
+              'Human Inbox response: ' + (action.label || action.id)
+            ));
+            if (onInboxChanged) onInboxChanged();
+            await renderInboxModal();
+            if (!delivered) {
+              modalBody.prepend(el('div', 'modal-error', 'Response saved, but the owning AI session is not connected, so it could not be woken.'));
+            }
+          } catch (error) {
+            actions.querySelectorAll('button').forEach(other => { other.disabled = false; });
+            button.textContent = error.message || 'Could not send';
+          }
+        });
+        actions.appendChild(button);
+      }
+      card.appendChild(actions);
+    }
+  }
+
+  function renderInboxMessageDetail(item, projectDir) {
+    clearEl(modalBody);
+    const nav = el('div', 'inbox-detail-nav');
+    const back = el('button', 'inbox-detail-back', '← All messages');
+    back.type = 'button';
+    back.addEventListener('click', renderInboxModal);
+    nav.appendChild(back);
+    modalBody.appendChild(nav);
+
+    const kind = ['info', 'success', 'warning', 'action_required'].includes(item.kind) ? item.kind : 'info';
+    const card = el('article', 'inbox-card inbox-detail kind-' + kind + (item.status === 'unread' ? ' unread' : ''));
+    const header = el('div', 'inbox-card-header');
+    const titleWrap = el('div', 'inbox-title-wrap');
+    titleWrap.appendChild(el('span', 'inbox-kind', kind.replace('_', ' ')));
+    titleWrap.appendChild(el('h3', 'inbox-title', item.title || 'Notification'));
+    header.appendChild(titleWrap);
+    header.appendChild(el('time', 'inbox-time', new Date(Number(item.created_at) || 0).toLocaleString([], {
+      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+    })));
+    card.appendChild(header);
+    const sourceRow = renderInboxSource(item, true);
+    if (sourceRow) card.appendChild(sourceRow);
+    appendInboxMessageDetails(card, item, projectDir);
+    modalBody.appendChild(card);
+    back.focus();
+  }
+
   async function renderInboxModal() {
     clearEl(modalBody);
     modalBody.appendChild(modalSpinner('Loading your inbox...'));
@@ -2832,7 +2924,17 @@ export function createModalSystem({
       const list = el('div', 'inbox-list');
       for (const item of messages) {
         const kind = ['info', 'success', 'warning', 'action_required'].includes(item.kind) ? item.kind : 'info';
-        const card = el('article', 'inbox-card kind-' + kind + (item.status === 'unread' ? ' unread' : ''));
+        const card = el('article', 'inbox-card inbox-card-summary kind-' + kind + (item.status === 'unread' ? ' unread' : ''));
+        card.tabIndex = 0;
+        card.setAttribute('role', 'button');
+        card.setAttribute('aria-label', (item.title || 'Inbox message') + '. Open full message.');
+        const openDetail = event => {
+          if (event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return;
+          if (event.type === 'keydown') event.preventDefault();
+          renderInboxMessageDetail(item, projectDir);
+        };
+        card.addEventListener('click', openDetail);
+        card.addEventListener('keydown', openDetail);
         const header = el('div', 'inbox-card-header');
         const titleWrap = el('div', 'inbox-title-wrap');
         titleWrap.appendChild(el('span', 'inbox-kind', kind.replace('_', ' ')));
@@ -2843,79 +2945,12 @@ export function createModalSystem({
         })));
         card.appendChild(header);
 
-        const source = item.source || {};
-        const sourceBits = [source.display_name || source.immorterm_id, source.tool].filter(Boolean);
-        if (sourceBits.length) {
-          const sourceRow = el('div', 'inbox-source');
-          sourceRow.appendChild(document.createTextNode('From ' + sourceBits.join(' · ')));
-          if (source.session_name && typeof onSelectSession === 'function') {
-            const viewTerminal = el('button', 'inbox-session-link', 'View terminal →');
-            viewTerminal.type = 'button';
-            viewTerminal.addEventListener('click', event => {
-              event.stopPropagation();
-              if (onSelectSession(source.session_name, source.immorterm_id)) dismissModal();
-            });
-            sourceRow.appendChild(viewTerminal);
-            card.classList.add('has-session');
-            card.tabIndex = 0;
-            card.setAttribute('role', 'button');
-            card.setAttribute('aria-label', (item.title || 'Inbox message') + '. View originating terminal.');
-            const openOrigin = event => {
-              if (event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return;
-              if (event.target && event.target.closest && event.target.closest('button')) return;
-              if (event.type === 'keydown') event.preventDefault();
-              if (onSelectSession(source.session_name, source.immorterm_id)) dismissModal();
-            };
-            card.addEventListener('click', openOrigin);
-            card.addEventListener('keydown', openOrigin);
-          }
+        const sourceRow = renderInboxSource(item, false);
+        if (sourceRow) {
+          sourceRow.appendChild(el('span', 'inbox-open-hint', 'Open →'));
           card.appendChild(sourceRow);
         }
         card.appendChild(renderMarkdown(String(item.message || '')));
-
-        if (Array.isArray(item.pills) && item.pills.length) {
-          const pills = el('div', 'inbox-pills');
-          for (const pill of item.pills) {
-            const tone = ['neutral', 'blue', 'green', 'yellow', 'red', 'purple'].includes(pill.tone) ? pill.tone : 'neutral';
-            pills.appendChild(el('span', 'inbox-pill tone-' + tone, String(pill.label || '')));
-          }
-          card.appendChild(pills);
-        }
-
-        const result = item.action_result;
-        if (result && result.label) {
-          card.appendChild(el('div', 'inbox-action-result', '✓ You replied: ' + result.label));
-        } else if (Array.isArray(item.actions) && item.actions.length) {
-          const actions = el('div', 'inbox-actions');
-          for (const action of item.actions) {
-            const style = ['primary', 'secondary', 'success', 'danger'].includes(action.style) ? action.style : 'secondary';
-            const button = el('button', 'inbox-action style-' + style, String(action.label || action.id || 'Respond'));
-            button.addEventListener('click', async () => {
-              actions.querySelectorAll('button').forEach(other => { other.disabled = true; });
-              button.textContent = 'Sending...';
-              try {
-                const response = await inboxPost(inboxUrl(encodeURIComponent(item.id) + '/action'), {
-                  project_dir: projectDir,
-                  action_id: action.id,
-                });
-                const sourceSession = response && response.source && response.source.session_name;
-                const delivered = wakeAgent && wakeAgent(sourceSession, response.reply_prompt || (
-                  'Human Inbox response: ' + (action.label || action.id)
-                ));
-                if (onInboxChanged) onInboxChanged();
-                await renderInboxModal();
-                if (!delivered) {
-                  modalBody.prepend(el('div', 'modal-error', 'Response saved, but the owning AI session is not connected, so it could not be woken.'));
-                }
-              } catch (error) {
-                actions.querySelectorAll('button').forEach(other => { other.disabled = false; });
-                button.textContent = error.message || 'Could not send';
-              }
-            });
-            actions.appendChild(button);
-          }
-          card.appendChild(actions);
-        }
         list.appendChild(card);
       }
       modalBody.appendChild(list);
