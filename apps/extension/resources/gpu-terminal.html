@@ -12973,7 +12973,7 @@
     const dirListPending = new Map(); // requestId → resolve fn (VS Code list-dir round-trip)
     const wsPortResolvePending = new Map(); // sessionName → resolve fn (VS Code resolve-ws-port round-trip)
     const filePreviewPending = new Map(); // requestId → resolve fn (VS Code file-preview round-trip)
-    const claudeImagePending = new Map(); // requestId → { cacheKey, n, reverseOrdinal } ([Image #N] resolve)
+    const claudeImagePending = new Map(); // requestId → { cacheKey, linkKey } ([Image #N] resolve)
     let dirListSeq = 0;
     let linkCursorActive = false;
     let linkStatReqSeq = 0;
@@ -13161,7 +13161,7 @@
     };
     const linkIdentity = (l) => (l
       ? l.kind + ':' + l.text + ':' + (l.line || 0) + ':' + (l.col || 0)
-        + ':' + (l.ordinal || 0) + ':' + (l.reverseOrdinal || 0)
+        + ':' + (l.promptText || '') + ':' + (l.promptReverseOrdinal || 0)
       : '');
     const showLinkTooltip = (link, clientX, clientY, meta) => {
       if (typeof cancelLinkHide === 'function') cancelLinkHide();
@@ -14434,11 +14434,12 @@
           // tabs keep the strict UUID check — there the tracker is
           // reliable, and ambiguity isn't worth the extra cost.
           const effectiveUuid = uuid || (_remoteName ? 'auto' : null);
-          const imageOrdinal = Number(link.ordinal) || link.n;
-          const reverseOrdinal = Number(link.reverseOrdinal) || 0;
-          const cacheKey = reverseOrdinal && sess && sess.claudeRaw && sess.claudeRaw.tool === 'codex'
-            ? 'codex-image-tail:' + (sess.claudeRaw.transcript_path || 'unknown') + '/' + reverseOrdinal
-            : 'claude-image:' + (effectiveUuid || 'scan') + '/' + imageOrdinal;
+          const promptText = typeof link.promptText === 'string' ? link.promptText : '';
+          const promptReverseOrdinal = Number(link.promptReverseOrdinal) || 1;
+          const cacheKey = promptText && sess && sess.claudeRaw && sess.claudeRaw.tool === 'codex'
+            ? 'codex-image-prompt:' + (sess.claudeRaw.transcript_path || 'unknown')
+              + '/' + promptText + '/' + promptReverseOrdinal + '/' + link.n
+            : 'claude-image:' + (effectiveUuid || 'scan') + '/' + link.n;
           const cached = linkExistCache.get(cacheKey);
           if (cached && cached.exists) { activate(cached); }
           else if (cached && !cached.exists) { deactivate(); }
@@ -14454,8 +14455,7 @@
               const stillHovering = linkHoverState && linkHoverState.link
                 && linkHoverState.link.kind === 'claude-image'
                 && linkHoverState.link.n === link.n
-                && (Number(linkHoverState.link.ordinal) || linkHoverState.link.n) === imageOrdinal
-                && (Number(linkHoverState.link.reverseOrdinal) || 0) === reverseOrdinal;
+                && linkIdentity(linkHoverState.link) === linkIdentity(link);
               if (r.ok) {
                 const meta = { exists: true, imageDataUrl: url };
                 linkExistCache.set(cacheKey, meta);
@@ -14472,11 +14472,11 @@
             // dir and otherwise picks the newest matching <N>.png.
             activate(null);
             const requestId = 'cimg-' + (++linkStatReqSeq);
-            claudeImagePending.set(requestId, { cacheKey, n: link.n, reverseOrdinal });
+            claudeImagePending.set(requestId, { cacheKey, linkKey: linkIdentity(link) });
             vscode.postMessage({
               type: 'resolve-claude-image', requestId, n: link.n,
-              ordinal: imageOrdinal,
-              reverseOrdinal: reverseOrdinal || undefined,
+              promptText: promptText || undefined,
+              promptReverseOrdinal,
               uuid: uuid || undefined, windowId: windowId || undefined,
               // Codex keeps pasted images inline in its rollout, so the host
               // resolves them from there rather than from any cache dir.
@@ -15790,8 +15790,7 @@
             linkExistCache.set(pend.cacheKey, meta);
             if (linkHoverState && linkHoverState.link
                 && linkHoverState.link.kind === 'claude-image'
-                && linkHoverState.link.n === pend.n
-                && (Number(linkHoverState.link.reverseOrdinal) || 0) === (pend.reverseOrdinal || 0)) {
+                && linkIdentity(linkHoverState.link) === pend.linkKey) {
               if (meta.exists) {
                 setLinkCursor(true);
                 showLinkTooltip(linkHoverState.link, linkHoverState.clientX, linkHoverState.clientY, meta);

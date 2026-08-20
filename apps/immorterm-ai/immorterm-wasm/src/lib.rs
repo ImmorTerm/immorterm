@@ -2330,7 +2330,7 @@ impl WasmTerminalInner {
                     // Cmd+Opt+V writes ~/.immorterm/paste/<window>/<n>.png
                     // using the same 1-based numbering. The vendor difference
                     // is only WHERE the bytes live, which the host resolves.
-                    let (ordinal, reverse_ordinal) = if self.ai_dialect == AiDialect::Codex {
+                    let prompt_identity = if self.ai_dialect == AiDialect::Codex {
                         let mut rows = Vec::with_capacity(
                             self.terminal.scrollback.len() + self.terminal.grid.num_rows()
                         );
@@ -2340,21 +2340,18 @@ impl WasmTerminalInner {
                                 rows.push(row);
                             }
                         }
-                        (
-                            immorterm_core::dialect::codex_image_ordinal(&rows, content_row, click_col),
-                            immorterm_core::dialect::codex_image_reverse_ordinal(&rows, content_row, click_col),
-                        )
+                        immorterm_core::dialect::codex_prompt_identity_at(&rows, content_row)
                     } else {
-                        (None, None)
+                        None
                     };
-                    let ordinal_json = ordinal
-                        .map(|value| value.to_string())
+                    let prompt_text_json = prompt_identity.as_ref().map(|(text, _)| text.as_str())
+                        .map(serde_json::to_string).transpose().unwrap_or_default()
                         .unwrap_or_else(|| "null".into());
-                    let reverse_ordinal_json = reverse_ordinal
-                        .map(|value| value.to_string())
+                    let prompt_reverse_ordinal = prompt_identity.as_ref()
+                        .map(|(_, ordinal)| ordinal.to_string())
                         .unwrap_or_else(|| "null".into());
                     format!(
-                        "{{\"kind\":\"claude-image\",\"text\":\"[Image #{n}]\",\"n\":{n},\"ordinal\":{ordinal_json},\"reverseOrdinal\":{reverse_ordinal_json},\"row\":{},\"start\":{},\"end\":{}}}",
+                        "{{\"kind\":\"claude-image\",\"text\":\"[Image #{n}]\",\"n\":{n},\"promptText\":{prompt_text_json},\"promptReverseOrdinal\":{prompt_reverse_ordinal},\"row\":{},\"start\":{},\"end\":{}}}",
                         display_row, span.start, span.end
                     )
                 }
