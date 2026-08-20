@@ -16808,6 +16808,44 @@
     };
 
     focusInput();
+    requestAnimationFrame(() => {
+      const styleTags = Array.from(document.querySelectorAll('style[data-immorterm-style]'));
+      const sidebar = document.getElementById('sidebar');
+      const fileBrowser = document.getElementById('file-browser');
+      const styleSheets = Array.from(document.styleSheets).map((sheet) => {
+        let ruleCount = null;
+        let error = null;
+        try { ruleCount = sheet.cssRules.length; }
+        catch (e) { error = String(e && e.message ? e.message : e); }
+        return { href: sheet.href || null, ruleCount, error };
+      });
+      const computed = (element) => {
+        if (!element) return null;
+        const style = getComputedStyle(element);
+        return {
+          display: style.display,
+          width: style.width,
+          minWidth: style.minWidth,
+          overflow: style.overflow,
+          fontSize: style.fontSize,
+        };
+      };
+      vscode.postMessage({
+        type: 'style-health',
+        inlineStyles: styleTags.map((style) => ({
+          name: style.dataset.immortermStyle || '',
+          textLength: style.textContent.length,
+          ruleCount: (() => {
+            try { return style.sheet ? style.sheet.cssRules.length : null; }
+            catch (_) { return null; }
+          })(),
+        })),
+        styleSheets,
+        sidebar: computed(sidebar),
+        fileBrowser: computed(fileBrowser),
+        body: computed(document.body),
+      });
+    });
     vscode.postMessage({ type: 'loaded' });
   </script>
 </body>

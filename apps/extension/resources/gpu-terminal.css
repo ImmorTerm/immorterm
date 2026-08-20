@@ -312,9 +312,6 @@ body.with-tab-bar #container {
 #terminal-canvas {
   width: 100%; height: 100%;
   display: block; outline: none;
-#terminal-canvas {
-  width: 100%; height: 100%;
-  display: block; outline: none;
 }
 
 /* ── Workshop Panel ── persistent AI-authored webview panes.
