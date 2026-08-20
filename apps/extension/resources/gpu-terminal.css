@@ -201,8 +201,6 @@ body.with-tab-bar #container {
   /* Padding is now applied inside the GPU renderer (content_padding) so the
      accent border renders at the canvas edges while content is inset. */
 }
-     accent border renders at the canvas edges while content is inset. */
-}
 
 /* ── Shared Activity ────────────────────────────────────────────────
  * Durable, session-scoped history opened by the ⇄ status-bar icon. */

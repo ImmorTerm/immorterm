@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 
 import { inlineWebviewStyles } from '../webview-styles';
@@ -67,5 +68,25 @@ describe('inlineWebviewStyles', () => {
     // the file as nested under the canvas. The terminal still renders, but all
     // following sidebar/file/status rules silently stop matching.
     expect(mainCss.match(/^#terminal-canvas\s*\{/gm)).toHaveLength(1);
+  });
+});
+
+describe('packaged WebView CSS structure', () => {
+  const extensionRoot = path.resolve(__dirname, '../..');
+  const validator = path.join(extensionRoot, 'scripts/validate-webview-css.mjs');
+
+  it('rejects the nested-rule shape caused by a missing closing brace', () => {
+    const result = spawnSync(process.execPath, [validator, '-'], {
+      cwd: extensionRoot,
+      encoding: 'utf8',
+      input: [
+        '#terminal-canvas { display: block;',
+        '#sidebar { display: flex; }',
+        '}',
+      ].join('\n'),
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('#sidebar nested under #terminal-canvas');
   });
 });
