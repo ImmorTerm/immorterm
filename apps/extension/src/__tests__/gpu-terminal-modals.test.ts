@@ -248,14 +248,17 @@ describe('Modal System — Human Inbox', () => {
     await vi.waitFor(() => expect(modalBody.textContent).toContain('Need your decision'));
     expect(modalTitle.textContent).toBe('Human Inbox');
     expect(modalBody.textContent).toContain('Review the release');
-    expect(modalBody.textContent).toContain('Blocked');
-    expect(modalBody.querySelector('.inbox-action')?.textContent).toBe("I'm back");
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/inbox/read-all'),
       expect.objectContaining({ method: 'POST' }),
     );
     expect(modalBody.textContent).toContain('0 unread');
+    expect(modalBody.textContent).toContain('Open');
+    (modalBody.querySelector('.inbox-card-summary') as HTMLElement).click();
     expect(modalBody.textContent).toContain('View terminal');
+    expect(modalBody.textContent).toContain('Review the release');
+    expect(modalBody.textContent).toContain('Blocked');
+    expect(modalBody.querySelector('.inbox-action')?.textContent).toBe("I'm back");
     (modalBody.querySelector('.inbox-session-link') as HTMLButtonElement).click();
     expect(onSelectSession).toHaveBeenCalledWith('session-1', undefined);
   });
@@ -290,11 +293,15 @@ describe('Modal System — Human Inbox', () => {
       getProjectDir: () => '/tmp/project', wakeAgent, onInboxChanged,
     });
     modals.showModal('inbox');
-    await vi.waitFor(() => expect(modalBody.querySelector('.inbox-action')).toBeTruthy());
+    await vi.waitFor(() => expect(modalBody.querySelector('.inbox-card-summary')).toBeTruthy());
+    (modalBody.querySelector('.inbox-card-summary') as HTMLElement).click();
+    expect(modalBody.querySelector('.inbox-action')).toBeTruthy();
     (modalBody.querySelector('.inbox-action') as HTMLButtonElement).click();
 
     await vi.waitFor(() => expect(wakeAgent).toHaveBeenCalledWith('session-1', 'Human chose continue'));
     expect(onInboxChanged).toHaveBeenCalled();
+    await vi.waitFor(() => expect(modalBody.querySelector('.inbox-card-summary')).toBeTruthy());
+    (modalBody.querySelector('.inbox-card-summary') as HTMLElement).click();
     expect(modalBody.textContent).toContain('You replied: Continue');
   });
 
@@ -322,6 +329,33 @@ describe('Modal System — Human Inbox', () => {
     await vi.waitFor(() => expect(modalBody.textContent).toContain('Mine'));
     expect(modalBody.textContent).not.toContain('Theirs');
     expect(modalBody.textContent).toContain('1 current');
+  });
+
+  it('keeps a crowded inbox as openable summaries and shows one full description at a time', async () => {
+    const messages = Array.from({ length: 9 }, (_, index) => ({
+      id: 'message-' + index,
+      status: 'read',
+      kind: index % 2 ? 'success' : 'info',
+      title: 'Milestone ' + (index + 1),
+      message: 'Full durable description for milestone ' + (index + 1),
+      created_at: index + 1,
+      source: { display_name: 'Agent ' + (index + 1), session_name: 'session-' + index },
+    }));
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ unread: 0, messages }),
+    })));
+    const { modals, modalBody } = createTestModals({ getProjectDir: () => '/tmp/project' });
+    modals.showModal('inbox');
+
+    await vi.waitFor(() => expect(modalBody.querySelectorAll('.inbox-card-summary')).toHaveLength(9));
+    const last = modalBody.querySelectorAll('.inbox-card-summary')[8] as HTMLElement;
+    expect(last.textContent).toContain('Milestone 9');
+    last.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(modalBody.querySelector('.inbox-detail')?.textContent).toContain('Full durable description for milestone 9');
+    expect(modalBody.querySelectorAll('.inbox-card-summary')).toHaveLength(0);
+    (modalBody.querySelector('.inbox-detail-back') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(modalBody.querySelectorAll('.inbox-card-summary')).toHaveLength(9));
   });
 });
 
