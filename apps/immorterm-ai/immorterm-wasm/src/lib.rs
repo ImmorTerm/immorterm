@@ -34,7 +34,9 @@ use immorterm_core::cell::CellAttrs;
 use immorterm_core::grid::Row;
 use immorterm_core::Terminal;
 use immorterm_render::statusbar::{self, StatusBarData, StatusBarTarget, StatusBarTheme, THEME_PRESETS};
-use immorterm_render::{FallbackGlyph, MonoGlyph, RenderOptions, Selection, TerminalRenderer, Theme};
+use immorterm_render::{
+    dash_ink_ratio, FallbackGlyph, MonoGlyph, RenderOptions, Selection, TerminalRenderer, Theme,
+};
 
 /// Detect whether a row boundary is a structural break (not a soft-wrap).
 /// Called when `is_soft_wrapped()` heuristic says "join" — this overrides
@@ -107,6 +109,128 @@ fn has_hard_break_signals(row: &Row, next_row: Option<&Row>) -> bool {
 /// `_text` retained for signature symmetry with the call sites.
 fn run_font_stack(_text: &str, base_font: &str) -> String {
     base_font.to_string()
+}
+
+/// Rasterize one monochrome glyph with the browser's native text engine.
+/// Shared by initial GPU setup and renderer reinitialization so glyph policy
+/// cannot drift between the two lifecycle paths.
+#[cfg(target_arch = "wasm32")]
+struct PrimaryGlyphRasterizerConfig {
+    cell_w: f32,
+    cell_h: f32,
+    baseline: f32,
+    font_size: f32,
+    font_name: String,
+}
+
+#[cfg(target_arch = "wasm32")]
+fn rasterize_primary_glyph(
+    ch: char,
+    config: &PrimaryGlyphRasterizerConfig,
+    bold: bool,
+    italic: bool,
+) -> Option<MonoGlyph> {
+    use web_sys::{OffscreenCanvas, OffscreenCanvasRenderingContext2d};
+
+    let w = config.cell_w.ceil() as u32;
+    let h = config.cell_h.ceil() as u32;
+    if w == 0 || h == 0 {
+        return None;
+    }
+
+    let canvas = OffscreenCanvas::new(w, h).ok()?;
+    let ctx: OffscreenCanvasRenderingContext2d = canvas
+        .get_context("2d")
+        .ok()??
+        .dyn_into()
+        .ok()?;
+
+    ctx.set_fill_style_str("black");
+    ctx.fill_rect(0.0, 0.0, w as f64, h as f64);
+
+    let weight = if bold { "bold" } else { "normal" };
+    let style = if italic { "italic" } else { "normal" };
+    ctx.set_font(&format!(
+        "{} {} {}px {}",
+        style, weight, config.font_size, config.font_name
+    ));
+    ctx.set_fill_style_str("white");
+    ctx.set_text_baseline("alphabetic");
+
+    let text = ch.to_string();
+    let metrics = ctx.measure_text(&text).ok()?;
+    let advance = metrics.width();
+
+    if let Some(target_ratio) = dash_ink_ratio(ch) {
+        // Scale around the ink center—not the advance width—so fonts whose
+        // en/em glyphs share one monospace advance still render distinctly.
+        let ink_left = metrics.actual_bounding_box_left();
+        let ink_right = metrics.actual_bounding_box_right();
+        let ink_width = (ink_left + ink_right).max(1.0);
+        let ink_center = (ink_right - ink_left) / 2.0;
+        let scale_x = config.cell_w as f64 * target_ratio / ink_width;
+
+        ctx.save();
+        let _ = ctx.translate(config.cell_w as f64 / 2.0, 0.0);
+        let _ = ctx.scale(scale_x, 1.0);
+        ctx.fill_text(&text, -ink_center, config.baseline as f64)
+            .ok()?;
+        ctx.restore();
+    } else if advance <= config.cell_w as f64 * 1.02 {
+        let x_offset = ((config.cell_w as f64 - advance) / 2.0).max(0.0);
+        ctx.fill_text(&text, x_offset, config.baseline as f64)
+            .ok()?;
+    } else {
+        let scale_x = config.cell_w as f64 / advance;
+        ctx.save();
+        let _ = ctx.translate(config.cell_w as f64 / 2.0, 0.0);
+        let _ = ctx.scale(scale_x, 1.0);
+        ctx.fill_text(&text, -advance / 2.0, config.baseline as f64)
+            .ok()?;
+        ctx.restore();
+    }
+
+    let rgba = ctx
+        .get_image_data(0.0, 0.0, w as f64, h as f64)
+        .ok()?
+        .data()
+        .to_vec();
+
+    let mut min_x = w;
+    let mut min_y = h;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    for y in 0..h {
+        for x in 0..w {
+            let red = rgba[((y * w + x) * 4) as usize];
+            if red > 0 {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    if max_x < min_x {
+        return None;
+    }
+
+    let glyph_w = max_x - min_x + 1;
+    let glyph_h = max_y - min_y + 1;
+    let mut alpha = Vec::with_capacity((glyph_w * glyph_h) as usize);
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            alpha.push(rgba[((y * w + x) * 4) as usize]);
+        }
+    }
+
+    Some(MonoGlyph {
+        data: alpha,
+        width: glyph_w,
+        height: glyph_h,
+        offset_x: min_x as f32,
+        offset_y: min_y as f32,
+    })
 }
 
 /// Embedded monospace fonts — JetBrains Mono family (~1MB total).
@@ -614,91 +738,15 @@ impl WasmTerminalInner {
             let font_name = self.custom_font_name.clone().unwrap_or_else(|| "'JetBrains Mono', 'Heebo', monospace".to_string());
             let font_name_log = font_name.clone();
 
-            let rasterizer = Box::new(move |ch: char, _font_size: f32, bold: bool, italic: bool| -> Option<MonoGlyph> {
-                use web_sys::{OffscreenCanvas, OffscreenCanvasRenderingContext2d};
-
-                let w = cell_w.ceil() as u32;
-                let h = cell_h.ceil() as u32;
-                if w == 0 || h == 0 {
-                    return None;
-                }
-
-                let canvas = OffscreenCanvas::new(w, h).ok()?;
-                let ctx: OffscreenCanvasRenderingContext2d = canvas
-                    .get_context("2d")
-                    .ok()??
-                    .dyn_into()
-                    .ok()?;
-
-                // Black background — text adds brightness, R channel = coverage
-                ctx.set_fill_style_str("black");
-                ctx.fill_rect(0.0, 0.0, w as f64, h as f64);
-
-                let weight = if bold { "bold" } else { "normal" };
-                let style = if italic { "italic" } else { "normal" };
-                let font_str = format!("{} {} {}px {}", style, weight, fs, font_name);
-                ctx.set_font(&font_str);
-                ctx.set_fill_style_str("white");
-                ctx.set_text_baseline("alphabetic");
-
-                let s = ch.to_string();
-                let tm = ctx.measure_text(&s).ok()?;
-                let char_width = tm.width();
-
-                if char_width <= cell_w as f64 * 1.02 {
-                    // Fits in cell — center it
-                    let x_offset = ((cell_w as f64 - char_width) / 2.0).max(0.0);
-                    ctx.fill_text(&s, x_offset, baseline as f64).ok()?;
-                } else {
-                    // Overflows — compress horizontally to fit
-                    let scale_x = cell_w as f64 / char_width;
-                    ctx.save();
-                    let _ = ctx.translate(cell_w as f64 / 2.0, 0.0);
-                    let _ = ctx.scale(scale_x, 1.0);
-                    ctx.fill_text(&s, -char_width / 2.0, baseline as f64).ok()?;
-                    ctx.restore();
-                }
-
-                let img = ctx.get_image_data(0.0, 0.0, w as f64, h as f64).ok()?;
-                let rgba = img.data().to_vec();
-
-                // Find tight bounding box of non-zero pixels (trim transparent border)
-                let mut min_x = w;
-                let mut min_y = h;
-                let mut max_x = 0u32;
-                let mut max_y = 0u32;
-                for y in 0..h {
-                    for x in 0..w {
-                        let r = rgba[((y * w + x) * 4) as usize];
-                        if r > 0 {
-                            min_x = min_x.min(x);
-                            min_y = min_y.min(y);
-                            max_x = max_x.max(x);
-                            max_y = max_y.max(y);
-                        }
-                    }
-                }
-                if max_x < min_x {
-                    return None; // completely empty
-                }
-
-                // Extract trimmed alpha data from red channel
-                let tw = max_x - min_x + 1;
-                let th = max_y - min_y + 1;
-                let mut alpha = Vec::with_capacity((tw * th) as usize);
-                for y in min_y..=max_y {
-                    for x in min_x..=max_x {
-                        alpha.push(rgba[((y * w + x) * 4) as usize]);
-                    }
-                }
-
-                Some(MonoGlyph {
-                    data: alpha,
-                    width: tw,
-                    height: th,
-                    offset_x: min_x as f32,
-                    offset_y: min_y as f32,
-                })
+            let rasterizer_config = PrimaryGlyphRasterizerConfig {
+                cell_w,
+                cell_h,
+                baseline,
+                font_size: fs,
+                font_name,
+            };
+            let rasterizer = Box::new(move |ch: char, _font_size: f32, bold: bool, italic: bool| {
+                rasterize_primary_glyph(ch, &rasterizer_config, bold, italic)
             });
             renderer.atlas.set_primary_rasterizer(Some(rasterizer));
             web_sys::console::log_1(&format!(
@@ -3931,86 +3979,15 @@ impl WasmTerminalInner {
             let fs = self.font_size_css * self.dpr;
             let font_name = self.custom_font_name.clone().unwrap_or_else(|| "'JetBrains Mono', 'Heebo', monospace".to_string());
 
-            let rasterizer = Box::new(move |ch: char, _font_size: f32, bold: bool, italic: bool| -> Option<MonoGlyph> {
-                use web_sys::{OffscreenCanvas, OffscreenCanvasRenderingContext2d};
-
-                let w = cell_w.ceil() as u32;
-                let h = cell_h.ceil() as u32;
-                if w == 0 || h == 0 {
-                    return None;
-                }
-
-                let canvas = OffscreenCanvas::new(w, h).ok()?;
-                let ctx: OffscreenCanvasRenderingContext2d = canvas
-                    .get_context("2d")
-                    .ok()??
-                    .dyn_into()
-                    .ok()?;
-
-                ctx.set_fill_style_str("black");
-                ctx.fill_rect(0.0, 0.0, w as f64, h as f64);
-
-                let weight = if bold { "bold" } else { "normal" };
-                let style = if italic { "italic" } else { "normal" };
-                let font_str = format!("{} {} {}px {}", style, weight, fs, font_name);
-                ctx.set_font(&font_str);
-                ctx.set_fill_style_str("white");
-                ctx.set_text_baseline("alphabetic");
-
-                let s = ch.to_string();
-                let tm = ctx.measure_text(&s).ok()?;
-                let char_width = tm.width();
-
-                if char_width <= cell_w as f64 * 1.02 {
-                    let x_offset = ((cell_w as f64 - char_width) / 2.0).max(0.0);
-                    ctx.fill_text(&s, x_offset, baseline as f64).ok()?;
-                } else {
-                    let scale_x = cell_w as f64 / char_width;
-                    ctx.save();
-                    let _ = ctx.translate(cell_w as f64 / 2.0, 0.0);
-                    let _ = ctx.scale(scale_x, 1.0);
-                    ctx.fill_text(&s, -char_width / 2.0, baseline as f64).ok()?;
-                    ctx.restore();
-                }
-
-                let img = ctx.get_image_data(0.0, 0.0, w as f64, h as f64).ok()?;
-                let rgba = img.data().to_vec();
-
-                let mut min_x = w;
-                let mut min_y = h;
-                let mut max_x = 0u32;
-                let mut max_y = 0u32;
-                for y in 0..h {
-                    for x in 0..w {
-                        let r = rgba[((y * w + x) * 4) as usize];
-                        if r > 0 {
-                            min_x = min_x.min(x);
-                            min_y = min_y.min(y);
-                            max_x = max_x.max(x);
-                            max_y = max_y.max(y);
-                        }
-                    }
-                }
-                if max_x < min_x {
-                    return None;
-                }
-
-                let tw = max_x - min_x + 1;
-                let th = max_y - min_y + 1;
-                let mut alpha = Vec::with_capacity((tw * th) as usize);
-                for y in min_y..=max_y {
-                    for x in min_x..=max_x {
-                        alpha.push(rgba[((y * w + x) * 4) as usize]);
-                    }
-                }
-
-                Some(MonoGlyph {
-                    data: alpha,
-                    width: tw,
-                    height: th,
-                    offset_x: min_x as f32,
-                    offset_y: min_y as f32,
-                })
+            let rasterizer_config = PrimaryGlyphRasterizerConfig {
+                cell_w,
+                cell_h,
+                baseline,
+                font_size: fs,
+                font_name,
+            };
+            let rasterizer = Box::new(move |ch: char, _font_size: f32, bold: bool, italic: bool| {
+                rasterize_primary_glyph(ch, &rasterizer_config, bold, italic)
             });
             renderer.atlas.set_primary_rasterizer(Some(rasterizer));
         }

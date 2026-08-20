@@ -14,7 +14,7 @@ pub mod renderer;
 pub mod statusbar;
 pub mod theme;
 
-pub use atlas::{CellMetrics, FallbackGlyph, GlyphAtlas, MonoGlyph};
+pub use atlas::{dash_ink_ratio, CellMetrics, FallbackGlyph, GlyphAtlas, MonoGlyph};
 pub use images::{ImageInstance, ImageRenderer};
 pub use panes::{PaneLayout, PaneRect};
 pub use pipeline::{BgInstance, DecorInstance, GlyphInstance, TextPipeline, Uniforms};
