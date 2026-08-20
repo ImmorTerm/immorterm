@@ -730,7 +730,11 @@ describe('GPU Terminal — Codex Viewport Anchoring', () => {
 
 describe('GPU Terminal — Codex image hover routing', () => {
   it('counts only images from real user messages, not compactions or tool output', async () => {
-    const { extractCodexPromptImageDataUrl } = await import('../gpu-terminal');
+    const {
+      extractCodexPromptImageDataUrl,
+      extractCodexPromptImageDataUrlFromEnd,
+      extractCodexContextStats,
+    } = await import('../gpu-terminal');
     const records = [
       { type: 'response_item', payload: { type: 'message', role: 'user', content: [
         { type: 'input_text', text: 'first' },
@@ -752,6 +756,27 @@ describe('GPU Terminal — Codex image hover routing', () => {
     expect(extractCodexPromptImageDataUrl(rollout, 1)).toBe('data:image/png;base64,FIRST');
     expect(extractCodexPromptImageDataUrl(rollout, 2)).toBe('data:image/jpeg;base64,SECOND');
     expect(extractCodexPromptImageDataUrl(rollout, 3)).toBeUndefined();
+    expect(extractCodexPromptImageDataUrlFromEnd(rollout, 1)).toBe('data:image/jpeg;base64,SECOND');
+    expect(extractCodexPromptImageDataUrlFromEnd(rollout, 2)).toBe('data:image/png;base64,FIRST');
+
+    const stats = extractCodexContextStats([
+      JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-5.6-sol' } }),
+      JSON.stringify({ type: 'event_msg', payload: { type: 'token_count', info: {
+        last_token_usage: { total_tokens: 129200 }, model_context_window: 258400,
+      } } }),
+    ].join('\n'));
+    expect(stats).toEqual({
+      model: 'gpt-5.6-sol', contextPct: 50,
+      contextUsedTokens: 129200, contextWindowTokens: 258400,
+    });
+  });
+
+  it('keys repeated per-prompt image labels by reverse occurrence', () => {
+    const html = readHtml();
+    const js = extractInlineScript(html);
+    expect(js).toContain("':' + (l.reverseOrdinal || 0)");
+    expect(js).toContain("'codex-image-tail:'");
+    expect(js).toContain('reverseOrdinal: reverseOrdinal || undefined');
   });
 });
 

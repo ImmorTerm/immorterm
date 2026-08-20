@@ -224,9 +224,10 @@ describe('Modal System — Human Inbox', () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it('renders durable markdown messages with pills and actions', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+    const onSelectSession = vi.fn(() => true);
+    const fetchMock = vi.fn((url: unknown, init?: RequestInit) => Promise.resolve({
       ok: true,
-      json: () => Promise.resolve({
+      json: () => Promise.resolve(init?.method === 'POST' ? { ok: true } : {
         unread: 1,
         messages: [{
           id: 'inbox-1', status: 'unread', kind: 'action_required',
@@ -237,8 +238,10 @@ describe('Modal System — Human Inbox', () => {
         }],
       }),
     }));
+    vi.stubGlobal('fetch', fetchMock);
     const { modals, modalBody, modalTitle } = createTestModals({
       getProjectDir: () => '/tmp/project',
+      onSelectSession,
     });
     modals.showModal('inbox');
 
@@ -247,14 +250,25 @@ describe('Modal System — Human Inbox', () => {
     expect(modalBody.textContent).toContain('Review the release');
     expect(modalBody.textContent).toContain('Blocked');
     expect(modalBody.querySelector('.inbox-action')?.textContent).toBe("I'm back");
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/inbox/read-all'),
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(modalBody.textContent).toContain('0 unread');
+    expect(modalBody.textContent).toContain('View terminal');
+    (modalBody.querySelector('.inbox-session-link') as HTMLButtonElement).click();
+    expect(onSelectSession).toHaveBeenCalledWith('session-1', undefined);
   });
 
   it('routes an action response back to the owning session', async () => {
     const wakeAgent = vi.fn(() => true);
     const onInboxChanged = vi.fn();
     let resolved = false;
-    vi.stubGlobal('fetch', vi.fn((_url: unknown, init?: RequestInit) => {
+    vi.stubGlobal('fetch', vi.fn((url: unknown, init?: RequestInit) => {
       if (init?.method === 'POST') {
+        if (String(url).endsWith('/read-all')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) });
+        }
         resolved = true;
         return Promise.resolve({ ok: true, json: () => Promise.resolve({
           id: 'inbox-1', reply_prompt: 'Human chose continue',
@@ -282,6 +296,32 @@ describe('Modal System — Human Inbox', () => {
     await vi.waitFor(() => expect(wakeAgent).toHaveBeenCalledWith('session-1', 'Human chose continue'));
     expect(onInboxChanged).toHaveBeenCalled();
     expect(modalBody.textContent).toContain('You replied: Continue');
+  });
+
+  it('filters the project inbox to the active terminal without losing provenance', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({
+        unread: 0,
+        messages: [
+          { id: 'one', status: 'read', kind: 'info', title: 'Mine', message: 'Current.', created_at: 1, source: { session_name: 'session-1', immorterm_id: 'imm-1' } },
+          { id: 'two', status: 'read', kind: 'info', title: 'Theirs', message: 'Other.', created_at: 2, source: { session_name: 'session-2', immorterm_id: 'imm-2' } },
+        ],
+      }),
+    })));
+    const { modals, modalBody } = createTestModals({
+      getProjectDir: () => '/tmp/project',
+      getActiveSessionIdentity: () => ({ sessionName: 'session-1', immortermId: 'imm-1' }),
+      onSelectSession: () => true,
+    });
+    modals.showModal('inbox');
+    await vi.waitFor(() => expect(modalBody.textContent).toContain('Theirs'));
+    const current = Array.from(modalBody.querySelectorAll('.inbox-scope-button'))
+      .find(button => button.textContent === 'Current') as HTMLButtonElement;
+    current.click();
+    await vi.waitFor(() => expect(modalBody.textContent).toContain('Mine'));
+    expect(modalBody.textContent).not.toContain('Theirs');
+    expect(modalBody.textContent).toContain('1 current');
   });
 });
 
