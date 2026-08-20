@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.8 — 2026-08-20
+
+### Fixed
+
+- Restored the Human Inbox status indicator and project-scoped message modal.
+- Fixed Codex multiline prompt highlighting, current-context accounting, and
+  per-image hover previews without changing Claude Code rendering behavior.
+- Restored complete WebView styling and added a structural CSS gate that rejects
+  malformed nested layout rules before packaging.
+
+### Added
+
+- Added All/Current session task filtering and task-creator session provenance.
+- Added agent guidance and daemon-side enforcement for stable task prefixes and
+  durable Human Inbox milestone handoffs.
+
 ## Unreleased
 
 ### Added
