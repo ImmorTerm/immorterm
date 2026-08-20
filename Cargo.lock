@@ -1105,7 +1105,7 @@ dependencies = [
 [[package]]
 name = "envoyage"
 version = "0.2.0"
-source = "git+https://github.com/Envoyage-Browsing/envoyage?rev=b335cf3e483ec2950f60ba8078aa0cd1783b10c3#b335cf3e483ec2950f60ba8078aa0cd1783b10c3"
+source = "git+https://github.com/Envoyage-Browsing/envoyage?rev=e242f849f6c672c83d392722aaf7050fdf7b40e3#e242f849f6c672c83d392722aaf7050fdf7b40e3"
 dependencies = [
  "axum",
  "base64",
