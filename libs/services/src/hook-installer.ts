@@ -5936,8 +5936,8 @@ PREFIX=$(printf '%s' "$CFG" | sed -n '2p')
 VALUE="off"
 [ "$STATE" = "on" ] && VALUE="on:\${PREFIX}"
 
-PTAG=""
-[ -n "$PREFIX" ] && PTAG=" Prefix every task title with \\"[\${PREFIX} #N]\\" (e.g. \\"[\${PREFIX} #1] Add login\\") so they group under \\"\${PREFIX}\\" in the Tasks panel."
+PTAG=" Pick one concise workstream prefix and ALWAYS title tasks as \\"[prefix #N] Action\\", reusing the prefix and incrementing N for related work."
+[ -n "$PREFIX" ] && PTAG=" ALWAYS prefix every task title with \\"[\${PREFIX} #N]\\" (e.g. \\"[\${PREFIX} #1] Add login\\") so they group under \\"\${PREFIX}\\" in the Tasks panel."
 
 # IFS= read -r -d '' (see plan hook) — unquoted delimiter so \${PTAG} still expands.
 IFS= read -r -d '' FULL <<TASKS_FULL
@@ -5948,11 +5948,12 @@ Manage your working task list with the ImmorTerm task MCP tools, NOT a vendor-lo
 - immorterm_create_task(title="…", lane="now|next|later") to add work.\${PTAG}
 - immorterm_update_task(task_id="…", status="in_progress|done", lane="…") as you progress — mark done when complete.
 - immorterm_list_tasks() to review the current list before you plan.
-This keeps your tasks visible to the user in the ImmorTerm panel and durable across sessions.
+- immorterm_send_to_inbox(title="…", message="…") for durable human-facing milestones, decisions, blockers, intervention requests, and completion handoffs. Do not spam routine implementation chatter; the Inbox exists so the human can return without scrolling through terminal logs.
+This keeps tasks and important human messages visible in ImmorTerm and durable across sessions.
 </task_discipline>
 TASKS_FULL
 
-REMINDER='<task_discipline id="reminder">Track your tasks with the immorterm_* task tools (not a local todo list); keep statuses current.</task_discipline>'
+REMINDER='<task_discipline id="reminder">Track prefixed tasks with the immorterm_* task tools and keep statuses current. Put durable milestones, decisions, blockers, intervention requests, and completion handoffs in the Human Inbox.</task_discipline>'
 RESET='<task_discipline id="reset">You no longer need to manage your task list in ImmorTerm for this project.</task_discipline>'
 
 imm_inject_discipline tasks "$VALUE" "$FULL" "$REMINDER" "$RESET"

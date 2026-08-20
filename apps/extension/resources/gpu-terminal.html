@@ -1423,6 +1423,7 @@
         <span class="codicon codicon-chevron-right sec-chevron"></span>
         <span class="sec-title">Tasks</span>
         <span class="sec-actions">
+          <button class="sec-action codicon codicon-filter" id="task-session-filter-btn" title="Show only tasks created by or linked to the current session" aria-pressed="false"></button>
           <button class="sec-action codicon codicon-table" id="task-board-btn" title="Open task board"></button>
           <button class="sec-action codicon codicon-archive" id="archive-tasks-btn" title="Archived tasks" style="display:none"></button>
           <button class="sec-action codicon codicon-add" id="new-task-btn" title="New Task"></button>
@@ -8217,6 +8218,7 @@
 
       activeSessionName = sessionName;
       refreshHumanInboxCount();
+      if (tasksPanel) tasksPanel.render();
 
       // Push the active session's branch label to the renderer. The branch
       // string itself was already stored on the most recent control_event
@@ -16171,6 +16173,16 @@
                   }
                 },
                 getActiveSessionName: () => activeSessionName,
+                getActiveSessionId: () => {
+                  const active = activeSessionName ? sessions.get(activeSessionName) : null;
+                  return (active && active.windowId) || activeSessionName;
+                },
+                getSessionDisplayName: (immortermId) => {
+                  for (const [name, session] of sessions) {
+                    if (session.windowId === immortermId) return session.displayName || name;
+                  }
+                  return immortermId;
+                },
                 getTasksMode: () => tasksMode,
                 onAttachToTerminal: ({ taskId, taskTitle, targetName }) => {
                   if (_remoteName || IS_STANDALONE) {
