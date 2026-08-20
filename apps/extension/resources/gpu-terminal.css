@@ -595,7 +595,10 @@ body.with-tab-bar #container {
 .inbox-card.kind-warning::before { background: #f1bd5f; }
 .inbox-card.kind-action_required::before { background: #ff5faa; }
 .inbox-card.unread { border-color: color-mix(in srgb, var(--accent, #e75ed0) 60%, transparent); box-shadow: 0 0 14px rgba(213,74,189,.07); }
-.inbox-card-summary { min-height: 84px; cursor: pointer; }
+.inbox-card-summary {
+  display: grid; grid-template-rows: auto auto auto;
+  min-block-size: 120px; height: auto; cursor: pointer;
+}
 .inbox-card-summary:hover, .inbox-card-summary:focus-visible {
   border-color: color-mix(in srgb, var(--accent, #e75ed0) 68%, transparent);
   background: color-mix(in srgb, var(--sb-popup-bg, #1e1e2e) 86%, white 14%);
@@ -616,7 +619,7 @@ body.with-tab-bar #container {
 .inbox-card .ss-search-md-list { margin: 6px 0; padding-left: 20px; }
 .inbox-card-summary .ss-search-md {
   display: -webkit-box; overflow: hidden; margin-top: 7px;
-  -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; -webkit-line-clamp: 1;
   color: color-mix(in srgb, var(--modal-text, #e9dfef) 76%, transparent);
 }
 .inbox-card-summary .ss-search-md > :first-child { margin-top: 0; }
