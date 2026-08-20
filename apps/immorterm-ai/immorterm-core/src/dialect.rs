@@ -162,64 +162,47 @@ fn row_is_rule(row: &Row) -> bool {
         && trimmed.chars().all(|c| matches!(c, '\u{2500}' | '\u{2501}' | '\u{2504}' | '\u{2505}'))
 }
 
-/// Return the 1-based image occurrence for a Codex prompt marker at a grid
-/// location. Codex restarts the visible `[Image #N]` counter for each prompt,
-/// while its rollout stores images in chronological order. The occurrence is
-/// therefore the stable key the extension host needs for hover resolution.
-pub fn codex_image_ordinal(rows: &[&Row], target_row: usize, target_col: usize) -> Option<usize> {
-    if target_row >= rows.len() {
-        return None;
-    }
-    let prompt_rows = codex_prompt_highlight_mask(rows);
-    let mut ordinal = 0usize;
-
-    for (row_idx, row) in rows.iter().enumerate().take(target_row + 1) {
-        if !prompt_rows[row_idx] || row_is_blank(row) {
-            continue;
+fn codex_prompt_text_from_start(rows: &[&Row], prompt_rows: &[bool], start: usize) -> String {
+    let mut lines = Vec::new();
+    for (idx, row) in rows.iter().enumerate().skip(start) {
+        if !prompt_rows[idx] { break; }
+        let mut text = row_text(row).trim_end().to_owned();
+        if idx == start {
+            text = text.trim_start().strip_prefix(AiDialect::Codex.prompt_sentinel())
+                .unwrap_or(&text).trim_start().to_owned();
         }
-        let text: String = row.cells.iter()
-            .filter(|cell| cell.width > 0)
-            .map(|cell| cell.grapheme)
-            .collect();
-        let mut spans = Vec::new();
-        crate::links::scan_row(&text, 0, &mut spans);
-        for span in spans {
-            if !matches!(span.kind, crate::links::LinkKind::ClaudeImage(_)) {
-                continue;
-            }
-            ordinal += 1;
-            if row_idx == target_row
-                && span.start as usize <= target_col
-                && target_col < span.end as usize
-            {
-                return Some(ordinal);
-            }
-        }
+        lines.push(text);
     }
-    None
+    while lines.last().is_some_and(|line| line.trim().is_empty()) { lines.pop(); }
+    lines.join("\n")
 }
 
-/// Image occurrence counted from the newest visible prompt. This lets the
-/// host resolve from a bounded rollout tail even after old scrollback prunes.
-pub fn codex_image_reverse_ordinal(rows: &[&Row], target_row: usize, target_col: usize) -> Option<usize> {
+fn codex_prompt_start(row: &Row) -> bool {
+    let Some(first) = row.cells.iter().position(|cell| {
+        !matches!(cell.grapheme, ' ' | '\0' | '\u{a0}')
+    }) else { return false; };
+    row.cells[first].grapheme == AiDialect::Codex.prompt_sentinel()
+        && !row_is_menu_option(row, first)
+}
+
+/// Return the owning prompt and its 1-based occurrence counted from the end.
+/// The reverse occurrence disambiguates identical image-only prompts while
+/// remaining stable when older scrollback is pruned.
+pub fn codex_prompt_identity_at(rows: &[&Row], target_row: usize) -> Option<(String, usize)> {
     if target_row >= rows.len() { return None; }
     let prompt_rows = codex_prompt_highlight_mask(rows);
-    let mut occurrences = Vec::new();
-    for (row_idx, row) in rows.iter().enumerate() {
-        if !prompt_rows[row_idx] || row_is_blank(row) { continue; }
-        let text = row_text(row);
-        let mut spans = Vec::new();
-        crate::links::scan_row(&text, 0, &mut spans);
-        for span in spans {
-            if matches!(span.kind, crate::links::LinkKind::ClaudeImage(_)) {
-                occurrences.push((row_idx, span.start as usize, span.end as usize));
-            }
-        }
-    }
-    let index = occurrences.iter().position(|(row_idx, start, end)| {
-        *row_idx == target_row && *start <= target_col && target_col < *end
+    if !prompt_rows[target_row] { return None; }
+    let start = (0..=target_row).rev().find(|idx| {
+        let row = rows[*idx];
+        codex_prompt_start(row)
     })?;
-    Some(occurrences.len() - index)
+    let text = codex_prompt_text_from_start(rows, &prompt_rows, start);
+    if text.trim().is_empty() { return None; }
+    let newer_matches = ((start + 1)..rows.len())
+        .filter(|idx| codex_prompt_start(rows[*idx]))
+        .filter(|idx| codex_prompt_text_from_start(rows, &prompt_rows, *idx) == text)
+        .count();
+    Some((text, newer_matches + 1))
 }
 
 #[cfg(test)]
@@ -326,18 +309,29 @@ mod tests {
     }
 
     #[test]
-    fn codex_image_ordinal_survives_per_prompt_number_resets() {
+    fn codex_image_prompt_text_is_scoped_to_owning_card() {
         let rows = [
             row("› first [Image #1]"), row(""), row("• response"), row(""),
             row("› second [Image #1] and [Image #2]"), row(""),
         ];
         let refs: Vec<&Row> = rows.iter().collect();
 
-        assert_eq!(codex_image_ordinal(&refs, 0, 10), Some(1));
-        assert_eq!(codex_image_ordinal(&refs, 4, 11), Some(2));
-        assert_eq!(codex_image_ordinal(&refs, 4, 26), Some(3));
-        assert_eq!(codex_image_reverse_ordinal(&refs, 0, 10), Some(3));
-        assert_eq!(codex_image_reverse_ordinal(&refs, 4, 11), Some(2));
-        assert_eq!(codex_image_reverse_ordinal(&refs, 4, 26), Some(1));
+        assert_eq!(codex_prompt_identity_at(&refs, 0), Some(("first [Image #1]".into(), 1)));
+        assert_eq!(
+            codex_prompt_identity_at(&refs, 4),
+            Some(("second [Image #1] and [Image #2]".into(), 1)),
+        );
+        assert_eq!(codex_prompt_identity_at(&refs, 2), None);
+    }
+
+    #[test]
+    fn identical_codex_image_prompts_are_counted_from_the_end() {
+        let rows = [
+            row("› [Image #1]"), row(""), row("• response"), row(""),
+            row("› [Image #1]"), row(""),
+        ];
+        let refs: Vec<&Row> = rows.iter().collect();
+        assert_eq!(codex_prompt_identity_at(&refs, 0), Some(("[Image #1]".into(), 2)));
+        assert_eq!(codex_prompt_identity_at(&refs, 4), Some(("[Image #1]".into(), 1)));
     }
 }

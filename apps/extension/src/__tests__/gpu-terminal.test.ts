@@ -731,8 +731,8 @@ describe('GPU Terminal — Codex Viewport Anchoring', () => {
 describe('GPU Terminal — Codex image hover routing', () => {
   it('counts only images from real user messages, not compactions or tool output', async () => {
     const {
-      extractCodexPromptImageDataUrl,
-      extractCodexPromptImageDataUrlFromEnd,
+      extractCodexPromptImageDataUrlByPrompt,
+      extractCodexPromptImagePathByPrompt,
       extractCodexContextStats,
     } = await import('../gpu-terminal');
     const records = [
@@ -753,11 +753,8 @@ describe('GPU Terminal — Codex image hover routing', () => {
     ];
     const rollout = records.map(record => JSON.stringify(record)).join('\n');
 
-    expect(extractCodexPromptImageDataUrl(rollout, 1)).toBe('data:image/png;base64,FIRST');
-    expect(extractCodexPromptImageDataUrl(rollout, 2)).toBe('data:image/jpeg;base64,SECOND');
-    expect(extractCodexPromptImageDataUrl(rollout, 3)).toBeUndefined();
-    expect(extractCodexPromptImageDataUrlFromEnd(rollout, 1)).toBe('data:image/jpeg;base64,SECOND');
-    expect(extractCodexPromptImageDataUrlFromEnd(rollout, 2)).toBe('data:image/png;base64,FIRST');
+    expect(extractCodexPromptImageDataUrlByPrompt(rollout, 'second', 1))
+      .toBe('data:image/jpeg;base64,SECOND');
 
     const stats = extractCodexContextStats([
       JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-5.6-sol' } }),
@@ -771,12 +768,36 @@ describe('GPU Terminal — Codex image hover routing', () => {
     });
   });
 
-  it('keys repeated per-prompt image labels by reverse occurrence', () => {
+  it('keys repeated per-prompt image labels by owning prompt', () => {
     const html = readHtml();
     const js = extractInlineScript(html);
-    expect(js).toContain("':' + (l.reverseOrdinal || 0)");
-    expect(js).toContain("'codex-image-tail:'");
-    expect(js).toContain('reverseOrdinal: reverseOrdinal || undefined');
+    expect(js).toContain("'codex-image-prompt:'");
+    expect(js).toContain('promptText: promptText || undefined');
+  });
+
+  it('recovers the exact source path for an image in a Codex prompt', async () => {
+    const { extractCodexPromptImagePathByPrompt } = await import('../gpu-terminal');
+    const prompt = '<image name=[Image #1] path="/tmp/first.png">\n</image>\n'
+      + '<image name=[Image #2] path="/tmp/second.png">\n</image>\ncompare these';
+    const record = { type: 'response_item', payload: {
+      type: 'message', role: 'user', content: [
+        { type: 'input_text', text: prompt },
+        { type: 'input_image', image_url: 'data:image/png;base64,FIRST' },
+        { type: 'input_image', image_url: 'data:image/png;base64,SECOND' },
+      ],
+    } };
+    const older = JSON.parse(JSON.stringify(record));
+    older.payload.content[0].text = older.payload.content[0].text
+      .replace('/tmp/first.png', '/tmp/older-first.png')
+      .replace('/tmp/second.png', '/tmp/older-second.png');
+    const rollout = [older, record].map(JSON.stringify).join('\n');
+
+    expect(extractCodexPromptImagePathByPrompt(
+      rollout, '[Image #1] [Image #2] compare these', 2,
+    )).toBe('/tmp/second.png');
+    expect(extractCodexPromptImagePathByPrompt(
+      rollout, '[Image #1] [Image #2] compare these', 2, 2,
+    )).toBe('/tmp/older-second.png');
   });
 });
 

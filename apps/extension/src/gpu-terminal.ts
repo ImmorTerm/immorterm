@@ -59,9 +59,7 @@ import { SpacesStorage } from './spaces';
 import { resolveRestoreIdentity } from './restore-identity';
 import { acquireGlobalRestoreSlot } from './restore-semaphore';
 
-/** Bounded tail window for Codex rollout enrichment. Long-lived sessions can
- * exceed 100 MB; refusing the whole file made image hover and CTX reporting
- * silently fail exactly when they were most useful. */
+/** Bounded tail window for Codex context stats. */
 const CODEX_ROLLOUT_TAIL_BYTES = 24 * 1024 * 1024;
 
 function readFileTailSync(filePath: string, maxBytes: number): string {
@@ -82,46 +80,102 @@ function readFileTailSync(filePath: string, maxBytes: number): string {
   return newline >= 0 ? raw.slice(newline + 1) : '';
 }
 
-/** Resolve the chronological Nth image attached by a real Codex user message.
- * Deliberately ignores compaction snapshots and tool outputs: both can contain
- * copies of older `input_image` values and used to shift every later hover. */
-export function extractCodexPromptImageDataUrl(raw: string, ordinal: number): string | undefined {
-  if (!Number.isInteger(ordinal) || ordinal < 1) return undefined;
-  let seen = 0;
-  for (const line of raw.split('\n')) {
-    if (!line.includes('input_image')) continue;
-    let record: any;
-    try { record = JSON.parse(line); } catch { continue; }
-    const payload = record?.type === 'response_item' ? record.payload : undefined;
-    if (payload?.type !== 'message' || payload?.role !== 'user' || !Array.isArray(payload.content)) {
-      continue;
-    }
-    for (const item of payload.content) {
-      if (item?.type !== 'input_image' || typeof item.image_url !== 'string') continue;
-      if (++seen === ordinal && item.image_url.startsWith('data:image/')) return item.image_url;
-    }
-  }
-  return undefined;
+/** Normalize the prompt as Codex displays it in the TUI. Rollout input text
+ * keeps image XML with temporary paths, while the terminal renders only the
+ * per-prompt `[Image #N]` labels. */
+export function normalizeCodexPromptText(text: string): string {
+  let imageNumber = 0;
+  return text
+    .replace(/<image\b[^>]*>[\s\S]*?<\/image>/gi, () => `[Image #${++imageNumber}]`)
+    .replace(/^\s*›\s*/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-/** Resolve an image counted from the newest real user attachment. Used with a
- * bounded file tail, so terminal scrollback pruning and huge rollouts do not
- * shift `[Image #N]` onto an unrelated cache entry. */
-export function extractCodexPromptImageDataUrlFromEnd(raw: string, reverseOrdinal: number): string | undefined {
-  if (!Number.isInteger(reverseOrdinal) || reverseOrdinal < 1) return undefined;
-  const images: string[] = [];
+type CodexPromptImageSource = { filePath?: string; dataUrl?: string };
+
+function codexImagePaths(inputText: string): string[] {
+  const paths: string[] = [];
+  const imageTag = /<image\b([^>]*)>[\s\S]*?<\/image>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = imageTag.exec(inputText)) !== null) {
+    const pathMatch = /\bpath=(?:"([^"]+)"|'([^']+)'|([^\s>]+))/.exec(match[1]);
+    const filePath = pathMatch?.[1] || pathMatch?.[2] || pathMatch?.[3];
+    if (filePath) paths.push(filePath);
+  }
+  return paths;
+}
+
+function codexImageFromUserRecord(
+  record: any, promptText: string, imageNumber: number,
+): CodexPromptImageSource | undefined {
+  const payload = record?.type === 'response_item' ? record.payload : undefined;
+  if (payload?.type !== 'message' || payload?.role !== 'user' || !Array.isArray(payload.content)) {
+    return undefined;
+  }
+  const inputText = payload.content
+    .filter((item: any) => item?.type === 'input_text' && typeof item.text === 'string')
+    .map((item: any) => item.text)
+    .join('\n');
+  if (normalizeCodexPromptText(inputText) !== normalizeCodexPromptText(promptText)) return undefined;
+  const images = payload.content.filter((item: any) =>
+    item?.type === 'input_image' && typeof item.image_url === 'string'
+      && item.image_url.startsWith('data:image/'));
+  const filePath = codexImagePaths(inputText)[imageNumber - 1];
+  const dataUrl = images[imageNumber - 1]?.image_url;
+  return filePath || dataUrl ? { filePath, dataUrl } : undefined;
+}
+
+/** Resolve an attachment by its owning prompt and its per-prompt image number.
+ * This is stable when `[Image #1]` resets and when terminal scrollback prunes. */
+export function extractCodexPromptImageDataUrlByPrompt(
+  raw: string, promptText: string, imageNumber: number, promptReverseOrdinal = 1,
+): string | undefined {
+  return codexImageSourceFromRollout(
+    raw, promptText, imageNumber, promptReverseOrdinal,
+  )?.dataUrl;
+}
+
+export function extractCodexPromptImagePathByPrompt(
+  raw: string, promptText: string, imageNumber: number, promptReverseOrdinal = 1,
+): string | undefined {
+  return codexImageSourceFromRollout(
+    raw, promptText, imageNumber, promptReverseOrdinal,
+  )?.filePath;
+}
+
+function codexImageSourceFromRollout(
+  raw: string, promptText: string, imageNumber: number, promptReverseOrdinal: number,
+): CodexPromptImageSource | undefined {
+  if (!promptText || !Number.isInteger(imageNumber) || imageNumber < 1
+      || !Number.isInteger(promptReverseOrdinal) || promptReverseOrdinal < 1) return undefined;
+  const found: CodexPromptImageSource[] = [];
   for (const line of raw.split('\n')) {
     if (!line.includes('input_image')) continue;
     let record: any;
     try { record = JSON.parse(line); } catch { continue; }
-    const payload = record?.type === 'response_item' ? record.payload : undefined;
-    if (payload?.type !== 'message' || payload?.role !== 'user' || !Array.isArray(payload.content)) continue;
-    for (const item of payload.content) {
-      if (item?.type === 'input_image' && typeof item.image_url === 'string'
-          && item.image_url.startsWith('data:image/')) images.push(item.image_url);
-    }
+    const source = codexImageFromUserRecord(record, promptText, imageNumber);
+    if (source) found.push(source);
   }
-  return images[images.length - reverseOrdinal];
+  return found[found.length - promptReverseOrdinal];
+}
+
+async function resolveCodexPromptImageFromFile(
+  filePath: string, promptText: string, imageNumber: number, promptReverseOrdinal: number,
+): Promise<CodexPromptImageSource | undefined> {
+  const found: CodexPromptImageSource[] = [];
+  const lines = readline.createInterface({
+    input: fs.createReadStream(filePath),
+    crlfDelay: Infinity,
+  });
+  for await (const line of lines) {
+    if (!line.includes('input_image')) continue;
+    let record: any;
+    try { record = JSON.parse(line); } catch { continue; }
+    const source = codexImageFromUserRecord(record, promptText, imageNumber);
+    if (source) found.push(source);
+  }
+  return found[found.length - promptReverseOrdinal];
 }
 
 export function extractCodexContextStats(raw: string): {
@@ -1746,33 +1800,39 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         // webview can't always learn the active session's Claude UUID (the
         // jsonl-tail tracker is flaky), so scan ~/.claude/image-cache/*/<N>.png
         // and pick the newest — preferring the known UUID's dir when supplied.
-        const { requestId, n, ordinal, reverseOrdinal, uuid, windowId, transcriptPath } = msg as {
+        const { requestId, n, promptText, promptReverseOrdinal, uuid, windowId, transcriptPath } = msg as {
           requestId: string; n: number; uuid?: string; windowId?: string;
-          ordinal?: number; reverseOrdinal?: number; transcriptPath?: string; type: string;
+          promptText?: string; promptReverseOrdinal?: number;
+          transcriptPath?: string; type: string;
         };
-        // Codex embeds pasted images INLINE in its rollout as a data URI
-        // (`input_image` → `image_url: "data:image/png;base64,…"`) rather than
-        // writing a cache file the way Claude does. So for Codex the native
-        // resolution is "decode the Nth input_image", with no file to find.
-        // Bounded read: rollouts reach megabytes and each image is a large
-        // base64 blob, so give up rather than stall the hover.
+        // Codex records both the original local path in the user input's
+        // `<image ... path="…">` tag and an inline fallback in `input_image`.
+        // Match the owning prompt first; `[Image #N]` itself resets every turn.
         if (transcriptPath && /\.codex[/\\]sessions[/\\]/.test(transcriptPath)) {
-          try {
-            const raw = readFileTailSync(transcriptPath, CODEX_ROLLOUT_TAIL_BYTES);
-            const found = reverseOrdinal
-              ? extractCodexPromptImageDataUrlFromEnd(raw, reverseOrdinal)
-              : extractCodexPromptImageDataUrl(raw, ordinal || n);
-            if (found) {
-              this.view?.webview.postMessage({
-                type: 'claude-image-result', requestId, exists: true, imageDataUrl: found,
-              });
-              break;
-            }
-          } catch { /* unreadable/in-flight rollout — return a clean miss below */ }
+          if (promptText) {
+            resolveCodexPromptImageFromFile(
+              transcriptPath, promptText, n, promptReverseOrdinal || 1,
+            )
+              .then((found) => {
+                let imageDataUrl = found?.dataUrl;
+                if (found?.filePath && fs.existsSync(found.filePath)) {
+                  try {
+                    imageDataUrl = this.view?.webview
+                      .asWebviewUri(vscode.Uri.file(found.filePath)).toString() || imageDataUrl;
+                  } catch { /* retain the authoritative inline fallback */ }
+                }
+                return this.view?.webview.postMessage({
+                  type: 'claude-image-result', requestId,
+                  exists: !!imageDataUrl, imageDataUrl,
+                });
+              })
+              .catch(() => this.view?.webview.postMessage({
+                type: 'claude-image-result', requestId, exists: false,
+              }));
+            break;
+          }
           // Codex has an authoritative inline source. Never substitute an
-          // unrelated Claude/ImmorTerm paste cache merely because the bounded
-          // lookup missed (for example while the JSONL record is still being
-          // flushed).
+          // unrelated Claude/ImmorTerm paste cache if prompt identity is absent.
           this.view?.webview.postMessage({
             type: 'claude-image-result', requestId, exists: false,
           });
