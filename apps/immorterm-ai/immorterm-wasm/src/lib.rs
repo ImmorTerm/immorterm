@@ -2330,8 +2330,27 @@ impl WasmTerminalInner {
                     // Cmd+Opt+V writes ~/.immorterm/paste/<window>/<n>.png
                     // using the same 1-based numbering. The vendor difference
                     // is only WHERE the bytes live, which the host resolves.
+                    let ordinal = if self.ai_dialect == AiDialect::Codex {
+                        let mut rows = Vec::with_capacity(
+                            self.terminal.scrollback.len() + self.terminal.grid.num_rows()
+                        );
+                        rows.extend(self.terminal.scrollback.iter());
+                        for row_idx in 0..self.terminal.grid.num_rows() {
+                            if let Some(row) = self.terminal.grid.row(row_idx) {
+                                rows.push(row);
+                            }
+                        }
+                        immorterm_core::dialect::codex_image_ordinal(
+                            &rows, content_row, click_col
+                        )
+                    } else {
+                        None
+                    };
+                    let ordinal_json = ordinal
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "null".into());
                     format!(
-                        "{{\"kind\":\"claude-image\",\"text\":\"[Image #{n}]\",\"n\":{n},\"row\":{},\"start\":{},\"end\":{}}}",
+                        "{{\"kind\":\"claude-image\",\"text\":\"[Image #{n}]\",\"n\":{n},\"ordinal\":{ordinal_json},\"row\":{},\"start\":{},\"end\":{}}}",
                         display_row, span.start, span.end
                     )
                 }
