@@ -229,6 +229,8 @@ pub struct WasmTerminalInner {
     ai_stats: String,
     /// CTX usage percentage (0.0 = no bar, 1–100 = show progress bar behind center section)
     ai_ctx_pct: f32,
+    /// Unread Human Inbox messages for the active project.
+    inbox_unread: u32,
     /// Which agent's TUI conventions to assume when reading structure out of
     /// the grid. Per-session: each tab can host a different agent.
     ai_dialect: AiDialect,
@@ -307,6 +309,7 @@ impl WasmTerminalInner {
             custom_font_name: None,
             ai_stats: String::new(),
             ai_ctx_pct: 0.0,
+            inbox_unread: 0,
             ai_dialect: AiDialect::default(),
             last_activity_ms: 0.0,
             pending_border_enabled: true,
@@ -1240,6 +1243,7 @@ impl WasmTerminalInner {
                         dot,
                         self.cols,
                         self.ai_ctx_pct,
+                        self.inbox_unread,
                         &self.status_bar_theme,
                         0, 0.0,
                     );
@@ -1265,6 +1269,7 @@ impl WasmTerminalInner {
                 dot,
                 self.cols,
                 self.ai_ctx_pct,
+                self.inbox_unread,
                 &self.status_bar_theme,
                 scroll_offset,
                 scroll_fract,
@@ -4242,6 +4247,7 @@ impl WasmTerminalInner {
                 StatusBarTarget::Brand => "brand".into(),
                 StatusBarTarget::AiStats => "ai_stats".into(),
                 StatusBarTarget::ThemeArea => "theme".into(),
+                StatusBarTarget::Inbox => "inbox".into(),
                 StatusBarTarget::Scratch => "scratch".into(),
                 StatusBarTarget::SharedActivity => "shared_activity".into(),
                 StatusBarTarget::Title => "title".into(),
@@ -4261,6 +4267,7 @@ impl WasmTerminalInner {
             "brand" => StatusBarTarget::Brand,
             "ai_stats" => StatusBarTarget::AiStats,
             "theme" => StatusBarTarget::ThemeArea,
+            "inbox" => StatusBarTarget::Inbox,
             "scratch" => StatusBarTarget::Scratch,
             "shared_activity" => StatusBarTarget::SharedActivity,
             "title" => StatusBarTarget::Title,
@@ -4486,6 +4493,11 @@ impl WasmTerminalInner {
     /// 0.0 = no bar, 1–100 = colored fill behind center section.
     pub fn set_ai_ctx_pct(&mut self, pct: f32) {
         self.ai_ctx_pct = pct;
+    }
+
+    pub fn set_inbox_unread(&mut self, unread: u32) {
+        self.inbox_unread = unread;
+        self.title_marquee_overflow = 0;
     }
 
     /// Tell the renderer which agent is running, so grid reads use that
@@ -6517,6 +6529,12 @@ impl WasmTerminal {
     pub fn set_ai_ctx_pct(&self, pct: f32) {
         if let Ok(mut i) = self.inner.try_borrow_mut() {
             i.set_ai_ctx_pct(pct);
+        }
+    }
+
+    pub fn set_inbox_unread(&self, unread: u32) {
+        if let Ok(mut i) = self.inner.try_borrow_mut() {
+            i.set_inbox_unread(unread);
         }
     }
 

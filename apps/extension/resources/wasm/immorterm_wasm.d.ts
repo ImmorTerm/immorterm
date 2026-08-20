@@ -164,6 +164,7 @@ export class WasmTerminal {
     set_font_size(size: number): void;
     set_font_weight(weight: number): void;
     set_immorterm_id(id: string): void;
+    set_inbox_unread(unread: number): void;
     set_line_height(value: number): void;
     set_paragraph_direction(direction: string): void;
     set_project_name(name: string): void;
@@ -300,6 +301,7 @@ export interface InitOutput {
     readonly wasmterminal_set_font_size: (a: number, b: number) => void;
     readonly wasmterminal_set_font_weight: (a: number, b: number) => void;
     readonly wasmterminal_set_immorterm_id: (a: number, b: number, c: number) => void;
+    readonly wasmterminal_set_inbox_unread: (a: number, b: number) => void;
     readonly wasmterminal_set_line_height: (a: number, b: number) => void;
     readonly wasmterminal_set_paragraph_direction: (a: number, b: number, c: number) => void;
     readonly wasmterminal_set_project_name: (a: number, b: number, c: number) => void;
@@ -325,8 +327,8 @@ export interface InitOutput {
     readonly wasmterminal_visible_emoji_cells: (a: number, b: number) => void;
     readonly wasmterminal_visible_rows: (a: number) => number;
     readonly wasmterminal_visual_cursor_display: (a: number, b: number) => void;
-    readonly __wasm_bindgen_func_elem_3344: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_3340: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_3345: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_3341: (a: number, b: number, c: number, d: number) => void;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_export3: (a: number) => void;

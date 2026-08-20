@@ -1834,6 +1834,11 @@ impl TerminalRenderer {
                         && col >= data.theme_area_start_col
                         && col < data.theme_area_end_col
                 }
+                StatusBarTarget::Inbox => {
+                    data.inbox_end_col > data.inbox_start_col
+                        && col >= data.inbox_start_col
+                        && col < data.inbox_end_col
+                }
                 StatusBarTarget::Scratch => {
                     data.scratch_end_col > data.scratch_start_col
                         && col >= data.scratch_start_col

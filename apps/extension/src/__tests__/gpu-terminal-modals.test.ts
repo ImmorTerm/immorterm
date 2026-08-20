@@ -220,6 +220,71 @@ describe('Modal System — Session Bridge', () => {
   });
 });
 
+describe('Modal System — Human Inbox', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('renders durable markdown messages with pills and actions', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        unread: 1,
+        messages: [{
+          id: 'inbox-1', status: 'unread', kind: 'action_required',
+          title: 'Need your decision', message: '## Deploy\n- Review the release',
+          created_at: Date.now(), pills: [{ label: 'Blocked', tone: 'red' }],
+          actions: [{ id: 'human_back', label: "I'm back", style: 'primary' }],
+          source: { display_name: 'Factory', tool: 'codex', session_name: 'session-1' },
+        }],
+      }),
+    }));
+    const { modals, modalBody, modalTitle } = createTestModals({
+      getProjectDir: () => '/tmp/project',
+    });
+    modals.showModal('inbox');
+
+    await vi.waitFor(() => expect(modalBody.textContent).toContain('Need your decision'));
+    expect(modalTitle.textContent).toBe('Human Inbox');
+    expect(modalBody.textContent).toContain('Review the release');
+    expect(modalBody.textContent).toContain('Blocked');
+    expect(modalBody.querySelector('.inbox-action')?.textContent).toBe("I'm back");
+  });
+
+  it('routes an action response back to the owning session', async () => {
+    const wakeAgent = vi.fn(() => true);
+    const onInboxChanged = vi.fn();
+    let resolved = false;
+    vi.stubGlobal('fetch', vi.fn((_url: unknown, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        resolved = true;
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({
+          id: 'inbox-1', reply_prompt: 'Human chose continue',
+          source: { session_name: 'session-1' },
+        }) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({
+        unread: resolved ? 0 : 1,
+        messages: [{
+          id: 'inbox-1', status: resolved ? 'resolved' : 'unread', kind: 'action_required',
+          title: 'Continue?', message: 'Choose.', created_at: Date.now(), pills: [],
+          actions: [{ id: 'continue', label: 'Continue', style: 'primary' }],
+          action_result: resolved ? { id: 'continue', label: 'Continue' } : undefined,
+          source: { session_name: 'session-1' },
+        }],
+      }) });
+    }));
+    const { modals, modalBody } = createTestModals({
+      getProjectDir: () => '/tmp/project', wakeAgent, onInboxChanged,
+    });
+    modals.showModal('inbox');
+    await vi.waitFor(() => expect(modalBody.querySelector('.inbox-action')).toBeTruthy());
+    (modalBody.querySelector('.inbox-action') as HTMLButtonElement).click();
+
+    await vi.waitFor(() => expect(wakeAgent).toHaveBeenCalledWith('session-1', 'Human chose continue'));
+    expect(onInboxChanged).toHaveBeenCalled();
+    expect(modalBody.textContent).toContain('You replied: Continue');
+  });
+});
+
 // ── Appearance Modal ─────────────────────────────────────────────
 
 describe('Modal System — Appearance', () => {
