@@ -1,28 +1,6 @@
 /* tslint:disable */
 /* eslint-disable */
 
-/**
- * Chroma subsampling format
- */
-export enum ChromaSampling {
-    /**
-     * Both vertically and horizontally subsampled.
-     */
-    Cs420 = 0,
-    /**
-     * Horizontally subsampled.
-     */
-    Cs422 = 1,
-    /**
-     * Not subsampled.
-     */
-    Cs444 = 2,
-    /**
-     * Monochrome.
-     */
-    Cs400 = 3,
-}
-
 export class WasmTerminal {
     free(): void;
     [Symbol.dispose](): void;
@@ -228,50 +206,50 @@ export interface InitOutput {
     readonly __wbg_wasmterminal_free: (a: number, b: number) => void;
     readonly wasmterminal_add_comment_for_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => number;
     readonly wasmterminal_add_comment_for_selection: (a: number, b: number, c: number, d: number) => number;
-    readonly wasmterminal_cell_grapheme_at: (a: number, b: number, c: number) => [number, number];
-    readonly wasmterminal_cell_size_device: (a: number) => [number, number];
+    readonly wasmterminal_cell_grapheme_at: (a: number, b: number, c: number, d: number) => void;
+    readonly wasmterminal_cell_size_device: (a: number, b: number) => void;
     readonly wasmterminal_clear_comments: (a: number) => void;
     readonly wasmterminal_clear_scrollback: (a: number) => void;
-    readonly wasmterminal_click_to_cursor_correction_seq: (a: number, b: number, c: number) => [number, number];
-    readonly wasmterminal_click_to_cursor_plan: (a: number, b: number, c: number) => [number, number];
-    readonly wasmterminal_click_to_cursor_sequence: (a: number, b: number, c: number) => [number, number];
+    readonly wasmterminal_click_to_cursor_correction_seq: (a: number, b: number, c: number, d: number) => void;
+    readonly wasmterminal_click_to_cursor_plan: (a: number, b: number, c: number, d: number) => void;
+    readonly wasmterminal_click_to_cursor_sequence: (a: number, b: number, c: number, d: number) => void;
     readonly wasmterminal_comments_count: (a: number) => number;
-    readonly wasmterminal_create_background: (a: number, b: number, c: number) => [number, number, number];
-    readonly wasmterminal_cwd: (a: number) => [number, number];
-    readonly wasmterminal_debug_bidi_row: (a: number) => [number, number];
-    readonly wasmterminal_debug_claude_bullets: (a: number) => [number, number];
-    readonly wasmterminal_debug_click_info: (a: number, b: number, c: number) => [number, number];
-    readonly wasmterminal_debug_click_trace: (a: number, b: number, c: number) => [number, number];
-    readonly wasmterminal_debug_cursor: (a: number) => [number, number];
-    readonly wasmterminal_debug_selection_wrapped: (a: number) => [number, number];
-    readonly wasmterminal_debug_theme: (a: number) => [number, number];
-    readonly wasmterminal_delete_selection_sequence: (a: number) => [number, number];
+    readonly wasmterminal_create_background: (a: number, b: number, c: number, d: number) => void;
+    readonly wasmterminal_cwd: (a: number, b: number) => void;
+    readonly wasmterminal_debug_bidi_row: (a: number, b: number) => void;
+    readonly wasmterminal_debug_claude_bullets: (a: number, b: number) => void;
+    readonly wasmterminal_debug_click_info: (a: number, b: number, c: number, d: number) => void;
+    readonly wasmterminal_debug_click_trace: (a: number, b: number, c: number, d: number) => void;
+    readonly wasmterminal_debug_cursor: (a: number, b: number) => void;
+    readonly wasmterminal_debug_selection_wrapped: (a: number, b: number) => void;
+    readonly wasmterminal_debug_theme: (a: number, b: number) => void;
+    readonly wasmterminal_delete_selection_sequence: (a: number, b: number) => void;
     readonly wasmterminal_destroy_background: (a: number, b: number) => void;
-    readonly wasmterminal_detect_bold_runs_viewport: (a: number) => [number, number];
-    readonly wasmterminal_detect_claude_bullets: (a: number) => [number, number];
-    readonly wasmterminal_detect_claude_bullets_viewport: (a: number) => [number, number];
-    readonly wasmterminal_dimensions: (a: number) => [number, number];
-    readonly wasmterminal_drop_background: (a: number, b: number) => [number, number];
-    readonly wasmterminal_encode_mouse_event: (a: number, b: number, c: number, d: number, e: number) => [number, number];
-    readonly wasmterminal_get_ai_primitives_json: (a: number) => [number, number];
-    readonly wasmterminal_get_pseudo_cursor_text: (a: number) => [number, number];
-    readonly wasmterminal_get_selected_html: (a: number) => [number, number];
-    readonly wasmterminal_get_selected_text: (a: number) => [number, number];
-    readonly wasmterminal_handle_key: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
+    readonly wasmterminal_detect_bold_runs_viewport: (a: number, b: number) => void;
+    readonly wasmterminal_detect_claude_bullets: (a: number, b: number) => void;
+    readonly wasmterminal_detect_claude_bullets_viewport: (a: number, b: number) => void;
+    readonly wasmterminal_dimensions: (a: number, b: number) => void;
+    readonly wasmterminal_drop_background: (a: number, b: number, c: number) => void;
+    readonly wasmterminal_encode_mouse_event: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+    readonly wasmterminal_get_ai_primitives_json: (a: number, b: number) => void;
+    readonly wasmterminal_get_pseudo_cursor_text: (a: number, b: number) => void;
+    readonly wasmterminal_get_selected_html: (a: number, b: number) => void;
+    readonly wasmterminal_get_selected_text: (a: number, b: number) => void;
+    readonly wasmterminal_handle_key: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly wasmterminal_has_pseudo_cursors: (a: number) => number;
     readonly wasmterminal_has_selection: (a: number) => number;
-    readonly wasmterminal_init_gpu: (a: number, b: number, c: number, d: number) => any;
-    readonly wasmterminal_link_at: (a: number, b: number, c: number) => [number, number];
-    readonly wasmterminal_list_comments_json: (a: number) => [number, number];
-    readonly wasmterminal_load_snapshot: (a: number, b: number, c: number, d: number, e: number) => [number, number];
-    readonly wasmterminal_load_snapshot_background: (a: number, b: number, c: number, d: number) => [number, number];
+    readonly wasmterminal_init_gpu: (a: number, b: number, c: number, d: number) => number;
+    readonly wasmterminal_link_at: (a: number, b: number, c: number, d: number) => void;
+    readonly wasmterminal_list_comments_json: (a: number, b: number) => void;
+    readonly wasmterminal_load_snapshot: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+    readonly wasmterminal_load_snapshot_background: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly wasmterminal_mouse_tracking_enabled: (a: number) => number;
     readonly wasmterminal_new: (a: number, b: number) => number;
-    readonly wasmterminal_paragraph_direction: (a: number) => [number, number];
-    readonly wasmterminal_paste_undo_probe: (a: number) => [number, number];
-    readonly wasmterminal_prepend_scrollback: (a: number, b: number, c: number) => [number, number];
+    readonly wasmterminal_paragraph_direction: (a: number, b: number) => void;
+    readonly wasmterminal_paste_undo_probe: (a: number, b: number) => void;
+    readonly wasmterminal_prepend_scrollback: (a: number, b: number, c: number, d: number) => void;
     readonly wasmterminal_process: (a: number, b: number, c: number) => void;
-    readonly wasmterminal_process_background: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly wasmterminal_process_background: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly wasmterminal_process_str: (a: number, b: number, c: number) => void;
     readonly wasmterminal_pseudo_cursor_add: (a: number, b: number, c: number) => void;
     readonly wasmterminal_pseudo_cursor_add_at: (a: number, b: number, c: number) => void;
@@ -281,13 +259,13 @@ export interface InitOutput {
     readonly wasmterminal_pseudo_cursor_count: (a: number) => number;
     readonly wasmterminal_pseudo_cursor_extend_all: (a: number, b: number, c: number) => void;
     readonly wasmterminal_pseudo_select_ranges: (a: number, b: number, c: number) => void;
-    readonly wasmterminal_read_range_text: (a: number, b: number, c: number, d: number, e: number) => [number, number];
-    readonly wasmterminal_reinit_renderer: (a: number, b: number) => [number, number, number, number];
+    readonly wasmterminal_read_range_text: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+    readonly wasmterminal_reinit_renderer: (a: number, b: number, c: number) => void;
     readonly wasmterminal_remove_comment: (a: number, b: number) => number;
     readonly wasmterminal_render: (a: number) => number;
-    readonly wasmterminal_resize: (a: number, b: number, c: number) => [number, number];
+    readonly wasmterminal_resize: (a: number, b: number, c: number, d: number) => void;
     readonly wasmterminal_resize_backgrounds: (a: number) => void;
-    readonly wasmterminal_restore: (a: number, b: number) => [number, number];
+    readonly wasmterminal_restore: (a: number, b: number, c: number) => void;
     readonly wasmterminal_save_active: (a: number) => number;
     readonly wasmterminal_scroll: (a: number, b: number) => number;
     readonly wasmterminal_scroll_offset: (a: number) => number;
@@ -297,7 +275,7 @@ export interface InitOutput {
     readonly wasmterminal_select_line_at: (a: number, b: number, c: number) => void;
     readonly wasmterminal_select_word_at: (a: number, b: number, c: number) => void;
     readonly wasmterminal_selection_clear: (a: number) => void;
-    readonly wasmterminal_selection_content_range: (a: number) => [number, number];
+    readonly wasmterminal_selection_content_range: (a: number, b: number) => void;
     readonly wasmterminal_selection_extend: (a: number, b: number, c: number) => void;
     readonly wasmterminal_selection_start: (a: number, b: number, c: number) => void;
     readonly wasmterminal_selection_start_block: (a: number, b: number, c: number) => void;
@@ -317,7 +295,7 @@ export interface InitOutput {
     readonly wasmterminal_set_custom_font: (a: number, b: number, c: number) => void;
     readonly wasmterminal_set_custom_font_name: (a: number, b: number, c: number) => void;
     readonly wasmterminal_set_danger_effects: (a: number, b: number) => void;
-    readonly wasmterminal_set_expression: (a: number, b: number, c: number) => [number, number];
+    readonly wasmterminal_set_expression: (a: number, b: number, c: number, d: number) => void;
     readonly wasmterminal_set_expression_effects: (a: number, b: number) => void;
     readonly wasmterminal_set_font_size: (a: number, b: number) => void;
     readonly wasmterminal_set_font_weight: (a: number, b: number) => void;
@@ -337,27 +315,24 @@ export interface InitOutput {
     readonly wasmterminal_set_text_alignment: (a: number, b: number, c: number) => void;
     readonly wasmterminal_set_text_animations: (a: number, b: number) => void;
     readonly wasmterminal_set_theme: (a: number, b: number, c: number) => void;
-    readonly wasmterminal_status_bar_hit_test: (a: number, b: number) => [number, number];
+    readonly wasmterminal_status_bar_hit_test: (a: number, b: number, c: number) => void;
     readonly wasmterminal_take_bell: (a: number) => number;
-    readonly wasmterminal_text_alignment: (a: number) => [number, number];
-    readonly wasmterminal_title: (a: number) => [number, number];
+    readonly wasmterminal_text_alignment: (a: number, b: number) => void;
+    readonly wasmterminal_title: (a: number, b: number) => void;
     readonly wasmterminal_update_ai_primitives: (a: number, b: number, c: number, d: number) => void;
     readonly wasmterminal_update_comment_text: (a: number, b: number, c: number, d: number) => number;
-    readonly wasmterminal_visible_comment_anchors: (a: number) => [number, number];
-    readonly wasmterminal_visible_emoji_cells: (a: number) => [number, number];
+    readonly wasmterminal_visible_comment_anchors: (a: number, b: number) => void;
+    readonly wasmterminal_visible_emoji_cells: (a: number, b: number) => void;
     readonly wasmterminal_visible_rows: (a: number) => number;
-    readonly wasmterminal_visual_cursor_display: (a: number) => [number, number];
-    readonly wasm_bindgen__convert__closures_____invoke__h2bf5b722dd9eda8c: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen__convert__closures_____invoke__h94414e4fd4c5bce5: (a: number, b: number, c: any, d: any) => void;
-    readonly __wbindgen_malloc: (a: number, b: number) => number;
-    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
-    readonly __wbindgen_externrefs: WebAssembly.Table;
-    readonly __wbindgen_exn_store: (a: number) => void;
-    readonly __externref_table_alloc: () => number;
-    readonly __wbindgen_free: (a: number, b: number, c: number) => void;
-    readonly __wbindgen_destroy_closure: (a: number, b: number) => void;
-    readonly __externref_table_dealloc: (a: number) => void;
-    readonly __wbindgen_start: () => void;
+    readonly wasmterminal_visual_cursor_display: (a: number, b: number) => void;
+    readonly __wasm_bindgen_func_elem_3344: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_3340: (a: number, b: number, c: number, d: number) => void;
+    readonly __wbindgen_export: (a: number, b: number) => number;
+    readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
+    readonly __wbindgen_export3: (a: number) => void;
+    readonly __wbindgen_export4: (a: number, b: number, c: number) => void;
+    readonly __wbindgen_export5: (a: number, b: number) => void;
+    readonly __wbindgen_add_to_stack_pointer: (a: number) => number;
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;

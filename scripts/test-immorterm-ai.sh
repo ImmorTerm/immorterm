@@ -97,12 +97,16 @@ if [[ $E2E_ONLY -eq 0 ]]; then
   run_step "WASM build (wasm-pack)" \
     wasm-pack build "$WASM_SRC" --target web --release
 
+  run_step "WASM glue/binary pair verification" \
+    node scripts/verify-wasm-pair.mjs "$WASM_PKG"
+
   echo "  Syncing artifacts..."
   cp "$WASM_PKG/immorterm_wasm_bg.wasm" \
      "$WASM_PKG/immorterm_wasm.js" \
      "$WASM_PKG/immorterm_wasm.d.ts" \
      "$WASM_PKG/immorterm_wasm_bg.wasm.d.ts" \
      "$WASM_DEST/"
+  node scripts/verify-wasm-pair.mjs "$WASM_DEST"
   echo "  ✓ Artifacts synced"
 else
   skip_step "WASM build"
