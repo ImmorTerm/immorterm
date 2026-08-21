@@ -2262,6 +2262,37 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
         this.sendPlansToWebview();
         break;
       }
+      case 'archive-plan':
+      case 'delete-plan': {
+        const endpoint = msg.type === 'archive-plan' ? 'archive' : 'delete';
+        fetch(`http://127.0.0.1:${HUB_PORT}/api/v1/plans/${endpoint}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            project_dir: this.projectPath || '',
+            plan_id: msg.planId,
+            archived: msg.archived === true,
+          }),
+        })
+          .then(async (response) => {
+            const payload = await response.json().catch(() => ({})) as { error?: string };
+            this.view?.webview.postMessage({
+              type: 'plan-lifecycle-result',
+              ok: response.ok && !payload.error,
+              action: endpoint,
+              planId: msg.planId,
+              error: payload.error,
+            });
+            if (response.ok) this.sendPlansToWebview();
+          })
+          .catch((err) => {
+            this.view?.webview.postMessage({
+              type: 'plan-lifecycle-result', ok: false, action: endpoint,
+              planId: msg.planId, error: String(err),
+            });
+          });
+        break;
+      }
       case 'list-spaces': {
         this.sendSpacesToWebview();
         break;
@@ -2451,9 +2482,19 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private sendPlansToWebview(): void {
+  private async sendPlansToWebview(): Promise<void> {
     if (!this.plansStorage || !this.view) return;
-    this.view.webview.postMessage({ type: 'plans-load', plans: this.plansStorage.list() });
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${HUB_PORT}/api/v1/plans?project_dir=${encodeURIComponent(this.projectPath || '')}`,
+      );
+      const payload = await response.json() as { plans?: unknown[] };
+      this.view.webview.postMessage({
+        type: 'plans-load', plans: Array.isArray(payload.plans) ? payload.plans : [],
+      });
+    } catch (err) {
+      logger.warn(`ImmorTerm AI: get-plans failed: ${err}`);
+    }
   }
 
   private sendSpacesToWebview(): void {

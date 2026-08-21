@@ -446,12 +446,10 @@ pub fn build_sections_with_theme(
     let title_hovered = scroll_offset == usize::MAX;
 
     // ── Pre-compute right total width (needed for title budget) ──
-    let badge_chars = match inbox_unread { 0 => 0, 1..=9 => 1, 10..=99 => 2, _ => 3 };
-    let right_text_inbox = if inbox_unread == 0 {
-        " ✉ ".to_string()
-    } else {
-        format!(" ✉{} ", " ".repeat(badge_chars))
-    };
+    // The unread count is painted as a compact badge over the envelope by the
+    // renderer, so it must not change the section width or push neighboring
+    // controls around. The Inbox always owns the same three-cell hit target.
+    let right_text_inbox = " ✉ ".to_string();
     let right_text_scratch = " >_ ";
     let right_text_shared_activity = " ⇄ ";
     let right_text_last = format!(" Last: {} ", last_active);
@@ -966,7 +964,7 @@ mod tests {
         );
         assert_eq!(hit_test(&data, data.inbox_start_col), StatusBarTarget::Inbox);
         assert_eq!(data.inbox_unread, 123);
-        assert_eq!(data.right_sections[0].text, " ✉    ");
+        assert_eq!(data.right_sections[0].text, " ✉ ");
         assert_eq!(hit_test(&data, data.scratch_start_col), StatusBarTarget::Scratch);
         assert_eq!(hit_test(&data, data.shared_activity_start_col), StatusBarTarget::SharedActivity);
     }

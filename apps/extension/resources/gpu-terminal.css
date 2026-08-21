@@ -2562,9 +2562,9 @@ body.with-tab-bar #container {
 /* ── Plans Panel (S4) ── */
 #plans-list { padding: 0 0 8px 0; }
 .plan-item {
-  display: flex; align-items: center; gap: 6px;
+  position: relative; display: flex; align-items: center; gap: 6px;
   height: 22px; box-sizing: border-box;
-  padding: 0 8px; cursor: pointer; font-size: 12px;
+  padding: 0 50px 0 8px; cursor: pointer; font-size: 12px;
   color: var(--sidebar-text, #cdd6f4);
   /* tween the .dragging lift (§6A grip drag), mirroring .session-item L441 */
   transition: background 0.1s ease, opacity 0.12s ease, transform 0.12s ease, box-shadow 0.12s ease;
@@ -2572,13 +2572,13 @@ body.with-tab-bar #container {
 }
 .plan-item:hover { background: var(--sidebar-hover, #1e1e2e); }
 .plan-item.superseded { opacity: 0.45; }
-.plan-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-title { flex: 1 1 120px; min-width: 48px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Flattened pill: colored uppercase text only (L2 quiet metadata) */
 .plan-status-pill {
   flex: 0 0 auto; font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px;
   color: var(--sidebar-muted, #a6adc8);
 }
-.plan-status-pill.status-active { color: var(--sidebar-accent, #b482ff); }
+.plan-status-pill.status-active { display: none; }
 /* Theme-variable colors only (L3): done reads as quiet/finished, decided
  * shares the accent family — no hardcoded palette. */
 .plan-status-pill.status-done { color: var(--sidebar-muted, #a6adc8); }
@@ -2588,7 +2588,47 @@ body.with-tab-bar #container {
   background: color-mix(in srgb, var(--sidebar-accent, #b482ff) 20%, transparent);
   color: var(--sidebar-accent, #b482ff);
 }
-.plan-updated { flex: 0 0 auto; font-size: 9px; color: var(--sidebar-muted, #a6adc8); opacity: 0.7; }
+.plan-updated { display: none; }
+.plan-row-actions {
+  position: absolute; right: 5px; inset-block: 2px;
+  display: inline-flex; align-items: center; justify-content: flex-end; gap: 1px;
+  opacity: .72;
+  background: linear-gradient(90deg, transparent, var(--sidebar-bg, #1e1e2e) 12px);
+  padding-left: 12px;
+  transition: opacity .12s ease, transform .12s ease;
+}
+.plan-item:hover .plan-row-actions, .plan-item:focus-within .plan-row-actions {
+  opacity: 1;
+}
+.plan-row-action {
+  min-width: 18px; height: 18px; padding: 0 3px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 4px; background: transparent;
+  color: var(--sidebar-muted, #a6adc8); cursor: pointer;
+  font: 600 9px/1 -apple-system, BlinkMacSystemFont, sans-serif;
+}
+.plan-row-action:hover, .plan-row-action:focus-visible {
+  color: var(--sidebar-text, #cdd6f4);
+  background: color-mix(in srgb, var(--sidebar-accent, #b482ff) 18%, transparent);
+  outline: none;
+}
+.plan-row-action.plan-delete:hover { color: var(--status-error, #f38ba8); }
+.plan-row-action.plan-delete.confirming {
+  position: relative; color: #fff;
+  background: color-mix(in srgb, var(--status-error, #f38ba8) 72%, #3b1220);
+}
+.plan-row-action.plan-delete.confirming::after {
+  content: '!'; position: absolute; top: -4px; right: -3px;
+  width: 9px; height: 9px; border-radius: 50%;
+  display: grid; place-items: center;
+  color: #fff; background: var(--status-error, #f38ba8);
+  font: 700 7px/1 -apple-system, BlinkMacSystemFont, sans-serif;
+}
+.plan-item.plan-action-error { outline: 1px solid var(--status-error, #f38ba8); outline-offset: -1px; }
+#archive-plans-btn.active {
+  color: var(--sidebar-accent, #b482ff);
+  background: color-mix(in srgb, var(--sidebar-accent, #b482ff) 16%, transparent);
+}
 /* Full-size plan overlay — same scrim skin as .task-board-overlay */
 .plan-overlay {
   position: fixed; inset: 0; z-index: 10000;

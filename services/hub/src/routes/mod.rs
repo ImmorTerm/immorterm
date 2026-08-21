@@ -80,6 +80,8 @@ pub fn api_routes() -> Router {
         // flock-parity with the daemon's immorterm_plan MCP tools)
         .route("/plans", get(plans::list_plans))
         .route("/plans/submit", post(plans::submit_plan))
+        .route("/plans/archive", post(plans::archive_plan))
+        .route("/plans/delete", post(plans::delete_plan))
         // Spaces (SP2 docking grid) — webview owns the model, so the hub
         // both lists AND saves (flock-parity with plans).
         .route("/spaces", get(spaces::list_spaces))

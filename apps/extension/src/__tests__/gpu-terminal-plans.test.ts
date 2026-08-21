@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect } from 'vitest';
-import { unwrapPlanHtml, renderPlanArtifactIframe } from '../../resources/gpu-terminal-plans.js';
+import { createPlansPanel, unwrapPlanHtml, renderPlanArtifactIframe } from '../../resources/gpu-terminal-plans.js';
 
 describe('unwrapPlanHtml — strip authoring wrappers that corrupt HTML parsing', () => {
   it('strips a leading <![CDATA[ … ]]> wrapper (the delulus break)', () => {
@@ -48,5 +48,51 @@ describe('renderPlanArtifactIframe — sandboxed artifact + wake bridge', () => 
     const doc = frame.getAttribute('srcdoc') || '';
     expect(doc).toContain("default-src 'none'");
     expect(doc).not.toContain('connect-src');     // no network egress granted
+  });
+});
+
+describe('Plans sidebar lifecycle controls', () => {
+  it('separates current and archived plans and exposes reversible archive plus confirmed delete', () => {
+    document.body.innerHTML = '<div id="plans-header"><button id="archive-plans-btn"></button></div><div id="plans-list"></div>';
+    const header = document.getElementById('plans-header')!;
+    const list = document.getElementById('plans-list')!;
+    const archived: Array<[string, boolean]> = [];
+    const deleted: string[] = [];
+    const panel = createPlansPanel({
+      plansHeaderEl: header,
+      plansListEl: list,
+      requestPlans: () => {},
+      getPlansMode: () => 'visible',
+      onHasContent: () => {},
+      submitPlan: () => {},
+      archivePlan: (id: string, value: boolean) => archived.push([id, value]),
+      deletePlan: (id: string) => deleted.push(id),
+      wakeAgent: () => false,
+      enableGridDrag: false,
+    });
+    panel.setPlans([
+      { id: 'current', title: 'Current', status: 'active', updatedAt: 2 },
+      { id: 'old', title: 'Old', status: 'done', updatedAt: 1, _archived: true },
+    ]);
+
+    expect(list.textContent).toContain('Current');
+    expect(list.textContent).not.toContain('Old');
+    (list.querySelector('.codicon-archive') as HTMLButtonElement).click();
+    expect(archived).toEqual([['current', true]]);
+
+    const archiveToggle = document.getElementById('archive-plans-btn') as HTMLButtonElement;
+    archiveToggle.click();
+    expect(list.textContent).toContain('Old');
+    expect(list.textContent).not.toContain('Current');
+    (list.querySelector('.codicon-debug-restart') as HTMLButtonElement).click();
+    expect(archived).toEqual([['current', true], ['old', false]]);
+
+    const deleteButton = list.querySelector('.plan-delete') as HTMLButtonElement;
+    deleteButton.click();
+    expect(deleteButton.classList.contains('confirming')).toBe(true);
+    expect(deleteButton.title).toBe('Click again to permanently delete');
+    expect(deleted).toEqual([]);
+    deleteButton.click();
+    expect(deleted).toEqual(['old']);
   });
 });
