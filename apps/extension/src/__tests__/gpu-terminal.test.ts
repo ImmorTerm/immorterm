@@ -620,11 +620,20 @@ describe('GPU Terminal — Extension Message Handlers', () => {
     expect(mockUpdateAppearance).not.toHaveBeenCalled();
   });
 
-  it('responds to get-plans with a plans-load array (S4)', () => {
-    messageHandler({ type: 'get-plans' });
-    const call = mockPostMessage.mock.calls.find(c => c[0]?.type === 'plans-load');
-    expect(call).toBeDefined();
-    expect(Array.isArray(call![0].plans)).toBe(true);
+  it('responds to get-plans with a plans-load array (S4)', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      json: async () => ({ plans: [] }),
+    } as Response);
+    try {
+      messageHandler({ type: 'get-plans' });
+      await vi.waitFor(() => {
+        const call = mockPostMessage.mock.calls.find(c => c[0]?.type === 'plans-load');
+        expect(call).toBeDefined();
+        expect(Array.isArray(call![0].plans)).toBe(true);
+      });
+    } finally {
+      fetchMock.mockRestore();
+    }
   });
 
   it('handles error messages from webview', async () => {
