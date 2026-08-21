@@ -285,8 +285,9 @@ function buildWakeSummary(planId, selections, nComments) {
  * wakeAgent(sessionName, text) — types `text` into the plan's attached (or
  *   active) Claude session; returns true if a session was woken.
  */
-export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, getPlansMode, onHasContent, submitPlan, wakeAgent, enableGridDrag, onConsumeDragState, onConsumeToTerminal }) {
+export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, getPlansMode, onHasContent, submitPlan, archivePlan, deletePlan, wakeAgent, enableGridDrag, onConsumeDragState, onConsumeToTerminal }) {
   let _plans = [];
+  let _showArchived = false;
   const _submittedIds = new Set(); // plans submitted with no live agent to wake
   let _pendingSubmit = null;       // { planId, onResult } for the open overlay
   // Unsubmitted comment drafts, kept across overlay close/reopen so typing is
@@ -331,7 +332,7 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
 
   function sorted() {
     // Brief rule: active first, then newest updated. superseded greys via CSS.
-    return [..._plans].sort((a, b) => {
+    return _plans.filter(plan => Boolean(plan._archived) === _showArchived).sort((a, b) => {
       const aa = a.status === 'active' ? 0 : 1;
       const bb = b.status === 'active' ? 0 : 1;
       if (aa !== bb) return aa - bb;
@@ -352,7 +353,11 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
     const status = STATUSES.includes(plan.status) ? plan.status : 'draft';
     const row = el('div', 'plan-item' + (status === 'superseded' ? ' superseded' : ''));
     row.dataset.planId = plan.id;
-    row.title = plan.summary || plan.title || '';
+    row.title = [
+      plan.title || plan.id,
+      plan.summary,
+      status + ' · ' + relativeTime(plan.updatedAt || 0),
+    ].filter(Boolean).join('\n');
 
     // §6B drag SOURCE — a native-drag grip carrying PLAN_MIME, so a plan row
     // drops into the Spaces grid as a plan tile. Mirrors utils §6A. The grip's
@@ -392,6 +397,41 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
 
     row.appendChild(el('span', 'plan-status-pill status-' + status, status));
     row.appendChild(el('span', 'plan-updated', relativeTime(plan.updatedAt || 0)));
+
+    const actions = el('span', 'plan-row-actions');
+    const archiveBtn = el('button', 'plan-row-action codicon ' + (plan._archived ? 'codicon-debug-restart' : 'codicon-archive'));
+    archiveBtn.type = 'button';
+    archiveBtn.title = plan._archived ? 'Restore plan to sidebar' : 'Archive plan';
+    archiveBtn.setAttribute('aria-label', archiveBtn.title);
+    archiveBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (typeof archivePlan === 'function') archivePlan(plan.id, !plan._archived);
+    });
+    actions.appendChild(archiveBtn);
+
+    const deleteBtn = el('button', 'plan-row-action plan-delete codicon codicon-trash');
+    deleteBtn.type = 'button';
+    deleteBtn.title = 'Delete plan permanently';
+    deleteBtn.setAttribute('aria-label', deleteBtn.title);
+    let deleteTimer = null;
+    deleteBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (deleteBtn.dataset.confirming === 'true') {
+        if (deleteTimer) clearTimeout(deleteTimer);
+        if (typeof deletePlan === 'function') deletePlan(plan.id);
+        return;
+      }
+      deleteBtn.dataset.confirming = 'true';
+      deleteBtn.classList.add('confirming');
+      deleteBtn.title = 'Click again to permanently delete';
+      deleteTimer = setTimeout(() => {
+        deleteBtn.dataset.confirming = 'false';
+        deleteBtn.classList.remove('confirming');
+        deleteBtn.title = 'Delete plan permanently';
+      }, 3500);
+    });
+    actions.appendChild(deleteBtn);
+    row.appendChild(actions);
 
     // Body drag → consume into a terminal (grip already owns the grid drag).
     if (onConsumeToTerminal) {
@@ -686,11 +726,40 @@ export function createPlansPanel({ plansHeaderEl, plansListEl, requestPlans, get
 
   function setPlans(plans) {
     _plans = Array.isArray(plans) ? plans : [];
+    const archiveToggle = plansHeaderEl && plansHeaderEl.querySelector('#archive-plans-btn');
+    const archivedCount = _plans.filter(plan => plan._archived).length;
+    if (archiveToggle) {
+      archiveToggle.style.display = archivedCount > 0 ? '' : 'none';
+      archiveToggle.classList.toggle('active', _showArchived);
+      archiveToggle.setAttribute('aria-pressed', String(_showArchived));
+      archiveToggle.title = _showArchived ? 'Show current plans' : `Show archived plans (${archivedCount})`;
+      if (archivedCount === 0) _showArchived = false;
+    }
     render();
     applyVisibility();
   }
 
+  function handleLifecycleResult(msg) {
+    if (msg && msg.ok) return;
+    const row = msg && [...plansListEl.querySelectorAll('.plan-item')]
+      .find(item => item.dataset.planId === msg.planId);
+    if (row) {
+      row.classList.add('plan-action-error');
+      row.title = msg.error || 'Plan action failed';
+      setTimeout(() => row.classList.remove('plan-action-error'), 1800);
+    }
+  }
+
+  const archiveToggle = plansHeaderEl && plansHeaderEl.querySelector('#archive-plans-btn');
+  if (archiveToggle) {
+    archiveToggle.addEventListener('click', (e) => {
+      e.stopPropagation();
+      _showArchived = !_showArchived;
+      setPlans(_plans);
+    });
+  }
+
   function dispose() { /* no persistent listeners */ }
 
-  return { setPlans, refresh: requestPlans, applyVisibility, handleSubmitResult, dispose };
+  return { setPlans, refresh: requestPlans, applyVisibility, handleSubmitResult, handleLifecycleResult, dispose };
 }

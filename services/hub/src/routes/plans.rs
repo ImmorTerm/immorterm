@@ -12,6 +12,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// CSRF guard for state-changing hub routes. The hub sits behind
@@ -110,12 +111,16 @@ pub struct PlansQuery {
 pub async fn list_plans(Query(q): Query<PlansQuery>) -> Json<Value> {
     let project = resolve_project_id(&q.project_dir.unwrap_or_default());
     let dir = plans_root().join(&project);
+    let archived = read_archived_ids(&dir);
     let mut plans: Vec<Value> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for e in entries.flatten() {
             let cur = e.path().join("current.json");
             if let Ok(s) = std::fs::read_to_string(&cur) {
-                if let Ok(v) = serde_json::from_str::<Value>(&s) {
+                if let Ok(mut v) = serde_json::from_str::<Value>(&s) {
+                    if let Some(id) = v.get("id").and_then(Value::as_str) {
+                        v["_archived"] = json!(archived.contains(id));
+                    }
                     plans.push(v);
                 }
                 // corrupt current.json → skip; daemon sidelines it on next write
@@ -123,6 +128,106 @@ pub async fn list_plans(Query(q): Query<PlansQuery>) -> Json<Value> {
         }
     }
     Json(json!({ "project": project, "plans": plans }))
+}
+
+const SIDEBAR_STATE_FILE: &str = ".sidebar.json";
+
+fn read_archived_ids(project_dir: &Path) -> HashSet<String> {
+    std::fs::read_to_string(project_dir.join(SIDEBAR_STATE_FILE))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.get("archived").and_then(Value::as_array).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect()
+}
+
+fn write_archived_ids(project_dir: &Path, ids: &HashSet<String>) -> Result<(), String> {
+    let mut archived: Vec<&str> = ids.iter().map(String::as_str).collect();
+    archived.sort_unstable();
+    atomic_write_json(
+        &project_dir.join(SIDEBAR_STATE_FILE),
+        &json!({ "version": 1, "archived": archived }),
+    )
+}
+
+#[derive(Deserialize)]
+pub struct PlanLifecycleReq {
+    pub project_dir: Option<String>,
+    pub plan_id: String,
+    #[serde(default)]
+    pub archived: bool,
+}
+
+/// Archive is a reversible sidebar preference. It never mutates the plan
+/// authored by the agent, so a later plan revision cannot silently resurrect
+/// or overwrite the human's choice.
+pub async fn archive_plan(
+    headers: HeaderMap,
+    Json(req): Json<PlanLifecycleReq>,
+) -> (StatusCode, Json<Value>) {
+    if !origin_is_trusted(&headers) {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": "cross-origin archive rejected" })));
+    }
+    if let Err(e) = validate_plan_id(&req.plan_id) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": e })));
+    }
+    let project = resolve_project_id(req.project_dir.as_deref().unwrap_or(""));
+    let project_dir = plans_root().join(&project);
+    if !project_dir.join(&req.plan_id).join("current.json").exists() {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "Plan not found" })));
+    }
+    if let Err(e) = std::fs::create_dir_all(&project_dir) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })));
+    }
+    let _lock = match lock_plan_dir(&project_dir) {
+        Ok(lock) => lock,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+    };
+    let mut ids = read_archived_ids(&project_dir);
+    if req.archived { ids.insert(req.plan_id.clone()); } else { ids.remove(&req.plan_id); }
+    match write_archived_ids(&project_dir, &ids) {
+        Ok(()) => (StatusCode::OK, Json(json!({ "plan_id": req.plan_id, "archived": req.archived }))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))),
+    }
+}
+
+/// Permanent removal is deliberately a separate endpoint from archive. The
+/// webview requires a second confirming click before calling this route.
+pub async fn delete_plan(
+    headers: HeaderMap,
+    Json(req): Json<PlanLifecycleReq>,
+) -> (StatusCode, Json<Value>) {
+    if !origin_is_trusted(&headers) {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": "cross-origin delete rejected" })));
+    }
+    if let Err(e) = validate_plan_id(&req.plan_id) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": e })));
+    }
+    let project = resolve_project_id(req.project_dir.as_deref().unwrap_or(""));
+    let project_dir = plans_root().join(&project);
+    let plan_dir = project_dir.join(&req.plan_id);
+    if !plan_dir.join("current.json").exists() {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "Plan not found" })));
+    }
+    let _plan_lock = match lock_plan_dir(&plan_dir) {
+        Ok(lock) => lock,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+    };
+    let tombstone = project_dir.join(format!(".deleted-{}-{}", req.plan_id, std::process::id()));
+    if let Err(e) = std::fs::rename(&plan_dir, &tombstone) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })));
+    }
+    drop(_plan_lock);
+    if let Err(e) = std::fs::remove_dir_all(&tombstone) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })));
+    }
+    let _project_lock = lock_plan_dir(&project_dir).ok();
+    let mut ids = read_archived_ids(&project_dir);
+    ids.remove(&req.plan_id);
+    let _ = write_archived_ids(&project_dir, &ids);
+    (StatusCode::OK, Json(json!({ "plan_id": req.plan_id, "deleted": true })))
 }
 
 // ── POST /api/v1/plans/submit — the ONE write path for the Plans UI ─────
@@ -477,6 +582,23 @@ mod tests {
         drop(l1);
         let rc = unsafe { libc::flock(f2.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         assert_eq!(rc, 0, "lock acquirable after release");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archived_plan_ids_round_trip_as_sidebar_state() {
+        let dir = std::env::temp_dir().join(format!(
+            "hub-plan-sidebar-test-{}-{}",
+            std::process::id(),
+            now_ms(),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ids = HashSet::from(["active-plan".to_string(), "done.plan".to_string()]);
+        write_archived_ids(&dir, &ids).unwrap();
+        assert_eq!(read_archived_ids(&dir), ids);
+        ids.remove("active-plan");
+        write_archived_ids(&dir, &ids).unwrap();
+        assert_eq!(read_archived_ids(&dir), ids);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

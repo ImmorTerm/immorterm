@@ -1441,7 +1441,9 @@
       <div id="plans-header" class="sec-header">
         <span class="codicon codicon-chevron-right sec-chevron"></span>
         <span class="sec-title" title="Plans are AI-authored visual briefs for this project">Plans</span>
-        <span class="sec-actions"></span>
+        <span class="sec-actions">
+          <button class="sec-action codicon codicon-archive" id="archive-plans-btn" title="Show archived plans" aria-pressed="false" style="display:none"></button>
+        </span>
       </div>
       <div id="plans-list"></div>
     </div>
@@ -2707,6 +2709,32 @@
                 sendToWebview({ type: 'plans-submit-result', ok: false, planId: msg.planId, error: String(err) });
               });
             break;
+          case 'archive-plan':
+          case 'delete-plan': {
+            if (_remoteName) break;
+            const action = msg.type === 'archive-plan' ? 'archive' : 'delete';
+            fetch('/api/v1/plans/' + action, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                project_dir: _projectDir || '', plan_id: msg.planId,
+                archived: msg.archived === true,
+              }),
+            })
+              .then(r => r.json().then(d => ({ ok: r.ok, d })))
+              .then(({ ok, d }) => {
+                sendToWebview({
+                  type: 'plan-lifecycle-result', ok: ok && !d.error,
+                  action, planId: msg.planId, error: d.error,
+                });
+                if (ok) handleHostMessage({ type: 'get-plans' });
+              })
+              .catch(err => sendToWebview({
+                type: 'plan-lifecycle-result', ok: false, action,
+                planId: msg.planId, error: String(err),
+              }));
+            break;
+          }
           // ── Spaces → hub API (webview owns the model; hub lists + saves) ──
           case 'list-spaces':
             if (_remoteName) { sendToWebview({ type: 'spaces-load', index: null }); break; }
@@ -16301,6 +16329,8 @@
                   type: 'plans-submit', planId: p.planId,
                   resolutions: p.resolutions, comments: p.comments,
                 }),
+                archivePlan: (planId, archived) => vscode.postMessage({ type: 'archive-plan', planId, archived }),
+                deletePlan: (planId) => vscode.postMessage({ type: 'delete-plan', planId }),
                 wakeAgent: wakePlanAgent,
                 // S5a single-writer rule: the module reports content, the
                 // accordion (applySectionLayout) owns display.
@@ -16689,6 +16719,9 @@
           break;
         case 'plans-submit-result':
           if (plansPanel) plansPanel.handleSubmitResult(msg);
+          break;
+        case 'plan-lifecycle-result':
+          if (plansPanel) plansPanel.handleLifecycleResult(msg);
           break;
         case 'tasks-load': {
           if (tasksPanel) tasksPanel.setTasks(msg.tasks);
