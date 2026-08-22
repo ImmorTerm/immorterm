@@ -1860,8 +1860,35 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "immorterm_contact_session",
+            "description": "Send a correlated Session Bridge message to a specific live agent in the current project. Use this for agent-to-agent coordination after resolving a stable target_window_id with immorterm_project_sessions. This is NOT ImmorTerm Interactive sharing. Returns the message_id and delivery state; use immorterm_message_status to inspect acknowledgement and replies.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session": { "type": "string", "description": "Your current ImmorTerm session; normally auto-resolved." },
+                    "target_window_id": { "type": "string", "description": "Stable window_id from immorterm_project_sessions." },
+                    "message": { "type": "string", "description": "Plain-text message to deliver to the target agent." },
+                    "correlation_id": { "type": "string", "description": "Optional caller correlation id. The Hub generates one when omitted." },
+                    "expires_in_seconds": { "type": "integer", "minimum": 60, "maximum": 86400, "default": 3600 }
+                },
+                "required": ["target_window_id", "message"]
+            }
+        }),
+        json!({
+            "name": "immorterm_message_status",
+            "description": "Read the delivery, acknowledgement, and correlated replies for a Session Bridge message previously sent by this agent session.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session": { "type": "string", "description": "Your current ImmorTerm session; normally auto-resolved." },
+                    "message_id": { "type": "string", "description": "message_id returned by immorterm_contact_session." }
+                },
+                "required": ["message_id"]
+            }
+        }),
+        json!({
             "name": "immorterm_send_message",
-            "description": "Send text to the live session currently connected through ImmorTerm Interactive sharing. The active share determines the recipient; arbitrary targets are rejected. Defaults to submitting with Enter.",
+            "description": "ImmorTerm Interactive sharing only — NOT agent-to-agent Session Bridge messaging. Send text to the single live human/terminal share partner already paired with this session. The active share determines the recipient; arbitrary targets are rejected. For another project agent, use immorterm_project_sessions then immorterm_contact_session.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2848,6 +2875,8 @@ fn handle_tool_call(
         "immorterm_connect_stream" => handle_connect_stream(&arguments, rt),
         "immorterm_send_message" => handle_send_message(&arguments, rt),
         "immorterm_project_sessions" => handle_project_sessions(&arguments),
+        "immorterm_contact_session" => handle_contact_session(&arguments),
+        "immorterm_message_status" => handle_message_status(&arguments),
         "immorterm_acknowledge_message" => handle_acknowledge_message(&arguments, rt),
         "immorterm_reply_to_message" => handle_reply_to_message(&arguments, rt),
         "immorterm_send_to_inbox" => handle_send_to_inbox(&arguments),
@@ -5337,36 +5366,55 @@ fn bridge_client() -> Result<(reqwest::blocking::Client, String, String), String
     Ok((client, hub, token))
 }
 
+fn provision_agent_bridge_credential(
+    client: &reqwest::blocking::Client,
+    hub: &str,
+    administrator: &str,
+    project_id: &str,
+    window_id: &str,
+    operations: &[&str],
+) -> Result<String, String> {
+    let url = format!("{hub}/api/v1/bridge/installations/credentials");
+    let response = client
+        .post(&url)
+        .bearer_auth(administrator)
+        .json(&json!({
+            "installation_id": format!("agent-{window_id}"),
+            "project_id": project_id,
+            "audience": "immorterm-agent-mcp",
+            "operations": operations,
+            "ttl_seconds": 300,
+        }))
+        .send()
+        .map_err(|e| format!("ImmorTerm bridge is unavailable at {url}: {e}"))?;
+    let status = response.status();
+    let body: Value = response.json().map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!(
+            "bridge credential provisioning failed ({status}): {body}"
+        ));
+    }
+    body["token"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| "bridge credential provisioning omitted token".to_string())
+}
+
 fn handle_project_sessions(args: &Value) -> Result<String, String> {
     let (project_id, window_id) = bridge_identity(args)?;
     let (client, hub, administrator) = bridge_client()?;
-    let provision_url = format!("{hub}/api/v1/bridge/installations/credentials");
-    let provision = client
-        .post(&provision_url)
-        .bearer_auth(administrator)
-        .json(&json!({
-            "installation_id":format!("agent-{window_id}"),
-            "project_id":&project_id,
-            "audience":"immorterm-agent-mcp",
-            "operations":["directory:read"],
-            "ttl_seconds":300,
-        }))
-        .send()
-        .map_err(|e| format!("ImmorTerm bridge is unavailable at {provision_url}: {e}"))?;
-    let provision_status = provision.status();
-    let provision_body: Value = provision.json().map_err(|e| e.to_string())?;
-    if !provision_status.is_success() {
-        return Err(format!(
-            "bridge credential provisioning failed ({provision_status}): {provision_body}"
-        ));
-    }
-    let token = provision_body["token"]
-        .as_str()
-        .ok_or("bridge credential provisioning omitted token")?;
+    let token = provision_agent_bridge_credential(
+        &client,
+        &hub,
+        &administrator,
+        &project_id,
+        &window_id,
+        &["directory:read"],
+    )?;
     let url = format!("{hub}/api/v1/bridge/directory");
     let response = client
         .get(&url)
-        .bearer_auth(token)
+        .bearer_auth(&token)
         .query(&[("project_id", &project_id)])
         .send()
         .map_err(|e| format!("ImmorTerm bridge is unavailable at {url}: {e}"))?;
@@ -5378,6 +5426,110 @@ fn handle_project_sessions(args: &Value) -> Result<String, String> {
     serde_json::from_str::<Value>(&text)
         .and_then(|v| serde_json::to_string_pretty(&v))
         .map_err(|e| format!("bridge directory returned invalid JSON: {e}"))
+}
+
+fn handle_contact_session(args: &Value) -> Result<String, String> {
+    let (project_id, window_id) = bridge_identity(args)?;
+    let target = args
+        .get("target_window_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or("'target_window_id' is required")?;
+    let message = args
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or("'message' is required")?;
+    if message.len() > MAX_SESSION_MESSAGE_BYTES {
+        return Err(format!("'message' must not exceed {MAX_SESSION_MESSAGE_BYTES} bytes"));
+    }
+    let expires_in = args
+        .get("expires_in_seconds")
+        .and_then(Value::as_u64)
+        .unwrap_or(3600);
+    if !(60..=86_400).contains(&expires_in) {
+        return Err("'expires_in_seconds' must be between 60 and 86400".into());
+    }
+
+    let (client, hub, administrator) = bridge_client()?;
+    let token = provision_agent_bridge_credential(
+        &client,
+        &hub,
+        &administrator,
+        &project_id,
+        &window_id,
+        &["message:send"],
+    )?;
+    let mut request = json!({
+        "project_id": project_id,
+        "target_window_id": target,
+        "message": message,
+        "expires_at": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+            + expires_in * 1000,
+        "attachments": [],
+        "trace_context": {
+            "source": "immorterm-agent-mcp",
+            "source_window_id": window_id,
+        },
+    });
+    if let Some(correlation_id) = args
+        .get("correlation_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        request["correlation_id"] = json!(correlation_id);
+    }
+    let url = format!("{hub}/api/v1/bridge/messages");
+    let response = client
+        .post(&url)
+        .bearer_auth(token)
+        .json(&request)
+        .send()
+        .map_err(|e| format!("ImmorTerm bridge is unavailable at {url}: {e}"))?;
+    let status = response.status();
+    let text = response.text().map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("bridge message send failed ({status}): {text}"));
+    }
+    serde_json::from_str::<Value>(&text)
+        .and_then(|value| serde_json::to_string_pretty(&value))
+        .map_err(|e| format!("bridge send returned invalid JSON: {e}"))
+}
+
+fn handle_message_status(args: &Value) -> Result<String, String> {
+    let (project_id, window_id) = bridge_identity(args)?;
+    let message_id = args
+        .get("message_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or("'message_id' is required")?;
+    let (client, hub, administrator) = bridge_client()?;
+    let token = provision_agent_bridge_credential(
+        &client,
+        &hub,
+        &administrator,
+        &project_id,
+        &window_id,
+        &["message:send"],
+    )?;
+    let url = format!("{hub}/api/v1/bridge/messages/{message_id}");
+    let response = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .map_err(|e| format!("ImmorTerm bridge is unavailable at {url}: {e}"))?;
+    let status = response.status();
+    let text = response.text().map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("bridge message lookup failed ({status}): {text}"));
+    }
+    serde_json::from_str::<Value>(&text)
+        .and_then(|value| serde_json::to_string_pretty(&value))
+        .map_err(|e| format!("bridge message lookup returned invalid JSON: {e}"))
 }
 
 fn external_message_receipt(
@@ -7319,6 +7471,28 @@ mod tests {
         assert!(!properties.contains_key("target_session"));
         assert!(properties.contains_key("session"));
         assert_eq!(tool["inputSchema"]["required"], json!(["message"]));
+        assert!(tool["description"]
+            .as_str()
+            .unwrap()
+            .contains("NOT agent-to-agent Session Bridge"));
+    }
+
+    #[test]
+    fn bridge_contact_is_a_distinct_targeted_tool() {
+        let tools = tool_definitions();
+        let contact = tools
+            .iter()
+            .find(|tool| tool["name"] == "immorterm_contact_session")
+            .expect("bridge contact tool definition");
+        assert_eq!(
+            contact["inputSchema"]["required"],
+            json!(["target_window_id", "message"])
+        );
+        let status = tools
+            .iter()
+            .find(|tool| tool["name"] == "immorterm_message_status")
+            .expect("bridge status tool definition");
+        assert_eq!(status["inputSchema"]["required"], json!(["message_id"]));
     }
 
     #[test]

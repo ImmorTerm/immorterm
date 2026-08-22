@@ -115,6 +115,7 @@ pub fn api_routes() -> Router {
         .route("/bridge/identity", get(bridge::identity))
         .route("/bridge/directory", get(bridge::directory))
         .route("/bridge/messages", post(bridge::send))
+        .route("/bridge/messages/{message_id}", get(bridge::message_status))
         .route("/bridge/messages/{message_id}/cancel", post(bridge::cancel))
         .route("/bridge/messages/{message_id}/ack", post(bridge::acknowledge))
         .route("/bridge/messages/{message_id}/reply", post(bridge::reply))
