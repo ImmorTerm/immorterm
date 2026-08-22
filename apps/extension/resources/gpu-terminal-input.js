@@ -30,6 +30,21 @@
 // the delete chunk before the next write lands.
 export const INK_SETTLE_MS = 20;
 
+/**
+ * macOS Option produces real Unicode text for several keyboard layouts
+ * (Option+- → en dash, Option+Shift+- → em dash, Hebrew Option+\\ → maqaf).
+ * Those characters must be inserted as text, not treated as shell Meta
+ * shortcuts. ASCII Option chords remain Meta so readline/zsh navigation
+ * continues to work.
+ */
+export function isNativeOptionText(event) {
+  return !!event.altKey
+    && !event.ctrlKey
+    && !event.metaKey
+    && Array.from(event.key || '').length === 1
+    && (event.key || '').codePointAt(0) > 0x7f;
+}
+
 // ── Shared clipboard-image machinery (daemon WS RPC) ─────────────
 // Every daemon speaks the same clipboard RPCs (websocket.rs):
 //   clipboard_check_image      → clipboard_image_presence {has_image, file_url}
@@ -372,6 +387,7 @@ export function createTerminalInput(deps) {
     if (hooks.guard && hooks.guard(e)) return;
     const ws = getWs();
     if (!ws) return;
+    const nativeOptionText = isNativeOptionText(e);
 
     // Host pre-key interceptors (paste-undo eager clear, bullet preview,
     // staged comments Enter). May fall through without consuming.
@@ -575,9 +591,9 @@ export function createTerminalInput(deps) {
     // Tab) while a selection is active first erases the selection, then
     // inserts the typed character — matching VS Code / textarea behavior.
     // Excludes modified keys so shortcuts like Ctrl+U still pass through.
-    if (term.has_selection() && !e.metaKey && !e.ctrlKey && !e.altKey
+    if (term.has_selection() && !e.metaKey && !e.ctrlKey && (!e.altKey || nativeOptionText)
         && (e.key.length === 1 || e.key === 'Enter' || e.key === 'Tab')) {
-      const bytes = term.handle_key(e.key, e.ctrlKey, e.shiftKey, e.altKey);
+      const bytes = term.handle_key(e.key, e.ctrlKey, e.shiftKey, nativeOptionText ? false : e.altKey);
       replaceSelection(ws, () => {
         if (bytes.length > 0) {
           const b64 = btoa(String.fromCharCode(...bytes));
@@ -623,11 +639,11 @@ export function createTerminalInput(deps) {
 
     // Voice-burst detection: count printable, unmodified keystrokes only.
     // Excludes shortcuts (Ctrl/Alt) and navigation keys.
-    if (!e.ctrlKey && !e.altKey && e.key.length === 1 && hooks.onPrintableKey) {
+    if (!e.ctrlKey && (!e.altKey || nativeOptionText) && e.key.length === 1 && hooks.onPrintableKey) {
       hooks.onPrintableKey();
     }
 
-    const bytes = term.handle_key(e.key, e.ctrlKey, e.shiftKey, e.altKey);
+    const bytes = term.handle_key(e.key, e.ctrlKey, e.shiftKey, nativeOptionText ? false : e.altKey);
     if (window.__keylog !== false) {
       const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(' ');
       const mods = (e.ctrlKey ? 'Ctrl+' : '') + (e.altKey ? 'Alt+' : '') + (e.shiftKey ? 'Shift+' : '');

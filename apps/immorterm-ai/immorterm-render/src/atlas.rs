@@ -10,19 +10,30 @@ use cosmic_text::{
 };
 use immorterm_core::cell::CellAttrs;
 
-/// Target ink width for Unicode dash punctuation inside one terminal cell.
+/// Target ink width for Unicode en/em dash punctuation inside one terminal cell.
 ///
-/// Some monospace fonts (notably Menlo) intentionally give hyphen, en dash,
-/// and em dash nearly identical one-cell outlines. Renderers can preserve the
-/// selected font's stroke and vertical metrics while normalizing horizontal
-/// ink extent to this conventional typographic progression.
+/// Some monospace fonts (notably Menlo) intentionally give en and em dashes
+/// nearly identical one-cell outlines. Renderers preserve the selected font's
+/// stroke and vertical metrics while normalizing only those horizontal ink
+/// extents. Hyphens and the Hebrew maqaf deliberately keep the font's native
+/// metrics. Keep the logical advance at one cell: changing it would
+/// desynchronize the terminal grid from the PTY's cursor and selection
+/// coordinates.
 pub fn dash_ink_ratio(ch: char) -> Option<f64> {
     match ch {
-        '-' | '\u{2010}' | '\u{2011}' => Some(0.45), // hyphen-minus / hyphens
-        '\u{2012}' | '\u{2013}' => Some(0.70),      // figure dash / en dash
-        '\u{2014}' | '\u{2015}' => Some(0.95),      // em dash / horizontal bar
+        '\u{2012}' | '\u{2013}' => Some(0.50), // figure dash / en dash
+        '\u{2014}' | '\u{2015}' => Some(1.00), // em dash / horizontal bar
         _ => None,
     }
+}
+
+/// Quantized target width used by rasterizers at a concrete terminal cell size.
+///
+/// Keeping this calculation beside [`dash_ink_ratio`] gives tests the same
+/// pixel geometry that the browser renderer consumes instead of merely testing
+/// that three floating-point constants happen to be ordered.
+pub fn dash_ink_pixels(ch: char, cell_width: f64) -> Option<u32> {
+    dash_ink_ratio(ch).map(|ratio| (cell_width * ratio).round().max(1.0) as u32)
 }
 
 /// Size of the atlas texture in pixels (2048x2048 = 4MB at R8Unorm).
@@ -1202,18 +1213,31 @@ fn measure_cell(
 
 #[cfg(test)]
 mod dash_tests {
-    use super::dash_ink_ratio;
+    use super::{dash_ink_pixels, dash_ink_ratio};
 
     #[test]
-    fn unicode_dash_family_has_distinct_typographic_widths() {
-        let hyphen = dash_ink_ratio('-').unwrap();
+    fn unicode_en_and_em_dashes_have_distinct_typographic_widths() {
         let en = dash_ink_ratio('\u{2013}').unwrap();
         let em = dash_ink_ratio('\u{2014}').unwrap();
 
-        assert!(hyphen < en);
         assert!(en < em);
         assert_eq!(dash_ink_ratio('\u{2012}'), Some(en));
         assert_eq!(dash_ink_ratio('\u{2015}'), Some(em));
+        assert_eq!(dash_ink_ratio('-'), None);
+        assert_eq!(dash_ink_ratio('\u{2010}'), None);
+        assert_eq!(dash_ink_ratio('\u{2011}'), None);
+        assert_eq!(dash_ink_ratio('\u{05be}'), None);
         assert_eq!(dash_ink_ratio('A'), None);
+    }
+
+    #[test]
+    fn common_terminal_cells_quantize_en_and_em_to_one_to_two() {
+        for cell_width in [8.0, 10.0, 16.0] {
+            let en = dash_ink_pixels('\u{2013}', cell_width).unwrap();
+            let em = dash_ink_pixels('\u{2014}', cell_width).unwrap();
+
+            assert_eq!(em, en * 2, "{cell_width}px cell: {en}, {em}");
+            assert_eq!(em, cell_width as u32);
+        }
     }
 }
