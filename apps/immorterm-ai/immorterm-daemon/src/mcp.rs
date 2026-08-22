@@ -8,8 +8,6 @@ use std::sync::{Mutex, OnceLock};
 
 use anyhow::Result;
 use base64::Engine as _;
-use image::codecs::jpeg::JpegEncoder;
-use image::imageops::FilterType;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -22,9 +20,21 @@ use envoyage::BrowserSession;
 /// The single self-driven browser for this MCP server process (one per Claude
 /// session). Launched lazily on first browser tool use, reused after.
 static BROWSER: OnceLock<Mutex<Option<BrowserSession>>> = OnceLock::new();
+static BROWSER_VISUAL_HINT: OnceLock<Mutex<Option<envoyage::agent_contract::VisualRegion>>> =
+    OnceLock::new();
+static BROWSER_IMAGE_USAGE: OnceLock<Mutex<envoyage::agent_contract::ImageUsage>> =
+    OnceLock::new();
 
 fn browser_slot() -> &'static Mutex<Option<BrowserSession>> {
     BROWSER.get_or_init(|| Mutex::new(None))
+}
+
+fn browser_visual_hint() -> &'static Mutex<Option<envoyage::agent_contract::VisualRegion>> {
+    BROWSER_VISUAL_HINT.get_or_init(|| Mutex::new(None))
+}
+
+fn browser_image_usage() -> &'static Mutex<envoyage::agent_contract::ImageUsage> {
+    BROWSER_IMAGE_USAGE.get_or_init(|| Mutex::new(envoyage::agent_contract::ImageUsage::default()))
 }
 
 /// True once the screencast pump thread has been spawned. The pump lives for
@@ -108,6 +118,7 @@ fn teardown_browser(guard: &mut Option<BrowserSession>) -> Option<u32> {
     drop(session); // Drop → close() stops the screencast + kills the exact PID.
     BROWSER_PAUSED.store(false, std::sync::atomic::Ordering::Relaxed);
     BROWSER_VISIBLE.store(false, std::sync::atomic::Ordering::Relaxed);
+    reset_browser_visual_state();
     // Release the ownership lock only if it is ours (don't clobber a lock
     // another live session took over).
     if envoyage::browser_lock::read()
@@ -626,15 +637,8 @@ immorterm_eval_in_workshop(name="picker", js="root.querySelector('[data-click=he
 
 ## Browser workflow — compact by default
 
-For repeatable product verification, use the repository's Playwright tests first:
-assertions and failure-only traces are more reliable and context-efficient than
-screenshots. Use ImmorTerm's browser tools for exploratory control: read/find the
-page, then act by ref. Open/click/input/key/scroll return compact text and never
-inject screenshots. `immorterm_browser_screenshot` captures nothing by default;
-only `{ "inline": true }` returns one bounded preview, and only when pixel-level
-visual judgment is genuinely necessary. Puppeteer is an acceptable fallback when
-the project already uses it. Use human handoff for login, secrets, permissions,
-payments, or user-browser state.
+The canonical accessibility-first and image-budget rules follow this capability
+index and are supplied directly by the pinned Envoyage runtime.
 "##;
 
 // ─── Session resolution ─────────────────────────────────────────────
@@ -879,6 +883,16 @@ fn sorted_tool_definitions() -> Vec<Value> {
 }
 
 fn tool_definitions() -> Vec<Value> {
+    let mut browser_screenshot_properties = envoyage::agent_contract::screenshot_properties();
+    if let Some(properties) = browser_screenshot_properties.as_object_mut() {
+        properties.insert(
+            "session".to_string(),
+            json!({
+                "type": "string",
+                "description": "ImmorTerm session id. Auto-resolves when a single session is active."
+            }),
+        );
+    }
     let mut defs = vec![
         json!({
             "name": "immorterm_describe",
@@ -1332,13 +1346,10 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "immorterm_browser_screenshot",
-            "description": "Screenshot capture is OFF by default. A call without inline=true returns compact guidance and does not issue Page.captureScreenshot. Set inline=true only when pixel-level visual judgment is genuinely necessary; the result is a bounded compressed preview. Use browser_read_page/browser_find for exploration and Playwright tests first for repeatable verification.",
+            "description": envoyage::agent_contract::SCREENSHOT_DESCRIPTION,
             "inputSchema": {
                 "type": "object",
-                "properties": {
-                    "inline": { "type": "boolean", "description": "Opt in to one bounded inline preview. Defaults to false, which captures and returns no image." },
-                    "session": { "type": "string", "description": "ImmorTerm session id. Auto-resolves when a single session is active." }
-                },
+                "properties": browser_screenshot_properties,
                 "required": []
             }
         }),
@@ -2642,7 +2653,12 @@ fn handle_request(req: &JsonRpcRequest, rt: &tokio::runtime::Runtime) -> JsonRpc
                 // Safe to inject now: the new `im-html` fence requires SOL anchoring
                 // on both opener and closer, so example blocks inside MCP JSON
                 // strings or terminal prose can no longer false-fire the parser.
-                "instructions": format!("{}{}", MCP_INSTRUCTIONS, capability_index())
+                "instructions": format!(
+                    "{}{}\n\n## Canonical browser contract\n{}",
+                    MCP_INSTRUCTIONS,
+                    capability_index(),
+                    envoyage::agent_contract::ACCESSIBILITY_FIRST_INSTRUCTIONS,
+                )
             })),
             ..base
         },
@@ -3880,9 +3896,9 @@ fn is_dead_pipe(msg: &str) -> bool {
         || m.contains("browser exited")
 }
 
-/// Shared body for browser drive tools. Routine actions return compact text;
-/// screenshots require an explicit `inline: true` opt-in and remain bounded.
-/// User presentation is a separate, explicit Browser-workshop path.
+/// Shared body for browser drive tools. Routine actions return compact semantic
+/// diffs with zero image blocks. Visual proof is explicit, file-first, bounded,
+/// and implemented by Envoyage's shared agent contract.
 fn handle_browser_shot(
     tool: &str,
     args: &Value,
@@ -3905,15 +3921,35 @@ fn handle_browser_shot(
             | "immorterm_browser_scroll"
     );
 
-    // A "Mort" cursor event (page CSS-px + action) captured during the action,
-    // and a short narration — both emitted to the panel after the closure.
     let mut cursor: Option<(f64, f64, String)> = None;
     let mut narration: Option<String> = None;
+    let mut screenshot_hint = if tool == "immorterm_browser_screenshot" {
+        browser_visual_hint().lock().ok().and_then(|hint| hint.clone())
+    } else {
+        None
+    };
     let requested_screenshot = tool == "immorterm_browser_screenshot";
-    let include_inline_image = wants_inline_browser_screenshot(tool, args);
+    let include_inline_image = requested_screenshot
+        && args.get("inline").and_then(Value::as_bool).unwrap_or(false);
+    let full_viewport = requested_screenshot
+        && args.get("full_viewport").and_then(Value::as_bool).unwrap_or(false);
+    if full_viewport {
+        screenshot_hint = None;
+    }
+    let capture_requested = requested_screenshot
+        && (full_viewport
+            || include_inline_image
+            || args.get("ref").and_then(Value::as_str).is_some()
+            || screenshot_hint.is_some());
 
-    let (png, title, url, handoff, cursor, narration) =
+    let (png, title, url, handoff, cursor, narration, semantic_diff, visual_hint) =
         with_browser(rt, launch_url, |b| {
+            let before_state = b.semantic_state();
+            let console_before = b.console_log().len();
+            let network_before = b.network_log().len();
+            let mut target_role = String::new();
+            let mut target_name = String::new();
+            let mut visual_hint = None;
             match tool {
                 "immorterm_browser_open" => {
                     let url = args
@@ -3921,9 +3957,24 @@ fn handle_browser_shot(
                         .and_then(|s| s.as_str())
                         .ok_or("'url' is required")?;
                     narration = Some(format!("Opening {url}"));
+                    target_role = "document".to_string();
+                    target_name = url.to_string();
+                    let before = b.page_target_ids();
                     b.navigate(url)?;
+                    b.follow_new_target(&before);
                 }
-                "immorterm_browser_screenshot" => {}
+                "immorterm_browser_screenshot" => {
+                    if let Some(handle) = args.get("ref").and_then(Value::as_str) {
+                        let node = b.resolve_ref(handle)?;
+                        screenshot_hint = Some(envoyage::agent_contract::VisualRegion {
+                            x: node.x,
+                            y: node.y,
+                            width: node.width,
+                            height: node.height,
+                            source: "element",
+                        });
+                    }
+                }
                 "immorterm_browser_click" => {
                     // Snapshot tabs so we can follow a popup this click opens.
                     let before = b.page_target_ids();
@@ -3931,6 +3982,15 @@ fn handle_browser_shot(
                     if let Some(handle) = args.get("ref").and_then(|s| s.as_str()) {
                         // Resolve the ref for the cursor coords + a named narration.
                         if let Ok(node) = b.resolve_ref(handle) {
+                            target_role = node.role.clone();
+                            target_name = node.name.clone();
+                            visual_hint = Some(envoyage::agent_contract::VisualRegion {
+                                x: node.x,
+                                y: node.y,
+                                width: node.width,
+                                height: node.height,
+                                source: "changed_region",
+                            });
                             cursor = Some((node.cx, node.cy, "click".to_string()));
                             let name = if node.name.is_empty() {
                                 handle.to_string()
@@ -3950,6 +4010,9 @@ fn handle_browser_shot(
                             .and_then(|v| v.as_f64())
                             .ok_or("provide 'ref' (from read_page/find) or both 'x' and 'y'")?;
                         cursor = Some((x, y, "click".to_string()));
+                        target_role = "point".to_string();
+                        target_name = format!("({x:.0}, {y:.0})");
+                        visual_hint = Some(cursor_visual_hint(x, y));
                         narration = Some(format!("Clicking ({x:.0}, {y:.0})"));
                         b.click(x, y)?;
                     }
@@ -3965,6 +4028,15 @@ fn handle_browser_shot(
                         .and_then(|s| s.as_str())
                         .ok_or("'value' is required")?;
                     if let Ok(node) = b.resolve_ref(handle) {
+                        target_role = node.role.clone();
+                        target_name = node.name.clone();
+                        visual_hint = Some(envoyage::agent_contract::VisualRegion {
+                            x: node.x,
+                            y: node.y,
+                            width: node.width,
+                            height: node.height,
+                            source: "changed_region",
+                        });
                         cursor = Some((node.cx, node.cy, "type".to_string()));
                         let name = if node.name.is_empty() {
                             handle.to_string()
@@ -3983,6 +4055,8 @@ fn handle_browser_shot(
                         .and_then(|s| s.as_str())
                         .ok_or("'key' is required")?;
                     narration = Some(format!("Pressing {key}"));
+                    target_role = "key".to_string();
+                    target_name = key.to_string();
                     b.key(key)?;
                     settle();
                     b.follow_new_target(&before); // Enter may open a popup / new tab
@@ -3995,6 +4069,10 @@ fn handle_browser_shot(
                     // Scroll dispatches at the viewport center (browser.rs uses the
                     // 1280x800 default window → center 640,400).
                     cursor = Some((640.0, 400.0, "scroll".to_string()));
+                    target_role = "document".to_string();
+                    target_name = if dy >= 0.0 { "scroll down" } else { "scroll up" }.to_string();
+                    let (x, y) = b.cursor_position();
+                    visual_hint = Some(cursor_visual_hint(x, y));
                     narration = Some(format!(
                         "Scrolling {}",
                         if dy >= 0.0 { "down" } else { "up" }
@@ -4013,14 +4091,36 @@ fn handle_browser_shot(
                 None
             };
             let (title, url) = b.current_title_url();
-            // Skip capture on handoff/paused, routine actions, and default calls.
-            let png = if handoff.is_some() || browser_is_paused() || !include_inline_image {
+            let png = if handoff.is_some() || browser_is_paused() || !capture_requested {
                 None
             } else {
                 Some(b.screenshot()?)
             };
-            Ok((png, title, url, handoff, cursor, narration))
+            b.pump_events();
+            let after_state = b.semantic_state();
+            let (console_errors, failed_requests) =
+                recent_browser_failures(b, console_before, network_before);
+            let semantic_diff = if requested_screenshot {
+                None
+            } else {
+                Some(envoyage::agent_contract::semantic_diff(
+                    tool,
+                    &target_role,
+                    &target_name,
+                    &before_state,
+                    &after_state,
+                    console_errors,
+                    failed_requests,
+                ))
+            };
+            Ok((png, title, url, handoff, cursor, narration, semantic_diff, visual_hint))
         })?;
+
+    if let Some(hint) = visual_hint
+        && let Ok(mut stored) = browser_visual_hint().lock()
+    {
+        *stored = Some(hint);
+    }
 
     // Presentation events themselves create/reveal the Browser workshop, so
     // emit them only after the browser has explicitly been shown.
@@ -4047,58 +4147,153 @@ fn handle_browser_shot(
         })]);
     }
 
+    if let Some(diff) = semantic_diff {
+        return Ok(vec![json!({ "type": "text", "text": diff })]);
+    }
+
     let mut content = vec![json!({
         "type": "text",
-        "text": if include_inline_image {
-            format!("🌐 {title} — {url}")
-        } else if requested_screenshot {
-            format!("🌐 {title} — {url}\nNo screenshot was captured or inserted into agent context. Use browser_read_page/browser_find or Playwright for functional verification. Only call immorterm_browser_screenshot with inline=true when pixel-level visual judgment is genuinely necessary.")
-        } else {
-            format!("🌐 {title} — {url}\nNo screenshot was inserted into agent context. Use browser_read_page or browser_find for compact page state.")
-        },
+        "text": format!("🌐 {title} — {url}\nNo screenshot was captured. Request an element crop with ref, use the most recent changed/cursor region, or set full_viewport=true explicitly. Set inline=true only when pixels must enter agent context."),
     })];
     if let Some(png) = png {
-        match bounded_screenshot_content(&png) {
-            Ok(image) => content.push(image),
-            Err(error) => content.push(json!({
-                "type": "text",
-                "text": format!("⚠️ ImmorTerm context guard omitted this screenshot: {error}. Use browser_read_page/browser_find or the Workshop view."),
-            })),
+        let format = args.get("format").and_then(Value::as_str).unwrap_or("jpeg");
+        let max_width = args.get("max_width").and_then(Value::as_u64).unwrap_or(768).clamp(64, 1600) as u32;
+        let max_height = args.get("max_height").and_then(Value::as_u64).unwrap_or(768).clamp(64, 1600) as u32;
+        let quality = args.get("quality").and_then(Value::as_u64).unwrap_or(55).clamp(20, 90) as u8;
+        let visual = envoyage::agent_contract::encode_visual(
+            &png,
+            screenshot_hint.as_ref(),
+            max_width,
+            max_height,
+            quality,
+            format,
+        )?;
+        let usage = browser_image_usage().lock().map(|usage| *usage).unwrap_or_default();
+        if let Some(warning) = envoyage::agent_contract::budget_warning(
+            usage,
+            &visual,
+            envoyage::agent_contract::ImageLimits::from_env(),
+        ) {
+            content.push(json!({ "type": "text", "text": warning }));
+            return Ok(content);
+        }
+        let session = args.get("session").and_then(Value::as_str).unwrap_or("immorterm");
+        let path = write_browser_visual_file(session, &visual)?;
+        let totals = {
+            let mut usage = browser_image_usage().lock().map_err(|_| "browser image usage lock poisoned".to_string())?;
+            usage.count = usage.count.saturating_add(1);
+            usage.pixels = usage.pixels.saturating_add(visual.width as u64 * visual.height as u64);
+            usage.bytes = usage.bytes.saturating_add(visual.bytes.len() as u64);
+            *usage
+        };
+        let mode = if full_viewport {
+            "full_viewport"
+        } else {
+            screenshot_hint.as_ref().map(|hint| hint.source).unwrap_or("viewport")
+        };
+        let receipt = json!({
+            "operation": "immorterm_browser_screenshot",
+            "mode": mode,
+            "path": path,
+            "dimensions": { "width": visual.width, "height": visual.height },
+            "format": visual.format,
+            "bytes": visual.bytes.len(),
+            "inline": include_inline_image,
+            "source": {
+                "width": visual.source_width,
+                "height": visual.source_height,
+                "bytes": base64::engine::general_purpose::STANDARD.decode(&png).map(|bytes| bytes.len()).unwrap_or(0)
+            },
+            "session_totals": { "count": totals.count, "pixels": totals.pixels, "bytes": totals.bytes },
+        });
+        eprintln!("envoyage_visual_telemetry={receipt}");
+        content[0] = json!({ "type": "text", "text": receipt.to_string() });
+        if include_inline_image {
+            let data = base64::engine::general_purpose::STANDARD.encode(&visual.bytes);
+            if data.len() <= MAX_INLINE_IMAGE_BASE64_BYTES {
+                content.push(json!({
+                    "type": "image",
+                    "data": data,
+                    "mimeType": if visual.format == "jpeg" { "image/jpeg" } else { "image/png" },
+                }));
+            } else {
+                content.push(json!({
+                    "type": "text",
+                    "text": format!("⚠️ Inline image omitted because {} base64 bytes exceed the hard {}-byte inline ceiling. The bounded file remains at {}.", data.len(), MAX_INLINE_IMAGE_BASE64_BYTES, path.display()),
+                }));
+            }
         }
     }
     Ok(content)
 }
 
-fn wants_inline_browser_screenshot(tool: &str, args: &Value) -> bool {
-    tool == "immorterm_browser_screenshot"
-        && args.get("inline").and_then(Value::as_bool).unwrap_or(false)
+fn cursor_visual_hint(x: f64, y: f64) -> envoyage::agent_contract::VisualRegion {
+    envoyage::agent_contract::VisualRegion {
+        x: (x - 180.0).max(0.0),
+        y: (y - 140.0).max(0.0),
+        width: 360.0,
+        height: 280.0,
+        source: "cursor",
+    }
 }
 
-fn bounded_screenshot_content(png_base64: &str) -> Result<Value, String> {
-    if png_base64.len() <= MAX_INLINE_IMAGE_BASE64_BYTES {
-        return Ok(json!({ "type": "image", "data": png_base64, "mimeType": "image/png" }));
+fn recent_browser_failures(
+    browser: &BrowserSession,
+    console_before: usize,
+    network_before: usize,
+) -> (Vec<String>, Vec<String>) {
+    let console = browser.console_log();
+    let network = browser.network_log();
+    let console_errors = console[console_before.min(console.len())..]
+        .iter()
+        .filter(|line| line.starts_with("error:"))
+        .take(8)
+        .cloned()
+        .collect();
+    let failed_requests = network[network_before.min(network.len())..]
+        .iter()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("failed")
+                || lower.contains("net::err")
+                || lower.contains(" 4")
+                || lower.contains(" 5")
+        })
+        .take(8)
+        .cloned()
+        .collect();
+    (console_errors, failed_requests)
+}
+
+fn write_browser_visual_file(
+    session: &str,
+    visual: &envoyage::agent_contract::EncodedVisual,
+) -> Result<std::path::PathBuf, String> {
+    let dir = std::env::temp_dir().join("envoyage").join("screenshots");
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("create screenshot directory: {error}"))?;
+    let safe_session: String = session
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' { ch } else { '_' })
+        .collect();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let extension = if visual.format == "jpeg" { "jpg" } else { "png" };
+    let path = dir.join(format!("{safe_session}-{stamp}.{extension}"));
+    std::fs::write(&path, &visual.bytes)
+        .map_err(|error| format!("write screenshot: {error}"))?;
+    Ok(path)
+}
+
+fn reset_browser_visual_state() {
+    if let Ok(mut hint) = browser_visual_hint().lock() {
+        *hint = None;
     }
-    let source = base64::engine::general_purpose::STANDARD.decode(png_base64)
-        .map_err(|error| format!("decode screenshot for bounded preview: {error}"))?;
-    let image = image::load_from_memory(&source)
-        .map_err(|error| format!("decode screenshot pixels for bounded preview: {error}"))?;
-    let source_width = image.width().max(1);
-    let source_height = image.height().max(1);
-    const CANDIDATES: &[(u32, u8)] = &[(768, 55), (640, 45), (512, 35), (384, 25)];
-    for (max_width, quality) in CANDIDATES {
-        let width = source_width.min(*max_width);
-        let height = ((source_height as u64 * width as u64) / source_width as u64)
-            .max(1).min(u32::MAX as u64) as u32;
-        let preview = image.resize(width, height, FilterType::Triangle).to_rgb8();
-        let mut encoded = Vec::new();
-        JpegEncoder::new_with_quality(&mut encoded, *quality).encode_image(&preview)
-            .map_err(|error| format!("encode bounded screenshot preview: {error}"))?;
-        let data = base64::engine::general_purpose::STANDARD.encode(encoded);
-        if data.len() <= MAX_INLINE_IMAGE_BASE64_BYTES {
-            return Ok(json!({ "type": "image", "data": data, "mimeType": "image/jpeg" }));
-        }
+    if let Ok(mut usage) = browser_image_usage().lock() {
+        *usage = envoyage::agent_contract::ImageUsage::default();
     }
-    Err(format!("preview remains above the hard {MAX_INLINE_IMAGE_BASE64_BYTES}-byte inline-image ceiling"))
 }
 
 /// Brief pause after an interaction so the page can react before screenshot.
@@ -4171,10 +4366,32 @@ fn handle_browser_tabs_switch(
         .and_then(|s| s.as_str())
         .map(String::from);
     with_browser(rt, None, |b| {
+        let before = b.semantic_state();
+        let console_before = b.console_log().len();
+        let network_before = b.network_log().len();
         b.tabs_switch(index, target_id.as_deref())?;
         let (title, url, nodes) = b.snapshot(true)?;
-        Ok(envoyage::browser::render_ax_listing(
-            &title, &url, &nodes, true,
+        b.pump_events();
+        let after = b.semantic_state();
+        let (console_errors, failed_requests) =
+            recent_browser_failures(b, console_before, network_before);
+        let target = target_id
+            .as_deref()
+            .map(str::to_string)
+            .or_else(|| index.map(|value| value.to_string()))
+            .unwrap_or_default();
+        let diff = envoyage::agent_contract::semantic_diff(
+            "immorterm_browser_tabs_switch",
+            "tab",
+            &target,
+            &before,
+            &after,
+            console_errors,
+            failed_requests,
+        );
+        Ok(format!(
+            "{diff}\n{}",
+            envoyage::browser::render_ax_listing(&title, &url, &nodes, true)
         ))
     })
 }
@@ -4200,10 +4417,11 @@ fn handle_browser_close() -> Result<String, String> {
     let mut guard = browser_slot()
         .lock()
         .map_err(|_| "browser lock poisoned".to_string())?;
-    Ok(match teardown_browser(&mut guard) {
+    let result = match teardown_browser(&mut guard) {
         Some(pid) => format!("Browser closed (pid {pid})."),
         None => "No browser session was open.".to_string(),
-    })
+    };
+    Ok(result)
 }
 
 /// Explicitly present the already-open browser to the user. Opening a browser
@@ -7644,16 +7862,30 @@ mod tests {
             .find(|tool| tool["name"] == "immorterm_browser_screenshot")
             .expect("browser_screenshot tool definition");
         assert_eq!(screenshot["inputSchema"]["properties"]["inline"]["type"], "boolean");
-        assert!(screenshot["description"].as_str().unwrap().contains("OFF by default"));
+        assert_eq!(screenshot["inputSchema"]["properties"]["full_viewport"]["default"], false);
+        assert_eq!(screenshot["inputSchema"]["properties"]["format"]["default"], "jpeg");
+        assert_eq!(screenshot["inputSchema"]["properties"]["session"]["type"], "string");
+        assert!(screenshot["description"].as_str().unwrap().contains("Explicit visual proof only"));
         assert!(open_description.contains("Playwright tests first"));
     }
 
     #[test]
     fn browser_screenshot_pixels_require_explicit_opt_in() {
-        assert!(!wants_inline_browser_screenshot("immorterm_browser_screenshot", &json!({})));
-        assert!(!wants_inline_browser_screenshot("immorterm_browser_screenshot", &json!({ "inline": false })));
-        assert!(wants_inline_browser_screenshot("immorterm_browser_screenshot", &json!({ "inline": true })));
-        assert!(!wants_inline_browser_screenshot("immorterm_browser_click", &json!({ "inline": true })));
+        let tools = tool_definitions();
+        let screenshot = tools.iter()
+            .find(|tool| tool["name"] == "immorterm_browser_screenshot")
+            .expect("browser_screenshot tool definition");
+        assert_eq!(screenshot["inputSchema"]["properties"]["inline"]["default"], false);
+        for ordinary in [
+            "immorterm_browser_open",
+            "immorterm_browser_click",
+            "immorterm_browser_form_input",
+            "immorterm_browser_key",
+            "immorterm_browser_scroll",
+        ] {
+            let tool = tools.iter().find(|tool| tool["name"] == ordinary).unwrap();
+            assert!(tool["inputSchema"]["properties"].get("inline").is_none());
+        }
     }
 
     #[test]
@@ -7675,7 +7907,7 @@ mod tests {
     }
 
     #[test]
-    fn large_png_becomes_bounded_jpeg_preview() {
+    fn shared_envoyage_encoder_bounds_large_visual_proof() {
         use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
         use std::io::Cursor;
         let raster = ImageBuffer::from_fn(1024, 768, |x, y| {
@@ -7686,9 +7918,28 @@ mod tests {
         DynamicImage::ImageRgb8(raster).write_to(&mut Cursor::new(&mut png), ImageFormat::Png).unwrap();
         let png = base64::engine::general_purpose::STANDARD.encode(png);
         assert!(png.len() > MAX_INLINE_IMAGE_BASE64_BYTES);
-        let preview = bounded_screenshot_content(&png).unwrap();
-        assert_eq!(preview["mimeType"], "image/jpeg");
-        assert!(preview["data"].as_str().unwrap().len() <= MAX_INLINE_IMAGE_BASE64_BYTES);
+        let preview = envoyage::agent_contract::encode_visual(
+            &png,
+            Some(&envoyage::agent_contract::VisualRegion {
+                x: 100.0,
+                y: 100.0,
+                width: 400.0,
+                height: 300.0,
+                source: "element",
+            }),
+            512,
+            512,
+            45,
+            "jpeg",
+        ).unwrap();
+        assert_eq!(preview.format, "jpeg");
+        assert!(preview.width <= 512 && preview.height <= 512);
+        assert!(preview.bytes.len() < base64::engine::general_purpose::STANDARD.decode(&png).unwrap().len());
+        assert!(envoyage::agent_contract::budget_warning(
+            envoyage::agent_contract::ImageUsage::default(),
+            &preview,
+            envoyage::agent_contract::ImageLimits { count: 0, pixels: u64::MAX, bytes: u64::MAX },
+        ).is_some());
     }
 
     #[test]
