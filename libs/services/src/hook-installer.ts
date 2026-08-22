@@ -6433,114 +6433,36 @@ Recover the last 5 meaningful user requests, the last substantive assistant hand
  */
 function generateAskCommand(): string {
   return `---
-description: Chat with a previous session — ask questions, get answers from its perspective. Supports follow-ups, session switching, and exit.
+description: Explicit interactive /immorterm:ask workflow for questioning a specific prior or live session. Potentially loads cross-session material; do not invoke for ordinary requests to inspect, summarize, or review another session.
 ---
 
-# /immorterm:ask — Interactive Session Chat
+# /immorterm:ask — Explicit Cross-Session Chat
 
-Start an interactive conversation with a previous AI coding session. A subagent loaded with that session's context answers questions from its first-person perspective.
+Use this command only when the user explicitly invokes /immorterm:ask or asks to open an interactive conversation with a named prior session.
 
----
+Do not use it for “see this agent’s work,” handoffs, status summaries, code archaeology, or references to another session. Handle those with bounded ImmorTerm tools instead.
 
-## Step 1: Session Selection
+## Bounded evidence ladder
 
-Call \`list_sessions(hours_ago=72)\` to get recent sessions.
+Start with the session’s existing At-a-glance summary. Load additional evidence only when the question requires it:
 
-Sessions are sorted by \`last_active\` (most recent activity first). Present the last 10 sessions to the user as a formatted list, then use **AskUserQuestion** to let them pick:
-- Show up to 4 sessions as options
-- The option **label** uses \`title\` if available, otherwise \`terminal_name\`: "My Session Title (5m ago)" or "terminal_name (2h ago)". The time shown is relative to \`last_active\`. If \`terminal_status\` is \`"shelved"\`, append \`[SHELVED]\`.
-- The option **description** includes: terminal_name (if different from label), status, edit count, and summary snippet. Example: "✳ Claude Code · alive · 41 edits — Fixed three deployment bugs"
-- Include a "Done" option to exit immediately
-- Do NOT include session numbers (#N) — they're irrelevant here
+1. Changed files: \`list_code_changes\` scoped to the session.
+2. A specific file or rationale: \`explain_change\` or one targeted \`get_code_diff\`.
+3. Decisions/facts: targeted \`search_memory\` scoped by \`immorterm_id\`.
+4. Landed work: \`list_git_commits\` scoped to the session or time range.
+5. Live session question: use the supported correlated ImmorTerm messaging/Bridge path and return the actual reply.
 
-If the user picks "Done", say "No problem — run /immorterm:ask anytime to chat with a session." and stop.
+Never call \`get_session_context\`, replay conversation turns, or load every code change by default. Full historical loading requires the user to explicitly ask for full context or conversation replay and should include a warning that it can be large.
 
-Store the selected session's \`session_id\` and terminal name for display. Initialize an empty conversation log.
+## Interactive behavior
 
-**IMPORTANT**: Do NOT load session context yourself — the subagent does that.
+- Resolve the named session and show its compact At-a-glance summary.
+- Ask what the user wants to know only when their question is not already clear.
+- For a live session, prefer a real question/reply over simulating that agent’s voice from memory.
+- For an ended session, answer from the bounded evidence ladder and label it as recorded session evidence, not a live reply.
+- Keep each returned answer concise and cite the evidence type used.
 
-## Step 2: Question Loop
-
-Use **AskUserQuestion** to ask: "What would you like to ask this session?"
-- Option 1: "Change session" — description: "Switch to a different session"
-- Option 2: "Done" — description: "Exit /ask"
-- The user types their question via the "Other" free-text input
-- If they pick "Change session", reset the conversation log and go back to Step 1
-- If they pick "Done", say "Session chat ended. Run /immorterm:ask anytime to chat with another session." and stop
-
-## Step 3: Dispatch to Subagent
-
-Spawn a **Task** with these parameters:
-- \`subagent_type\`: "general-purpose"
-- \`model\`: "sonnet"
-- \`max_turns\`: 8
-
-The prompt MUST include:
-
-\`\`\`
-You are the voice of a previous AI coding session. You answer questions
-as if you ARE that session — speak in first person ("I did...", "I decided...").
-
-## Step 1: Load your session context
-
-Call these MCP tools to load your memory:
-
-1. get_session_context(session_id="<SESSION_ID>") — loads your summary, facts, and decisions
-2. list_code_changes(session_id="<SESSION_ID>") — loads the files you modified
-
-If these tools are not directly available, use ToolSearch to find and load them:
-- ToolSearch(query="+immorterm-memory get_session_context")
-- ToolSearch(query="+immorterm-memory list_code_changes")
-
-## Step 2: Understand the question and load relevant diffs
-
-Read the question below. If it's about specific code changes, also call:
-get_code_diff(change_id="<relevant_change_id>") for the relevant files.
-
-## Step 3: Answer
-
-Answer the question using the context you loaded. If the context doesn't contain
-enough information, say so honestly and suggest what the user could look into.
-
-Keep your answer focused and concise (2-4 paragraphs max).
-
----
-
-PRIOR CONVERSATION (for continuity):
-<CONVERSATION_LOG_OR_NONE>
-
-CURRENT QUESTION:
-<THE_QUESTION>
-\`\`\`
-
-Replace \`<SESSION_ID>\` with the actual session_id, \`<CONVERSATION_LOG_OR_NONE>\` with the formatted Q&A log (or "None — this is the first question." if empty), and \`<THE_QUESTION>\` with the user's question.
-
-**Format the conversation log** as:
-\`\`\`
-Q1: <question>
-A1: <answer summary, max 2-3 sentences>
-
-Q2: <question>
-A2: <answer summary>
-\`\`\`
-
-When the subagent returns, present the answer:
-\`\`\`
-## Session #N says:
-
-<subagent's answer>
-\`\`\`
-
-Then append the Q&A pair to the conversation log (keep answers trimmed to ~2-3 sentences for the log).
-
-Then go back to **Step 2** — the same AskUserQuestion with "Change session" / "Done" / free-text lets the user ask follow-ups, switch, or exit.
-
-## Important Notes
-
-- The conversation log accumulates across follow-ups within the same session, giving the subagent continuity
-- Each subagent invocation is independent — it loads context fresh from MCP tools
-- The main conversation stays light: only session_id + compact Q&A log
-- If a subagent fails to load context, tell the user and suggest trying /immorterm:recall instead
+If correlated live messaging is unavailable, report that plainly. Do not silently replace a live question with bulk history loading.
 `;
 }
 
@@ -7905,10 +7827,28 @@ function syncCodexMcpServers(enabled: boolean): void {
  * uses global skills and a stable ImmorTerm terminal ID; Claude's command stays
  * on the shared command generator unchanged.
  */
-const CODEX_SKILLS: ReadonlyArray<{ dir: string; name: string; generator: () => string }> = [
+const CODEX_SKILLS: ReadonlyArray<{
+  dir: string;
+  name: string;
+  generator: () => string;
+  allowImplicitInvocation?: boolean;
+}> = [
   { dir: 'immorterm-recall', name: 'immorterm-recall', generator: generateCodexRecallSkill },
-  { dir: 'immorterm-ask', name: 'immorterm-ask', generator: generateAskCommand },
+  {
+    dir: 'immorterm-ask',
+    name: 'immorterm-ask',
+    generator: generateAskCommand,
+    allowImplicitInvocation: false,
+  },
 ];
+
+function codexSkillMetadata(
+  name: string,
+  allowImplicitInvocation: boolean | undefined
+): string | null {
+  if (allowImplicitInvocation === undefined) return null;
+  return `interface:\n  display_name: "ImmorTerm Ask"\n  short_description: "Explicit cross-session interactive chat"\n  default_prompt: "Use $${name} to open a bounded interactive chat with a specific session."\n\npolicy:\n  allow_implicit_invocation: ${allowImplicitInvocation}\n`;
+}
 
 /**
  * Install (or remove) ImmorTerm's skills in the user's Codex home.
@@ -7950,7 +7890,7 @@ export function syncCodexSkills(enabled: boolean): void {
     // ~/.codex for a user who has never run Codex would be presumptuous.
     if (!fs.existsSync(codexHome)) return;
 
-    for (const { dir, name, generator } of CODEX_SKILLS) {
+    for (const { dir, name, generator, allowImplicitInvocation } of CODEX_SKILLS) {
       // Claude's command files already open with `---\ndescription: …\n---`.
       // Codex additionally wants a `name`, so splice it into that same block
       // rather than maintaining a second copy of the body.
@@ -7966,6 +7906,19 @@ export function syncCodexSkills(enabled: boolean): void {
       const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
       if (existing !== withName) {
         fs.writeFileSync(file, withName);
+      }
+
+      const metadata = codexSkillMetadata(name, allowImplicitInvocation);
+      if (metadata !== null) {
+        const agentsDir = path.join(target, 'agents');
+        const metadataFile = path.join(agentsDir, 'openai.yaml');
+        fs.mkdirSync(agentsDir, { recursive: true });
+        const existingMetadata = fs.existsSync(metadataFile)
+          ? fs.readFileSync(metadataFile, 'utf8')
+          : null;
+        if (existingMetadata !== metadata) {
+          fs.writeFileSync(metadataFile, metadata);
+        }
       }
     }
   } catch (e) {
