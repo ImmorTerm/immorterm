@@ -7679,7 +7679,10 @@ const CODEX_ENABLED_TOOLS: Readonly<Record<string, readonly string[]>> = {
     'immorterm_draw_html', 'immorterm_clear_ai_layer', 'immorterm_open_workshop',
     'immorterm_eval_in_workshop', 'immorterm_list_workshops', 'immorterm_close_workshop',
     // plans + sessions
-    'immorterm_plan', 'immorterm_list_sessions',
+    'immorterm_plan', 'immorterm_list_sessions', 'immorterm_project_sessions',
+    // agent-to-agent coordination — keep visible so Interactive send is not misused
+    'immorterm_contact_session', 'immorterm_message_status',
+    'immorterm_acknowledge_message', 'immorterm_reply_to_message',
   ],
   'immorterm-memory': [
     'search_memory', 'add_memories', 'get_session_context', 'get_memory_context',

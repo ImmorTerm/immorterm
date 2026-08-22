@@ -1627,12 +1627,14 @@ fn normalize_project_sessions(mut sessions: Vec<Value>, project_id: &str) -> Vec
             let last_seen_at = heartbeat
                 .or(last_activity)
                 .unwrap_or_else(|| created_at.saturating_mul(1000));
-            let protocol_version = if heartbeat.is_some() { 1 } else { 0 };
-            let capabilities = if protocol_version == 1 {
-                json!(["external_messages.v1", "agent_ack.v1", "agent_reply.v1"])
-            } else {
-                json!([])
-            };
+            // Heartbeat means alive, not protocol-compatible. Persistent
+            // daemons can outlive binary upgrades, so only advertise the
+            // capabilities stamped by the exact running daemon.
+            let protocol_version = s["bridge_protocol_version"].as_u64().unwrap_or(0);
+            let capabilities = s["bridge_capabilities"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
             let status = if !alive {
                 "offline"
             } else if s["is_working"].as_bool().unwrap_or(false) {
@@ -2295,6 +2297,61 @@ pub async fn send(headers: HeaderMap, Json(request): Json<Value>) -> Response {
     send_authorized(auth, request).await
 }
 
+fn message_snapshot_for_principal(
+    store: &Value,
+    message_id: &str,
+    principal_id: &str,
+) -> Option<Value> {
+    let message = store["messages"]
+        .as_array()?
+        .iter()
+        .find(|message| {
+            message["message_id"] == message_id
+                && message["installation_id"].as_str() == Some(principal_id)
+        })?
+        .clone();
+    let replies = store["replies"]
+        .as_array()
+        .map(|replies| {
+            replies
+                .iter()
+                .filter(|reply| reply["message_id"] == message_id)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Some(json!({"message":message,"replies":replies}))
+}
+
+pub async fn message_status(
+    headers: HeaderMap,
+    Path(message_id): Path<String>,
+) -> Response {
+    let auth = match authenticate(&headers) {
+        Ok(auth) => auth,
+        Err(error) => return auth_error(&error).into_response(),
+    };
+    if !auth.permits(MESSAGE_SEND) {
+        return bridge_response(
+            StatusCode::FORBIDDEN,
+            json!({"error":"operation_not_allowed"}),
+        );
+    }
+    let project_id = match resolve_project(&auth, None) {
+        Ok(project_id) => project_id,
+        Err(error) => return auth_error(error).into_response(),
+    };
+    if !valid_id(&message_id) {
+        return bridge_response(StatusCode::BAD_REQUEST, json!({"error":"invalid_message_id"}));
+    }
+    let store = load_store(project_id);
+    let Some(snapshot) = message_snapshot_for_principal(&store, &message_id, auth.principal_id())
+    else {
+        return bridge_response(StatusCode::NOT_FOUND, json!({"error":"message_not_found"}));
+    };
+    bridge_response(StatusCode::OK, snapshot)
+}
+
 async fn send_authorized(auth: AuthContext, request: Value) -> Response {
     if !auth.permits(MESSAGE_SEND) {
         return bridge_response(
@@ -2874,6 +2931,7 @@ pub async fn contract(headers: HeaderMap) -> (StatusCode, Json<Value>) {
             "identity":"GET /api/v1/bridge/identity (authenticated non-secret credential claims)",
             "directory":"GET /api/v1/bridge/directory (project derived from installation credential)",
             "send":"POST /api/v1/bridge/messages",
+            "message_status":"GET /api/v1/bridge/messages/{message_id}",
             "cancel":"POST /api/v1/bridge/messages/{message_id}/cancel",
             "acknowledge":"POST /api/v1/bridge/messages/{message_id}/ack (receiving daemon receipt only)",
             "reply":"POST /api/v1/bridge/messages/{message_id}/reply",
@@ -2910,6 +2968,45 @@ mod tests {
         assert!(valid_id("794e3fa2-f27d-41b6-9c67-ec1ef7b06301"));
         assert!(!valid_id("../session"));
         assert!(!valid_id("x; rm"));
+    }
+
+    #[test]
+    fn heartbeat_does_not_invent_bridge_capabilities() {
+        let legacy = json!({
+            "owner_project_id":"project-1", "window_id":"legacy-1",
+            "name":"legacy", "alive":true, "heartbeat_at":1234
+        });
+        let current = json!({
+            "owner_project_id":"project-1", "window_id":"current-1",
+            "name":"current", "alive":true, "heartbeat_at":1234,
+            "bridge_protocol_version":1,
+            "bridge_capabilities":["external_messages.v1","agent_ack.v1","agent_reply.v1"]
+        });
+        let sessions = normalize_project_sessions(vec![legacy, current], "project-1");
+        assert_eq!(sessions[0]["protocol_version"], 0);
+        assert_eq!(sessions[0]["capabilities"], json!([]));
+        assert_eq!(sessions[1]["protocol_version"], 1);
+        assert_eq!(
+            sessions[1]["capabilities"],
+            json!(["external_messages.v1", "agent_ack.v1", "agent_reply.v1"])
+        );
+    }
+
+    #[test]
+    fn message_status_is_scoped_to_the_sending_agent() {
+        let store = json!({
+            "messages":[
+                {"message_id":"msg-1","installation_id":"agent-source","state":"replied"}
+            ],
+            "replies":[
+                {"message_id":"msg-1","reply_id":"reply-1","message":"done"},
+                {"message_id":"msg-2","reply_id":"reply-2","message":"unrelated"}
+            ]
+        });
+        let snapshot = message_snapshot_for_principal(&store, "msg-1", "agent-source")
+            .expect("sender can inspect its message");
+        assert_eq!(snapshot["replies"].as_array().unwrap().len(), 1);
+        assert!(message_snapshot_for_principal(&store, "msg-1", "agent-other").is_none());
     }
     #[test]
     fn message_states_are_monotonic() {

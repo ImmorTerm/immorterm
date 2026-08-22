@@ -2049,6 +2049,10 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                                 recovered.pid = std::process::id();
                                 recovered.ws_port = if state.ws_port > 0 { Some(state.ws_port) } else { None };
                                 recovered.ai_session_id = state.claude.session_id.clone();
+                                recovered.bridge_protocol_version =
+                                    crate::registry::BRIDGE_PROTOCOL_VERSION;
+                                recovered.bridge_capabilities =
+                                    crate::registry::bridge_capabilities();
                                 if !state.title.is_empty() {
                                     recovered.title = state.title.clone();
                                 }
@@ -2109,6 +2113,8 @@ async fn run_event_loop(mut state: SessionState, socket_path: PathBuf) -> Result
                                             .unwrap_or_default()
                                             .as_millis() as u64,
                                     ),
+                                    bridge_protocol_version: crate::registry::BRIDGE_PROTOCOL_VERSION,
+                                    bridge_capabilities: crate::registry::bridge_capabilities(),
                                     owner_project_dir: if owner.owner_dir.is_empty() { None } else { Some(owner.owner_dir) },
                                     owner_project_id,
                                     owner_project_name,

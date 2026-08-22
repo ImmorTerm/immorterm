@@ -937,6 +937,16 @@ pub struct RegistryEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heartbeat_at: Option<u64>,
 
+    /// Version of the daemon-side Session Bridge IPC contract. A heartbeat
+    /// proves liveness only; it must never be treated as proof that an older
+    /// persistent daemon understands external-message requests.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub bridge_protocol_version: u32,
+
+    /// Bridge operations implemented by this exact running daemon.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bridge_capabilities: Vec<String>,
+
     /// Stable owner project directory. Resolved at spawn from
     /// $SCREEN_PROJECT_DIR via `git rev-parse --git-common-dir`: if the
     /// spawn dir is a git worktree, this is the parent project root. Never
@@ -965,6 +975,20 @@ pub struct RegistryEntry {
     /// trunk and worktrees. `None` when the daemon is on the trunk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+pub const BRIDGE_PROTOCOL_VERSION: u32 = 1;
+
+pub fn bridge_capabilities() -> Vec<String> {
+    vec![
+        "external_messages.v1".into(),
+        "agent_ack.v1".into(),
+        "agent_reply.v1".into(),
+    ]
 }
 
 /// The full registry state.
@@ -1694,6 +1718,8 @@ pub fn register_session(name: &str, shell: &str, logfile: Option<&str>) {
                 .unwrap_or_default()
                 .as_millis() as u64,
         ),
+        bridge_protocol_version: BRIDGE_PROTOCOL_VERSION,
+        bridge_capabilities: bridge_capabilities(),
         owner_project_dir: if owner.owner_dir.is_empty() {
             None
         } else {
@@ -2514,6 +2540,8 @@ mod registry_d_tests {
             "is_working": true,
             "last_activity_at": 1786705000123_u64,
             "heartbeat_at": 1786705000456_u64,
+            "bridge_protocol_version": 1,
+            "bridge_capabilities": ["external_messages.v1", "agent_ack.v1", "agent_reply.v1"],
             "owner_project_dir": "/tmp/proj",
             "owner_project_id": "proj-uuid-1",
             "owner_project_name": "proj",
