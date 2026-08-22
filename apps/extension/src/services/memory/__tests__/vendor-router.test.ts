@@ -400,6 +400,16 @@ describe('Phase A T2 — vendor-router (writeAllVendorConfigs)', () => {
           expect(body.match(/^# ImmorTerm Recall/gm)).toHaveLength(1);
         }
       }
+
+      const askMetadata = fs.readFileSync(
+        path.join(codexHome, 'skills', 'immorterm-ask', 'agents', 'openai.yaml'),
+        'utf8'
+      );
+      expect(askMetadata).toContain('allow_implicit_invocation: false');
+      expect(askMetadata).toContain('Explicit cross-session interactive chat');
+      expect(
+        fs.existsSync(path.join(codexHome, 'skills', 'immorterm-recall', 'agents', 'openai.yaml'))
+      ).toBe(false);
     });
 
     it('does not change the Claude Code recall command', () => {
