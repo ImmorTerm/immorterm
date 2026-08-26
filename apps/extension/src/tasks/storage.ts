@@ -16,14 +16,17 @@ const TASKS_DIR = path.join(os.homedir(), '.immorterm', 'tasks');
 
 export class TaskStorage extends EventEmitter {
   private filePath: string;
+  private tasksDir: string;
   private tasks: Task[] = [];
   private watcher: fs.FSWatcher | null = null;
   private writeInProgress = false;
 
-  constructor(projectId: string) {
+  constructor(projectId: string, legacyProjectIds: string[] = [], tasksDir = TASKS_DIR) {
     super();
-    this.filePath = path.join(TASKS_DIR, `${projectId}.json`);
+    this.tasksDir = tasksDir;
+    this.filePath = path.join(this.tasksDir, `${projectId}.json`);
     this.ensureDir();
+    this.importLegacyProjectFiles(legacyProjectIds);
     this.load();
     this.watchFile();
   }
@@ -179,7 +182,47 @@ export class TaskStorage extends EventEmitter {
   // ── Persistence ─────────────────────────────────────────────
 
   private ensureDir(): void {
-    try { fs.mkdirSync(TASKS_DIR, { recursive: true }); } catch { /* exists */ }
+    try { fs.mkdirSync(this.tasksDir, { recursive: true }); } catch { /* exists */ }
+  }
+
+  /**
+   * Losslessly import tasks written under the old remote-derived project id.
+   * Canonical records win on duplicate IDs. The old file remains as a recovery
+   * copy, which also avoids a destructive migration while older clients exist.
+   */
+  private importLegacyProjectFiles(legacyProjectIds: string[]): void {
+    const read = (filePath: string): Task[] => {
+      try {
+        const data: TaskFile = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        return data.version === 1 && Array.isArray(data.tasks) ? data.tasks : [];
+      } catch {
+        return [];
+      }
+    };
+
+    const canonical = read(this.filePath);
+    const known = new Set(canonical.map(task => task.id));
+    let changed = !fs.existsSync(this.filePath);
+    for (const legacyProjectId of new Set(legacyProjectIds)) {
+      if (!legacyProjectId || path.basename(legacyProjectId) !== legacyProjectId) continue;
+      const legacyPath = path.join(this.tasksDir, `${legacyProjectId}.json`);
+      if (legacyPath === this.filePath || !fs.existsSync(legacyPath)) continue;
+      for (const task of read(legacyPath)) {
+        if (known.has(task.id)) continue;
+        canonical.push(task);
+        known.add(task.id);
+        changed = true;
+      }
+    }
+    if (!changed) return;
+
+    const tmpPath = this.filePath + '.tmp';
+    try {
+      fs.writeFileSync(tmpPath, JSON.stringify({ version: 1, tasks: canonical }, null, 2));
+      fs.renameSync(tmpPath, this.filePath);
+    } catch (err) {
+      console.error('TaskStorage: failed to import legacy project tasks', err);
+    }
   }
 
   private load(): void {
