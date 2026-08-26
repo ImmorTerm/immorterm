@@ -117,6 +117,7 @@ vi.mock('../services/memory', () => ({
   isMemoryEnabled: vi.fn().mockReturnValue(false),
   isGraphEnabled: vi.fn().mockReturnValue(false),
   getStableProjectId: vi.fn().mockReturnValue('mock-project-id'),
+  getLegacyTaskProjectIds: vi.fn().mockReturnValue([]),
 }));
 
 // Mock @immorterm/menu-data
