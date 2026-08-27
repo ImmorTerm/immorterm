@@ -698,6 +698,7 @@ fn recall_codex(uuid: Option<&str>) -> Result<()> {
     if which_agent("codex").is_none() {
         return Ok(());
     }
+    sanitize_codex_mcp_config();
     clear_viewport_before_handoff();
     match uuid {
         Some(id) if codex_rollout_exists(id) => launch_agent("codex", &["resume", id]),
@@ -705,6 +706,91 @@ fn recall_codex(uuid: Option<&str>) -> Result<()> {
         // `--last`, which could reattach a session from an unrelated project.
         _ => launch_agent("codex", &[]),
     }
+}
+
+/// Repair ImmorTerm's MCP server tables in `$CODEX_HOME/config.toml` before
+/// handing the window to Codex.
+///
+/// The ChatGPT desktop app's external-agent sync imports Claude Code configs
+/// and merges the project `.mcp.json`'s `immorterm-memory` — a streamable-HTTP
+/// `url` — on top of the stdio entry ImmorTerm registers via `codex mcp add`.
+/// A table carrying both `command` and `url` fails Codex's transport
+/// validation ("invalid transport in `mcp_servers.immorterm-memory`"), and
+/// every session load or resume dies until something rewrites the file. The
+/// extension's hook install already repairs it, but only on activation; this
+/// is the chokepoint every ImmorTerm-launched Codex passes through, so the
+/// broken window can never reach the user no matter when the importer ran.
+///
+/// Line-based on purpose: the file holds auth-adjacent settings and trust
+/// state we do not model, so we only ever delete HTTP-transport keys inside
+/// the two tables ImmorTerm itself owns. Fail-soft: on any error the file is
+/// left untouched and the launch proceeds.
+fn sanitize_codex_mcp_config() {
+    let home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::dirs_home().join(".codex"));
+    let path = home.join("config.toml");
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return;
+    };
+    let Some(fixed) = strip_http_keys_from_owned_stdio_tables(&raw) else {
+        return;
+    };
+    // tmp + rename so a concurrent Codex launch never reads a half-written file.
+    let tmp = home.join("config.toml.immorterm-sane");
+    if fs::write(&tmp, &fixed).is_ok() {
+        let _ = fs::rename(&tmp, &path);
+    }
+}
+
+/// Pure rewrite for [`sanitize_codex_mcp_config`]: inside the ImmorTerm-owned
+/// `[mcp_servers.*]` tables that declare a stdio `command`, drop any
+/// HTTP-transport keys an external merge injected. Returns `None` when the
+/// config is already clean. Sub-tables (`.env`, `.tools.*`) and every other
+/// server are passed through byte-for-byte.
+fn strip_http_keys_from_owned_stdio_tables(raw: &str) -> Option<String> {
+    const OWNED: [&str; 2] = ["[mcp_servers.immorterm]", "[mcp_servers.immorterm-memory]"];
+    const HTTP_KEYS: [&str; 4] = ["url", "bearer_token", "bearer_token_env_var", "http_headers"];
+    let is_key = |line: &str, key: &str| {
+        let t = line.trim_start();
+        t.starts_with(key) && t[key.len()..].trim_start().starts_with('=')
+    };
+
+    let lines: Vec<&str> = raw.lines().collect();
+    let mut out: Vec<&str> = Vec::with_capacity(lines.len());
+    let mut changed = false;
+    let mut i = 0;
+    while i < lines.len() {
+        if !OWNED.contains(&lines[i].trim()) {
+            out.push(lines[i]);
+            i += 1;
+            continue;
+        }
+        // Body runs to the next table header (including our own sub-tables).
+        let mut j = i + 1;
+        while j < lines.len() && !lines[j].trim_start().starts_with('[') {
+            j += 1;
+        }
+        let body = &lines[i + 1..j];
+        let has_command = body.iter().any(|l| is_key(l, "command"));
+        out.push(lines[i]);
+        for l in body {
+            if has_command && HTTP_KEYS.iter().any(|k| is_key(l, k)) {
+                changed = true;
+            } else {
+                out.push(l);
+            }
+        }
+        i = j;
+    }
+    if !changed {
+        return None;
+    }
+    let mut fixed = out.join("\n");
+    if raw.ends_with('\n') {
+        fixed.push('\n');
+    }
+    Some(fixed)
 }
 
 /// Whether a Codex rollout exists for `session_id`.
@@ -1373,6 +1459,55 @@ fn find_session_socket(name: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod recall_tests {
     use super::*;
+
+    /// The ChatGPT app's external-agent sync merges Claude's HTTP `url` for
+    /// immorterm-memory on top of our stdio `command` entry, which Codex
+    /// rejects as an invalid transport. The sanitizer must drop the injected
+    /// HTTP keys, keep the stdio keys and sub-tables, and leave every other
+    /// server alone.
+    #[test]
+    fn strips_injected_url_from_owned_stdio_table() {
+        let poisoned = "\
+[mcp_servers.canva]
+url = \"https://mcp.canva.com/mcp\"
+
+[mcp_servers.immorterm-memory]
+command = \"/Users/x/.immorterm/bin/immorterm-memory\"
+args = [\"mcp\"]
+url = \"http://127.0.0.1:8765/mcp/claude-code/immorterm-org\"
+enabled_tools = [\"search_memory\"]
+
+[mcp_servers.immorterm-memory.env]
+IMMORTERM_AI_TOOL = \"codex\"
+";
+        let fixed = strip_http_keys_from_owned_stdio_tables(poisoned).unwrap();
+        assert!(!fixed.contains("http://127.0.0.1:8765"));
+        assert!(fixed.contains("command = \"/Users/x/.immorterm/bin/immorterm-memory\""));
+        assert!(fixed.contains("enabled_tools = [\"search_memory\"]"));
+        assert!(fixed.contains("IMMORTERM_AI_TOOL = \"codex\""));
+        // Foreign servers are untouched, even url-only ones.
+        assert!(fixed.contains("url = \"https://mcp.canva.com/mcp\""));
+    }
+
+    /// A clean config must round-trip to `None` so the launch path never
+    /// rewrites (and never churns the mtime of) a healthy file.
+    #[test]
+    fn clean_config_is_left_alone() {
+        let clean = "\
+[mcp_servers.immorterm]
+command = \"/Users/x/.immorterm/bin/immorterm-ai\"
+args = [\"mcp\", \"serve\"]
+
+[mcp_servers.immorterm-memory]
+command = \"/Users/x/.immorterm/bin/immorterm-memory\"
+args = [\"mcp\"]
+";
+        assert!(strip_http_keys_from_owned_stdio_tables(clean).is_none());
+        // An owned table that is url-only (no command) is a valid HTTP
+        // transport — not ours to rewrite.
+        let url_only = "[mcp_servers.immorterm-memory]\nurl = \"http://127.0.0.1:8765/mcp/codex/p\"\n";
+        assert!(strip_http_keys_from_owned_stdio_tables(url_only).is_none());
+    }
 
     /// Codex date-shards its rollouts, so existence has to be discovered by
     /// walking `~/.codex/sessions/YYYY/MM/DD/` — the path can't be derived
