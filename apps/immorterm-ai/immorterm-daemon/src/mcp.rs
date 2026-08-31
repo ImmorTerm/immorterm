@@ -6932,14 +6932,71 @@ fn task_origin_from(
     TaskOrigin { immorterm_id, session_id, session_name }
 }
 
+fn task_origin_from_ancestor(
+    own_pid: u32,
+    parent_of: impl Fn(u32) -> Option<u32>,
+    registry_origin_for_pid: impl Fn(u32) -> Option<TaskOrigin>,
+) -> Option<TaskOrigin> {
+    let mut current = own_pid;
+    let mut seen = std::collections::HashSet::new();
+    while current != 0 && seen.insert(current) {
+        let parent = parent_of(current)?;
+        if let Some(origin) = registry_origin_for_pid(parent) {
+            return Some(origin);
+        }
+        current = parent;
+    }
+    None
+}
+
 fn current_task_origin() -> TaskOrigin {
     let registry = crate::registry::Registry::load();
-    task_origin_from(
+    let from_env = task_origin_from(
         |name| std::env::var(name).ok(),
-        |immorterm_id| registry.sessions.iter()
-            .find(|entry| entry.window_id == immorterm_id)
-            .map(|entry| (entry.display_name.clone(), entry.ai_session_id.clone())),
+        |immorterm_id| {
+            registry
+                .sessions
+                .iter()
+                .find(|entry| entry.window_id == immorterm_id)
+                .map(|entry| (entry.display_name.clone(), entry.ai_session_id.clone()))
+        },
+    );
+    if from_env.immorterm_id.is_some() {
+        return from_env;
+    }
+
+    // Codex intentionally sanitizes terminal variables before it starts MCP
+    // servers. The MCP process still remains a descendant of the exact
+    // ImmorTerm screen process recorded in the registry, which is a stronger
+    // identity than guessing from cwd when several sessions share one repo.
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::OnlyIfNotSet),
+    );
+    task_origin_from_ancestor(
+        std::process::id(),
+        |pid| {
+            system
+                .process(sysinfo::Pid::from_u32(pid))
+                .and_then(|process| process.parent())
+                .map(|parent| parent.as_u32())
+        },
+        |pid| {
+            registry
+                .sessions
+                .iter()
+                .find(|entry| entry.pid == pid)
+                .map(|entry| TaskOrigin {
+                    immorterm_id: Some(entry.window_id.clone()),
+                    session_id: entry.ai_session_id.clone(),
+                    session_name: entry.display_name.clone(),
+                })
+        },
     )
+    .unwrap_or(from_env)
 }
 
 fn apply_task_origin(
@@ -8503,6 +8560,28 @@ mod tests {
         assert_eq!(origin.session_id.as_deref(), Some("claude-current"));
         assert_eq!(origin.immorterm_id.as_deref(), Some("12345-claude"));
         assert_eq!(origin.session_name, "Claude");
+    }
+
+    #[test]
+    fn envless_codex_origin_follows_its_exact_immorterm_ancestor() {
+        let parents = std::collections::HashMap::from([
+            (400u32, 300u32), // MCP -> Codex
+            (300u32, 200u32), // Codex -> shell
+            (200u32, 100u32), // shell -> ImmorTerm screen
+            (100u32, 1u32),
+        ]);
+        let origin = task_origin_from_ancestor(400, |pid| parents.get(&pid).copied(), |pid| {
+            (pid == 100).then(|| TaskOrigin {
+                immorterm_id: Some("41103-66e4a36b".into()),
+                session_id: Some("codex-current".into()),
+                session_name: "Factory".into(),
+            })
+        })
+        .expect("the registered ancestor must identify this MCP caller");
+
+        assert_eq!(origin.immorterm_id.as_deref(), Some("41103-66e4a36b"));
+        assert_eq!(origin.session_id.as_deref(), Some("codex-current"));
+        assert_eq!(origin.session_name, "Factory");
     }
 
     /// T31: the index is what keeps a tool DISCOVERABLE when a client loads only
