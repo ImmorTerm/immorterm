@@ -6653,30 +6653,20 @@ fn handle_set_alignment(args: &Value, rt: &tokio::runtime::Runtime) -> Result<St
 
 /// Derive a stable project ID from the current working directory.
 /// Mirrors the TypeScript `getStableProjectId()` logic:
-/// 1. Git remote origin → "user-repo"
-/// 2. .claude/project-id file
+/// 1. Saved vendor-neutral/legacy project slug
+/// 2. Git remote origin → "user-repo"
 /// 3. Folder name (sanitized)
 fn get_stable_project_id() -> Result<String, String> {
     let cwd = std::env::current_dir().map_err(|e| format!("Cannot get cwd: {}", e))?;
 
-    // 1. Try git remote
-    if let Ok(output) = std::process::Command::new("git")
-        .args(["config", "--get", "remote.origin.url"])
-        .current_dir(&cwd)
-        .output()
-    {
-        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !url.is_empty() {
-            // Extract user/repo from SSH or HTTPS URL
-            // git@github.com:user/repo.git  or  https://github.com/user/repo.git
-            if let Some(caps) = extract_user_repo(&url) {
-                return Ok(caps);
-            }
-        }
+    // A persisted project slug is canonical. It must win over the remote
+    // fallback or MCP and the Hub/extension write different task files.
+    if let Some(id) = project_id_from_file(&cwd) {
+        return Ok(id);
     }
 
-    // 2. Try .claude/project-id file
-    if let Some(id) = project_id_from_file(&cwd) {
+    // 2. Try git remote
+    if let Some(id) = git_remote_project_id(&cwd) {
         return Ok(id);
     }
 
@@ -6686,6 +6676,24 @@ fn get_stable_project_id() -> Result<String, String> {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "unnamed-project".to_string());
     Ok(sanitize_project_id(&folder))
+}
+
+fn git_remote_project_id(cwd: &std::path::Path) -> Option<String> {
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .current_dir(cwd)
+        .output()
+    {
+        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !url.is_empty() {
+            // Extract user/repo from SSH or HTTPS URL
+            // git@github.com:user/repo.git  or  https://github.com/user/repo.git
+            if let Some(caps) = extract_user_repo(&url) {
+                return Some(caps);
+            }
+        }
+    }
+    None
 }
 
 /// Branch 2 of `get_stable_project_id`: the optional saved project-id override.
@@ -6780,6 +6788,47 @@ fn write_tasks(project_id: &str, tasks: &[Value]) -> Result<(), String> {
     Ok(())
 }
 
+/// Merge the old remote-derived task file into the canonical saved-slug file.
+/// Canonical records win duplicate IDs; the legacy file stays as a recovery copy.
+fn merge_legacy_task_file(canonical_id: &str, legacy_id: &str) -> Result<(), String> {
+    if canonical_id == legacy_id {
+        return Ok(());
+    }
+    let legacy_path = tasks_file_path(legacy_id);
+    if !legacy_path.exists() {
+        return Ok(());
+    }
+    let mut canonical = read_tasks(canonical_id)?;
+    let mut known: std::collections::HashSet<String> = canonical
+        .iter()
+        .filter_map(|task| task.get("id").and_then(Value::as_str).map(String::from))
+        .collect();
+    let mut changed = !tasks_file_path(canonical_id).exists();
+    for task in read_tasks(legacy_id)? {
+        let duplicate = task
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !known.insert(id.to_string()));
+        if !duplicate {
+            canonical.push(task);
+            changed = true;
+        }
+    }
+    if changed {
+        write_tasks(canonical_id, &canonical)?;
+    }
+    Ok(())
+}
+
+fn get_task_project_id() -> Result<String, String> {
+    let cwd = std::env::current_dir().map_err(|e| format!("Cannot get cwd: {}", e))?;
+    let canonical = get_stable_project_id()?;
+    if let Some(legacy) = git_remote_project_id(&cwd).filter(|id| id != &canonical) {
+        merge_legacy_task_file(&canonical, &legacy)?;
+    }
+    Ok(canonical)
+}
+
 fn sanitize_task_prefix(value: &str) -> String {
     let mut prefix = String::new();
     let mut last_was_separator = false;
@@ -6843,6 +6892,132 @@ fn ensure_task_title_prefix(title: &str, tasks: &[Value], prefix: &str) -> Strin
     format!("[{prefix} #{next}] {title}")
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct TaskOrigin {
+    immorterm_id: Option<String>,
+    session_id: Option<String>,
+    session_name: String,
+}
+
+fn task_origin_from(
+    get_env: impl Fn(&str) -> Option<String>,
+    registry_origin_for: impl Fn(&str) -> Option<(String, Option<String>)>,
+) -> TaskOrigin {
+    let first = |names: &[&str]| {
+        names.iter().filter_map(|name| get_env(name)).find(|value| !value.trim().is_empty())
+    };
+    let immorterm_id = first(&["IMMORTERM_ID", "IMMORTERM_WINDOW_ID"]);
+    // Nested Codex inherits Claude-facing variables from its parent; the
+    // vendor-neutral current session must therefore take precedence.
+    let env_session_id = first(&[
+        "IMMORTERM_SESSION_ID",
+        "IMMORTERM_CLAUDE_SESSION_ID",
+        "CLAUDE_SESSION_ID",
+        "SESSION_ID",
+    ]);
+    let registry_origin = immorterm_id
+        .as_deref()
+        .and_then(registry_origin_for);
+    // The daemon outlives individual Claude/Codex children, so its inherited
+    // environment can be stale. The registry is updated when the active vendor
+    // session changes and is therefore authoritative for nested Codex.
+    let session_id = registry_origin
+        .as_ref()
+        .and_then(|(_, session_id)| session_id.clone())
+        .or(env_session_id);
+    let session_name = registry_origin
+        .map(|(name, _)| name)
+        .or_else(|| first(&["IMMORTERM_TASK_PREFIX"]))
+        .unwrap_or_else(|| "agent".into());
+    TaskOrigin { immorterm_id, session_id, session_name }
+}
+
+fn task_origin_from_ancestor(
+    own_pid: u32,
+    parent_of: impl Fn(u32) -> Option<u32>,
+    registry_origin_for_pid: impl Fn(u32) -> Option<TaskOrigin>,
+) -> Option<TaskOrigin> {
+    let mut current = own_pid;
+    let mut seen = std::collections::HashSet::new();
+    while current != 0 && seen.insert(current) {
+        let parent = parent_of(current)?;
+        if let Some(origin) = registry_origin_for_pid(parent) {
+            return Some(origin);
+        }
+        current = parent;
+    }
+    None
+}
+
+fn current_task_origin() -> TaskOrigin {
+    let registry = crate::registry::Registry::load();
+    let from_env = task_origin_from(
+        |name| std::env::var(name).ok(),
+        |immorterm_id| {
+            registry
+                .sessions
+                .iter()
+                .find(|entry| entry.window_id == immorterm_id)
+                .map(|entry| (entry.display_name.clone(), entry.ai_session_id.clone()))
+        },
+    );
+    if from_env.immorterm_id.is_some() {
+        return from_env;
+    }
+
+    // Codex intentionally sanitizes terminal variables before it starts MCP
+    // servers. The MCP process still remains a descendant of the exact
+    // ImmorTerm screen process recorded in the registry, which is a stronger
+    // identity than guessing from cwd when several sessions share one repo.
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::OnlyIfNotSet),
+    );
+    task_origin_from_ancestor(
+        std::process::id(),
+        |pid| {
+            system
+                .process(sysinfo::Pid::from_u32(pid))
+                .and_then(|process| process.parent())
+                .map(|parent| parent.as_u32())
+        },
+        |pid| {
+            registry
+                .sessions
+                .iter()
+                .find(|entry| entry.pid == pid)
+                .map(|entry| TaskOrigin {
+                    immorterm_id: Some(entry.window_id.clone()),
+                    session_id: entry.ai_session_id.clone(),
+                    session_name: entry.display_name.clone(),
+                })
+        },
+    )
+    .unwrap_or(from_env)
+}
+
+fn apply_task_origin(
+    task: &mut Value,
+    context: &mut serde_json::Map<String, Value>,
+    origin: TaskOrigin,
+    now: u64,
+) {
+    if let Some(id) = origin.immorterm_id.as_deref() {
+        context.insert("sourceImmorTermId".to_string(), json!(id));
+        task["linkedSessions"] = json!([{
+            "immortermId": id,
+            "sessionName": origin.session_name,
+            "linkedAt": now,
+        }]);
+    }
+    if let Some(session_id) = origin.session_id {
+        context.insert("sourceSessionId".to_string(), json!(session_id));
+    }
+}
+
 fn handle_create_task(args: &Value) -> Result<String, String> {
     let requested_title = args
         .get("title")
@@ -6851,7 +7026,7 @@ fn handle_create_task(args: &Value) -> Result<String, String> {
     let task_type = args.get("type").and_then(|v| v.as_str()).unwrap_or("other");
     let lane = args.get("lane").and_then(|v| v.as_str()).unwrap_or("next");
 
-    let project_id = get_stable_project_id()?;
+    let project_id = get_task_project_id()?;
     let mut tasks = read_tasks(&project_id)?;
     let prefix = current_task_prefix();
     let title = ensure_task_title_prefix(requested_title, &tasks, &prefix);
@@ -6878,8 +7053,8 @@ fn handle_create_task(args: &Value) -> Result<String, String> {
         task["description"] = json!(desc);
     }
 
-    // Auto-fill origin context from the Claude Code session env so the extension
-    // knows which ImmorTerm window / session this MCP-created task came from.
+    // Auto-fill vendor-neutral origin context so the extension knows which
+    // ImmorTerm window and current Claude/Codex session created this task.
     let mut context = serde_json::Map::new();
     let cwd = std::env::var("CLAUDE_PROJECT_DIR").ok().or_else(|| {
         std::env::current_dir()
@@ -6889,21 +7064,7 @@ fn handle_create_task(args: &Value) -> Result<String, String> {
     if let Some(cwd) = cwd {
         context.insert("cwd".to_string(), json!(cwd));
     }
-    let immorterm_id = std::env::var("IMMORTERM_WINDOW_ID")
-        .or_else(|_| std::env::var("IMMORTERM_ID"))
-        .ok()
-        .filter(|s| !s.is_empty());
-    if let Some(id) = immorterm_id {
-        context.insert("sourceImmorTermId".to_string(), json!(id));
-    }
-    let session_id = std::env::var("IMMORTERM_CLAUDE_SESSION_ID")
-        .or_else(|_| std::env::var("CLAUDE_SESSION_ID"))
-        .or_else(|_| std::env::var("SESSION_ID"))
-        .ok()
-        .filter(|s| !s.is_empty());
-    if let Some(sid) = session_id {
-        context.insert("sourceSessionId".to_string(), json!(sid));
-    }
+    apply_task_origin(&mut task, &mut context, current_task_origin(), now);
     if !context.is_empty() {
         task["context"] = Value::Object(context);
     }
@@ -6923,7 +7084,7 @@ fn handle_update_task(args: &Value) -> Result<String, String> {
         .and_then(|v| v.as_str())
         .ok_or("Missing required field: task_id")?;
 
-    let project_id = get_stable_project_id()?;
+    let project_id = get_task_project_id()?;
     let mut tasks = read_tasks(&project_id)?;
 
     let task = tasks
@@ -6974,7 +7135,7 @@ fn handle_update_task(args: &Value) -> Result<String, String> {
 }
 
 fn handle_list_tasks(args: &Value) -> Result<String, String> {
-    let project_id = get_stable_project_id()?;
+    let project_id = get_task_project_id()?;
     let tasks = read_tasks(&project_id)?;
 
     let lane_filter = args.get("lane").and_then(|v| v.as_str());
@@ -7029,7 +7190,7 @@ fn handle_delete_task(args: &Value) -> Result<String, String> {
         .and_then(|v| v.as_str())
         .ok_or("Missing required field: task_id")?;
 
-    let project_id = get_stable_project_id()?;
+    let project_id = get_task_project_id()?;
     let mut tasks = read_tasks(&project_id)?;
 
     let before = tasks.len();
@@ -8362,6 +8523,65 @@ mod tests {
         assert_eq!(project_id_from_file(&none), None);
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn nested_codex_origin_uses_current_session_and_links_the_terminal() {
+        let env = std::collections::HashMap::from([
+            ("IMMORTERM_ID", "41103-66e4a36b"),
+            ("CLAUDE_SESSION_ID", "claude-parent"),
+        ]);
+        let origin = task_origin_from(
+            |name| env.get(name).map(|value| (*value).to_string()),
+            |id| (id == "41103-66e4a36b")
+                .then(|| ("Factory".into(), Some("codex-current".into()))),
+        );
+        let mut task = json!({"linkedSessions": []});
+        let mut context = serde_json::Map::new();
+        apply_task_origin(&mut task, &mut context, origin, 42);
+
+        assert_eq!(context["sourceImmorTermId"], "41103-66e4a36b");
+        assert_eq!(context["sourceSessionId"], "codex-current");
+        assert_eq!(task["linkedSessions"][0]["immortermId"], "41103-66e4a36b");
+        assert_eq!(task["linkedSessions"][0]["sessionName"], "Factory");
+    }
+
+    #[test]
+    fn ordinary_claude_origin_keeps_legacy_session_fallback() {
+        let env = std::collections::HashMap::from([
+            ("IMMORTERM_WINDOW_ID", "12345-claude"),
+            ("IMMORTERM_CLAUDE_SESSION_ID", "claude-current"),
+        ]);
+        let origin = task_origin_from(
+            |name| env.get(name).map(|value| (*value).to_string()),
+            |_| Some(("Claude".into(), None)),
+        );
+
+        assert_eq!(origin.session_id.as_deref(), Some("claude-current"));
+        assert_eq!(origin.immorterm_id.as_deref(), Some("12345-claude"));
+        assert_eq!(origin.session_name, "Claude");
+    }
+
+    #[test]
+    fn envless_codex_origin_follows_its_exact_immorterm_ancestor() {
+        let parents = std::collections::HashMap::from([
+            (400u32, 300u32), // MCP -> Codex
+            (300u32, 200u32), // Codex -> shell
+            (200u32, 100u32), // shell -> ImmorTerm screen
+            (100u32, 1u32),
+        ]);
+        let origin = task_origin_from_ancestor(400, |pid| parents.get(&pid).copied(), |pid| {
+            (pid == 100).then(|| TaskOrigin {
+                immorterm_id: Some("41103-66e4a36b".into()),
+                session_id: Some("codex-current".into()),
+                session_name: "Factory".into(),
+            })
+        })
+        .expect("the registered ancestor must identify this MCP caller");
+
+        assert_eq!(origin.immorterm_id.as_deref(), Some("41103-66e4a36b"));
+        assert_eq!(origin.session_id.as_deref(), Some("codex-current"));
+        assert_eq!(origin.session_name, "Factory");
     }
 
     /// T31: the index is what keeps a tool DISCOVERABLE when a client loads only

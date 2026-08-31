@@ -22,13 +22,29 @@ fn sanitize_project_id(raw: &str) -> String {
         .to_string()
 }
 
-/// Resolve projectId the same way the extension does: prefer a saved
-/// saved project-id (`.immorterm/`, legacy `.claude/`), fall back to sanitized basename.
+fn git_remote_project_id(project_dir: &str) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .current_dir(project_dir)
+        .output()
+        .ok()?;
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stripped = url.strip_suffix(".git").unwrap_or(&url);
+    let parts: Vec<&str> = stripped.rsplitn(3, ['/', ':']).collect();
+    (parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty())
+        .then(|| format!("{}-{}", parts[1], parts[0]).to_lowercase())
+}
+
+/// Resolve projectId the same way the extension does: prefer a saved project
+/// ID (`.immorterm/`, legacy `.claude/`), then remote, then sanitized basename.
 fn resolve_project_id(project_dir: &str) -> String {
     // NOTE: returned UNSANITIZED, unlike plans/spaces. Sanitizing here would
     // relocate every existing project's task files.
     if let Some(saved) = super::project_id::read_project_id_file(project_dir) {
         return saved;
+    }
+    if let Some(remote) = git_remote_project_id(project_dir) {
+        return remote;
     }
     let basename = PathBuf::from(project_dir)
         .file_name()
@@ -42,12 +58,49 @@ fn tasks_path(project_dir: &str) -> PathBuf {
     tasks_dir().join(format!("{}.json", resolve_project_id(project_dir)))
 }
 
-fn load_tasks(project_dir: &str) -> Value {
-    let path = tasks_path(project_dir);
-    std::fs::read_to_string(&path)
+fn load_tasks_path(path: &std::path::Path) -> Value {
+    std::fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .unwrap_or_else(|| json!({ "version": 1, "tasks": [] }))
+}
+
+fn load_tasks(project_dir: &str) -> Value {
+    let path = tasks_path(project_dir);
+    let existed = path.exists();
+    let mut file = load_tasks_path(&path);
+
+    // Older extension/daemon builds preferred the remote-derived id over a
+    // saved slug. Import that file losslessly so Hub reads the same canonical
+    // task set; keep the old file as a recovery copy.
+    if let (Some(saved), Some(legacy)) = (
+        super::project_id::read_project_id_file(project_dir),
+        git_remote_project_id(project_dir),
+    ) && saved != legacy {
+        let legacy_path = tasks_dir().join(format!("{}.json", legacy));
+        if legacy_path.exists() {
+            if !file.get("tasks").is_some_and(Value::is_array) {
+                file["tasks"] = json!([]);
+            }
+            let tasks = file["tasks"].as_array_mut().expect("normalized above");
+            let mut known: std::collections::HashSet<String> = tasks.iter()
+                .filter_map(|task| task.get("id").and_then(Value::as_str).map(String::from))
+                .collect();
+            let mut changed = !existed;
+            for task in load_tasks_path(&legacy_path)["tasks"].as_array().cloned().unwrap_or_default() {
+                let duplicate = task.get("id").and_then(Value::as_str)
+                    .is_some_and(|id| !known.insert(id.to_string()));
+                if !duplicate {
+                    tasks.push(task);
+                    changed = true;
+                }
+            }
+            if changed && let Err(error) = save_tasks(project_dir, &file) {
+                tracing::warn!("[tasks] failed to migrate legacy project tasks: {error}");
+            }
+        }
+    }
+    file
 }
 
 fn save_tasks(project_dir: &str, file: &Value) -> anyhow::Result<()> {
@@ -604,4 +657,27 @@ fn uuid_v4() -> String {
         bytes[8], bytes[9],
         bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
     )
+}
+
+#[cfg(test)]
+mod task_identity_tests {
+    use super::*;
+
+    #[test]
+    fn saved_slug_wins_over_remote_for_hub_tasks() {
+        let root = std::env::temp_dir().join(format!("immorterm-hub-task-id-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".claude")).unwrap();
+        std::fs::write(root.join(".claude/project-id"), "flam\n").unwrap();
+        std::process::Command::new("git").args(["init", "-q"]).current_dir(&root).status().unwrap();
+        std::process::Command::new("git")
+            .args(["remote", "add", "origin", "git@github.com:FLAM-Fashion/flam.git"])
+            .current_dir(&root)
+            .status()
+            .unwrap();
+
+        assert_eq!(git_remote_project_id(root.to_str().unwrap()).as_deref(), Some("flam-fashion-flam"));
+        assert_eq!(resolve_project_id(root.to_str().unwrap()), "flam");
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

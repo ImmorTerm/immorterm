@@ -41,7 +41,7 @@ import {
 } from './services/mcp-gateway';
 import {
   checkOpenMemoryHealth, startOpenMemory, stopOpenMemory, getOpenMemoryState,
-  isMemoryEnabled, isGraphEnabled,
+  isMemoryEnabled, isGraphEnabled, getLegacyTaskProjectIds,
   getStableProjectId,
 } from './services/memory';
 import {
@@ -422,7 +422,10 @@ export class ImmorTermViewProvider implements vscode.WebviewViewProvider {
     if (this.projectPath) {
       try {
         const projectId = getStableProjectId(this.projectPath);
-        this.taskStorage = new TaskStorage(projectId);
+        this.taskStorage = new TaskStorage(
+          projectId,
+          getLegacyTaskProjectIds(this.projectPath, projectId),
+        );
         for (const t of this.taskStorage.list()) this.knownTaskIds.add(t.id);
         this.taskStorage.on('change', () => this.sendTasksToWebview());
         this.taskStorage.on('external-change', () => this.onExternalTaskChange());

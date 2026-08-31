@@ -149,8 +149,8 @@ function sanitizeProjectId(name: string): string {
  * Get a stable, unique project ID for the workspace.
  *
  * Resolution order (most stable first):
- * 1. Git remote origin (survives folder renames)
- * 2. Saved .claude/project-id file (persists across sessions)
+ * 1. Saved vendor-neutral/legacy project slug (the project's chosen identity)
+ * 2. Git remote origin (fallback that survives folder renames)
  * 3. Folder name (fallback, saved to file for consistency)
  *
  * @param workspacePath Path to the workspace folder
@@ -164,16 +164,18 @@ function sanitizeProjectId(name: string): string {
  * getStableProjectId('/path/to/My Project') // Returns 'my-project'
  */
 export function getStableProjectId(workspacePath: string): string {
-  // 1. Try git remote (most stable - survives folder renames)
-  const gitRemote = getGitRemoteRepoName(workspacePath);
-  if (gitRemote) {
-    return gitRemote;
-  }
-
-  // 2. Try saved .claude/project-id file
+  // A saved slug is authoritative. Hub task routes already use this ordering;
+  // preferring the remote here split FLAM between `flam` and
+  // `flam-fashion-flam` task files.
   const savedId = readProjectIdFile(workspacePath);
   if (savedId) {
     return savedId;
+  }
+
+  // 2. Try git remote (survives folder renames)
+  const gitRemote = getGitRemoteRepoName(workspacePath);
+  if (gitRemote) {
+    return gitRemote;
   }
 
   // 3. Create new ID from folder name, save to file for persistence
@@ -186,6 +188,17 @@ export function getStableProjectId(workspacePath: string): string {
   return folderId;
 }
 
+/**
+ * IDs written by older extension/daemon builds before saved slugs became
+ * authoritative. TaskStorage imports these files into the canonical one once,
+ * deduplicating by task id and retaining the old file as a recovery copy.
+ */
+export function getLegacyTaskProjectIds(workspacePath: string, canonicalId: string): string[] {
+  const remoteId = getGitRemoteRepoName(workspacePath);
+  return remoteId && remoteId !== canonicalId ? [remoteId] : [];
+}
+
 export default {
   getStableProjectId,
+  getLegacyTaskProjectIds,
 };

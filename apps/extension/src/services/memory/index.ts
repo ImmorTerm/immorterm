@@ -24,6 +24,7 @@
 // Project Identity
 export {
   getStableProjectId,
+  getLegacyTaskProjectIds,
 } from './project-identity';
 
 // Services Picker (user opt-in)
