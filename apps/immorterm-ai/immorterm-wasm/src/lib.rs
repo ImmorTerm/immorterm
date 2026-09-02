@@ -35,7 +35,7 @@ use immorterm_core::grid::Row;
 use immorterm_core::Terminal;
 use immorterm_render::statusbar::{self, StatusBarData, StatusBarTarget, StatusBarTheme, THEME_PRESETS};
 use immorterm_render::{
-    dash_ink_ratio, FallbackGlyph, MonoGlyph, RenderOptions, Selection, TerminalRenderer, Theme,
+    dash_ink_pixels, FallbackGlyph, MonoGlyph, RenderOptions, Selection, TerminalRenderer, Theme,
 };
 
 /// Detect whether a row boundary is a structural break (not a soft-wrap).
@@ -161,14 +161,14 @@ fn rasterize_primary_glyph(
     let metrics = ctx.measure_text(&text).ok()?;
     let advance = metrics.width();
 
-    if let Some(target_ratio) = dash_ink_ratio(ch) {
+    if let Some(target_width) = dash_ink_pixels(ch, config.cell_w as f64) {
         // Scale around the ink center—not the advance width—so fonts whose
         // en/em glyphs share one monospace advance still render distinctly.
         let ink_left = metrics.actual_bounding_box_left();
         let ink_right = metrics.actual_bounding_box_right();
         let ink_width = (ink_left + ink_right).max(1.0);
         let ink_center = (ink_right - ink_left) / 2.0;
-        let scale_x = config.cell_w as f64 * target_ratio / ink_width;
+        let scale_x = target_width as f64 / ink_width;
 
         ctx.save();
         let _ = ctx.translate(config.cell_w as f64 / 2.0, 0.0);
