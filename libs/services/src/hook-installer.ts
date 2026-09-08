@@ -110,6 +110,17 @@ const PRE_COMPACT_HOOK_FILE = 'immorterm-pre-compact.sh';
 const COMPACT_RECOVERY_HOOK_FILE = 'immorterm-compact-recovery.sh';
 const GIT_COMMIT_CAPTURE_FILE = 'immorterm-git-commit-capture.sh';
 const TASK_PERSIST_HOOK_FILE = 'immorterm-task-persist.sh';
+/**
+ * Transitional contract guard for Codex processes that already loaded the
+ * pre-adapter hooks.json command lines. The canonical Codex adapter captures
+ * this object on new sessions; an existing process receives it directly and
+ * stops reporting "invalid ... JSON output" without needing to reload first.
+ */
+const CODEX_DIRECT_JSON_EXIT_GUARD = `
+if [ "\${IMMORTERM_AI_TOOL:-}" = "codex" ]; then
+  trap 'printf "{}\\n"' EXIT
+fi
+`;
 const ENSURE_DAEMON_LIB_FILE = 'lib/ensure-digest-daemon.sh';
 const ENSURE_DAEMON_LIB_CONTENT = `#!/bin/bash
 # ImmorTerm Digest Daemon — Idempotent Spawn Helper
@@ -1568,7 +1579,7 @@ fi
  * Vendors using PascalCase events (Copilot) produce this shape natively;
  * Cursor/Windsurf/Cline wrappers re-key their native events into it.
  */
-function generateSessionEndHook(_projectId: string): string {
+export function generateSessionEndHook(_projectId: string): string {
   return `#!/bin/bash
 # ImmorTerm Memory: Session End \u2014 vendor-agnostic Stop/SessionEnd hook
 # Fired by:
@@ -1579,6 +1590,7 @@ function generateSessionEndHook(_projectId: string): string {
 # prevents pile-ups if Stop fires repeatedly during a long agent turn.
 
 set -u
+${CODEX_DIRECT_JSON_EXIT_GUARD}
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -3566,7 +3578,7 @@ function generateDigestScript(projectId: string): string {
  * It fires after every file modification and stores the diff in the
  * code_changes table via the ImmorTerm-Memory REST API.
  */
-function generateCodeChangeCaptureHook(projectId: string): string {
+export function generateCodeChangeCaptureHook(projectId: string): string {
   return `#!/bin/bash
 # ImmorTerm Memory: Code Change Capture (ASYNC PostToolUse hook)
 # Matcher: Write|Edit|MultiEdit
@@ -3575,6 +3587,7 @@ function generateCodeChangeCaptureHook(projectId: string): string {
 # Captures file diffs from Write/Edit/MultiEdit operations and stores them
 # in the code_changes table via the ImmorTerm-Memory REST API.
 # This is the real-time capture half of the Code-Bound Memory system.
+${CODEX_DIRECT_JSON_EXIT_GUARD}
 
 IMMORTERM_MEMORY_URL="http://127.0.0.1:\${IMMORTERM_MEMORY_PORT:-8765}"
 MAX_DIFF_SIZE=50000  # 50KB cap per diff
@@ -4409,7 +4422,7 @@ function removeGitPostCommitTrampoline(projectPath: string): boolean {
  * Generate the PreCompact hook — triggers digest before context compaction.
  * SYNC: runs digest so memories are captured before context is compressed.
  */
-function generatePreCompactHook(projectId: string): string {
+export function generatePreCompactHook(projectId: string): string {
   return `#!/bin/bash
 # ImmorTerm Memory: Pre-Compact Digest Trigger
 # Event: PreCompact
@@ -4419,6 +4432,7 @@ function generatePreCompactHook(projectId: string): string {
 # so memories are captured before context is compressed.
 
 set -euo pipefail
+${CODEX_DIRECT_JSON_EXIT_GUARD}
 
 # Derive project root from this script's location (immune to CWD issues)
 # Hooks live at <project_root>/.immorterm/hooks/ — go up 2 levels
@@ -4481,22 +4495,48 @@ else
   JSONL_DIR="$HOME/.claude/projects/$CWD_SLUG"
 fi
 
-if [ -z "$JSONL_DIR" ] || [ ! -d "$JSONL_DIR" ]; then
-  echo "[pre-compact] JSONL dir not found: $JSONL_DIR" >&2
-  exit 0
-fi
-
 DIGEST_SCRIPT="$PROJECT_ROOT/.immorterm/hooks/${DIGEST_SCRIPT_FILE}"
+DIGEST_READY=1
+if [ -z "$JSONL_DIR" ] || [ ! -d "$JSONL_DIR" ]; then
+  echo "[pre-compact] JSONL dir not found: $JSONL_DIR; skipping digest" >&2
+  DIGEST_READY=0
+fi
 if [ ! -f "$DIGEST_SCRIPT" ]; then
-  echo "[pre-compact] Digest script not found: $DIGEST_SCRIPT" >&2
-  exit 0
+  echo "[pre-compact] Digest script not found: $DIGEST_SCRIPT; continuing to handoff" >&2
+  DIGEST_READY=0
 fi
 
-echo "[pre-compact] Triggering digest for session $SESSION_ID (trigger: $TRIGGER)" >&2
-bash "$DIGEST_SCRIPT" "$PROJECT_ID" "$JSONL_DIR" "$SESSION_ID" 2>&1 | while IFS= read -r line; do
-  echo "[pre-compact] $line" >&2
-done || echo "[pre-compact] Digest exited non-zero (continuing to handoff)" >&2
-echo "[pre-compact] Digest complete" >&2
+# The transcript remains on disk after compaction. Digest it independently:
+# waiting for an AI provider here can exceed Codex's hook deadline and prevent
+# the recovery note below from being saved. Detach every inherited pipe and the
+# process session so the hook runner never waits for the child.
+if [ "$DIGEST_READY" -eq 1 ]; then
+  python3 - "$DIGEST_SCRIPT" "$PROJECT_ID" "$JSONL_DIR" "$SESSION_ID" "$TRIGGER" <<'DIGEST_BACKGROUND'
+import os, subprocess, sys, tempfile
+try:
+    script, project_id, jsonl_dir, session_id, trigger = sys.argv[1:]
+    log_dir = os.path.expanduser("~/.immorterm/logs")
+    os.makedirs(log_dir, mode=0o700, exist_ok=True)
+    os.chmod(log_dir, 0o700)
+    fd, log_path = tempfile.mkstemp(prefix="pre-compact-digest-", suffix=".log", dir=log_dir)
+    os.chmod(log_path, 0o600)
+    env = os.environ.copy()
+    env["DIGEST_TRIGGER"] = trigger
+    with os.fdopen(fd, "ab") as log:
+        child = subprocess.Popen(
+            ["bash", script, project_id, jsonl_dir, session_id],
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+            env=env,
+        )
+    print(f"[pre-compact] Digest running independently (pid {child.pid}); log: {log_path}", file=sys.stderr)
+except Exception as exc:
+    print(f"[pre-compact] Could not start digest: {exc}; continuing to handoff", file=sys.stderr)
+DIGEST_BACKGROUND
+fi
 
 # ── Handoff Note Generation ──────────────────────────────────────
 # Assemble a JSON file with task list, user messages, session summary,
@@ -4533,7 +4573,7 @@ HANDOFF_PROJECT_ID="$PROJECT_ID" \\
 HANDOFF_CWD="$PROJECT_ROOT" \\
 HANDOFF_DIR="$HANDOFF_DIR" \\
 python3 << 'HANDOFF_PYTHON'
-import json, sys, os, urllib.request, urllib.error
+import json, sys, os, tempfile, urllib.request, urllib.error
 
 session_id = os.environ["HANDOFF_SESSION_ID"]
 jsonl_path = os.environ["HANDOFF_JSONL"]
@@ -4541,6 +4581,7 @@ project_id = os.environ["HANDOFF_PROJECT_ID"]
 cwd_path = os.environ["HANDOFF_CWD"]
 
 IMMORTERM_MEMORY_URL = os.environ.get("IMMORTERM_MEMORY_URL", "http://127.0.0.1:8765")
+HTTP_TIMEOUT = float(os.environ.get("IMMORTERM_HANDOFF_HTTP_TIMEOUT", "1"))
 handoff_dir = os.environ.get("HANDOFF_DIR", os.path.expanduser("~/.immorterm/handoff"))
 os.makedirs(handoff_dir, mode=0o700, exist_ok=True)
 HANDOFF_PATH = os.path.join(handoff_dir, f"immorterm-handoff-{session_id}.json")
@@ -4556,7 +4597,7 @@ handoff = {
 try:
     url = f"{IMMORTERM_MEMORY_URL}/api/v1/sessions/tasks?user_id={project_id}&session_id={session_id}"
     req = urllib.request.Request(url)
-    resp = urllib.request.urlopen(req, timeout=5)
+    resp = urllib.request.urlopen(req, timeout=HTTP_TIMEOUT)
     data = json.loads(resp.read().decode())
     task_list = data if isinstance(data, list) else data.get("tasks", [])
     handoff["tasks"] = task_list
@@ -4613,7 +4654,7 @@ try:
                         headers={"Content-Type": "application/json"},
                     )
                     try:
-                        with urllib.request.urlopen(req, timeout=3) as resp:
+                        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
                             mem = json.loads(resp.read())
                             summary_text = mem.get("memory", mem.get("text", mem.get("data", "")))
                     except Exception:
@@ -4634,7 +4675,7 @@ try:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=3) as resp:
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
                 results = json.loads(resp.read())
                 memories = results.get("results", results.get("memories", []))
                 for m in memories:
@@ -4673,7 +4714,7 @@ try:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=3) as resp:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             results = json.loads(resp.read())
             memories = results.get("results", results.get("memories", []))
             if memories:
@@ -4728,7 +4769,7 @@ try:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=3) as resp:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             results = json.loads(resp.read())
             memories = results.get("results", results.get("memories", []))
             for m in memories:
@@ -4753,8 +4794,24 @@ except Exception as e:
 
 # ── Write handoff file ───────────────────────────────────────────
 try:
-    with open(HANDOFF_PATH, "w") as f:
-        json.dump(handoff, f, indent=2)
+    fd, temp_path = tempfile.mkstemp(prefix=".immorterm-handoff-", suffix=".tmp", dir=handoff_dir)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(handoff, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, HANDOFF_PATH)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
     print(f"[pre-compact] Handoff written to {HANDOFF_PATH}", file=sys.stderr)
 except Exception as e:
     print(f"[pre-compact] Handoff write failed: {e}", file=sys.stderr)
@@ -6470,7 +6527,7 @@ If correlated live messaging is unavailable, report that plainly. Do not silentl
  * Generate the task persistence hook.
  * ASYNC: PostToolUse hook that persists individual tasks to ImmorTerm-Memory.
  */
-function generateTaskPersistHook(_projectId: string): string {
+export function generateTaskPersistHook(_projectId: string): string {
   return `#!/bin/bash
 # ImmorTerm Memory: Task Persistence (ASYNC PostToolUse hook)
 # Matcher: TaskCreate|TaskUpdate|TaskList
@@ -6482,6 +6539,7 @@ function generateTaskPersistHook(_projectId: string): string {
 # TaskList events trigger reconciliation — any tasks in our map that
 # aren't in Claude's actual task list get pruned (handles "Claude started
 # fresh" and abandoned task scenarios).
+${CODEX_DIRECT_JSON_EXIT_GUARD}
 
 IMMORTERM_MEMORY_URL="http://127.0.0.1:\${IMMORTERM_MEMORY_PORT:-8765}"
 
@@ -6990,6 +7048,131 @@ const IMMORTERM_AIDER_END = '# <<< immorterm';
  *     as cancel for vendors that honor that)
  */
 
+/** Codex — event-specific stdout contracts and non-blocking side effects. */
+export const CODEX_HOOK_ADAPTER_SH = `#!/bin/bash
+# ImmorTerm: Codex hook output-contract adapter
+#
+# Project hook scripts are shared with Claude Code and several other vendors.
+# Their stdout is useful context for SessionStart/UserPromptSubmit, but Codex
+# requires event-specific JSON for those events and for lifecycle events such
+# as Stop. This adapter is the single Codex-only boundary: it captures shared
+# script output, emits valid Codex JSON, and detaches best-effort side effects
+# that must never hold up the agent loop.
+set -u
+
+EVENT_NAME="\${1:-}"
+MODE="\${2:-quiet}"
+shift 2 2>/dev/null || true
+
+SCRIPT_DIR="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+HOOKS_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT_ROOT="$(cd "$HOOKS_DIR/../.." && pwd)"
+STATE_ROOT="$PROJECT_ROOT/.immorterm/terminals/hooks"
+LOG_DIR="$STATE_ROOT/logs"
+TMP_DIR="$STATE_ROOT/tmp"
+mkdir -p "$LOG_DIR" "$TMP_DIR"
+chmod 700 "$STATE_ROOT" "$LOG_DIR" "$TMP_DIR" 2>/dev/null || true
+LOG_FILE="$LOG_DIR/codex-adapter.log"
+touch "$LOG_FILE" 2>/dev/null || true
+chmod 600 "$LOG_FILE" 2>/dev/null || true
+
+INPUT_FILE=$(mktemp "$TMP_DIR/codex-hook-input.XXXXXX") || {
+  printf '{}\n'
+  exit 0
+}
+OUTPUT_FILE=$(mktemp "$TMP_DIR/codex-hook-output.XXXXXX") || {
+  rm -f "$INPUT_FILE"
+  printf '{}\n'
+  exit 0
+}
+chmod 600 "$INPUT_FILE" "$OUTPUT_FILE" 2>/dev/null || true
+trap 'rm -f "$INPUT_FILE" "$OUTPUT_FILE"' EXIT HUP INT TERM
+cat > "$INPUT_FILE"
+
+export IMMORTERM_AI_TOOL=codex
+
+log_status() {
+  printf '[%s] event=%s mode=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$EVENT_NAME" "$MODE" "$1" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+if [ "$#" -eq 0 ]; then
+  log_status 'missing command'
+  printf '{}\n'
+  exit 0
+fi
+
+if [ "$MODE" = "defer" ]; then
+  # A detached runner owns and removes INPUT_FILE. All inherited hook-runner
+  # pipes are closed so Codex can continue immediately even if the memory
+  # service is down or the downstream script performs retries.
+  if python3 - "$INPUT_FILE" "$LOG_FILE" "$EVENT_NAME" "$@" <<'PYEOF' >/dev/null 2>&1
+import os, subprocess, sys
+
+input_path, log_path, event_name, *command = sys.argv[1:]
+runner = r'''
+import os, subprocess, sys
+input_path, log_path, event_name, *command = sys.argv[1:]
+try:
+    with open(input_path, "rb") as source, open(log_path, "ab", buffering=0) as log:
+        result = subprocess.run(command, stdin=source, stdout=log, stderr=subprocess.STDOUT,
+                                env=os.environ.copy(), close_fds=True)
+        if result.returncode:
+            log.write((f"codex adapter deferred event={event_name} exit={result.returncode}\\n").encode())
+finally:
+    try:
+        os.unlink(input_path)
+    except OSError:
+        pass
+'''
+subprocess.Popen(
+    [sys.executable, "-c", runner, input_path, log_path, event_name, *command],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    start_new_session=True,
+    close_fds=True,
+    env=os.environ.copy(),
+)
+PYEOF
+  then
+    INPUT_FILE=""
+  else
+    log_status "deferred spawn failed"
+  fi
+  printf '{}\n'
+  exit 0
+fi
+
+RC=0
+"$@" < "$INPUT_FILE" > "$OUTPUT_FILE" 2>> "$LOG_FILE" || RC=$?
+if [ "$RC" -ne 0 ]; then
+  log_status "command exit=$RC"
+fi
+
+if [ "$MODE" = "context" ] && [ -s "$OUTPUT_FILE" ]; then
+  python3 - "$EVENT_NAME" "$OUTPUT_FILE" <<'PYEOF' 2>> "$LOG_FILE" || printf '{}\n'
+import json, sys
+event_name, output_path = sys.argv[1:]
+with open(output_path, "r", encoding="utf-8", errors="replace") as source:
+    additional_context = source.read()
+print(json.dumps({
+    "hookSpecificOutput": {
+        "hookEventName": event_name,
+        "additionalContext": additional_context,
+    }
+}))
+PYEOF
+else
+  if [ -s "$OUTPUT_FILE" ]; then
+    bytes_written=$(wc -c < "$OUTPUT_FILE" | tr -d '[:space:]')
+    log_status "suppressed_stdout_bytes=\${bytes_written:-0}"
+  fi
+  printf '{}\n'
+fi
+
+exit 0
+`;
+
 /** Cursor 1.7+ — `afterFileEdit`, `beforeShellExecution`, etc. */
 export const CURSOR_ADAPTER_SH = `#!/bin/bash
 # ImmorTerm: Cursor → Claude-shape adapter (Phase A T3)
@@ -7430,6 +7613,7 @@ exit 0
 
 /** Wrapper-script files written under `${project}/.immorterm/hooks/lib/`. */
 const WRAPPER_FILES: ReadonlyArray<{ name: string; content: string }> = [
+  { name: 'codex-hook-adapter.sh', content: CODEX_HOOK_ADAPTER_SH },
   { name: 'cursor-adapter.sh', content: CURSOR_ADAPTER_SH },
   { name: 'windsurf-adapter.sh', content: WINDSURF_ADAPTER_SH },
   { name: 'cline-adapter.sh', content: CLINE_ADAPTER_SH },
@@ -7553,17 +7737,23 @@ function getVendorScriptTargets(projectPath: string): {
  * wrapped with `IMMORTERM_AI_TOOL=codex` so memories are tagged with the
  * right vendor instead of the `claude-code` default.
  */
-function buildCodexHooksConfig(projectPath: string): Record<string, unknown> {
+export function buildCodexHooksConfig(projectPath: string): Record<string, unknown> {
   const hooksDir = path.join(projectPath, '.immorterm', 'hooks');
-  // sh -c '...' lets us export the env var without writing a wrapper script.
-  // The exec at the end keeps signal handling clean (no extra shell process).
-  const wrap = (script: string) =>
-    `sh -c 'export IMMORTERM_AI_TOOL=codex; exec ${hooksDir}/${script}'`;
-  // Vendor-neutral Node notifier — keys off IMMORTERM_SESSION, no-ops silently
-  // when absent. Same absolute path every vendor's config references.
-  const notify = (state: string, timeout = 2) => ({
+  const adapter = path.join(hooksDir, 'lib', 'codex-hook-adapter.sh');
+  const shellQuote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+  const wrap = (
+    event: string,
+    mode: 'context' | 'quiet' | 'defer',
+    command: string,
+    ...args: string[]
+  ) => [adapter, event, mode, command, ...args].map(shellQuote).join(' ');
+  const script = (name: string) => path.join(hooksDir, name);
+  // Vendor-neutral Node notifier — keys off IMMORTERM_SESSION and no-ops when
+  // absent. Route it through the same adapter so even empty stdout satisfies
+  // Codex versions whose lifecycle parser requires a JSON object on success.
+  const notify = (event: string, state: string, timeout = 2) => ({
     type: 'command',
-    command: `node $HOME/.immorterm/hooks/immorterm-notify.mjs ${state}`,
+    command: wrap(event, 'defer', 'node', NOTIFY_WRAPPER_TARGET, state),
     timeout,
   });
   return {
@@ -7571,21 +7761,33 @@ function buildCodexHooksConfig(projectPath: string): Record<string, unknown> {
     description: IMMORTERM_MANAGED_DESCRIPTION,
     hooks: {
       SessionStart: [
-        { hooks: [{ type: 'command', command: wrap('immorterm-memory-guide.sh'), timeout: 5 }] },
+        {
+          hooks: [{
+            type: 'command',
+            command: wrap('SessionStart', 'context', script(HOOK_FILE)),
+            timeout: 5,
+            additionalContextLimit: 10_000,
+          }],
+        },
       ],
       // Share-queue drain + ambient memory search, plus the breathing dot in
       // the sidebar. Paired with `notify idle` on Stop.
       UserPromptSubmit: [
         {
           hooks: [
-            { type: 'command', command: wrap(USER_PROMPT_HOOK_FILE), timeout: 5 },
-            notify('working'),
+            {
+              type: 'command',
+              command: wrap('UserPromptSubmit', 'context', script(USER_PROMPT_HOOK_FILE)),
+              timeout: 5,
+              additionalContextLimit: 10_000,
+            },
+            notify('UserPromptSubmit', 'working'),
           ],
         },
       ],
       // Codex's PermissionRequest is the counterpart of Claude's
       // Notification/permission_prompt — the moment the agent blocks on the user.
-      PermissionRequest: [{ hooks: [notify('attention')] }],
+      PermissionRequest: [{ hooks: [notify('PermissionRequest', 'attention')] }],
       // File diffs → memory. The script reads tool_name/tool_input from stdin,
       // so the matcher only needs to cover Codex's edit-shaped tools.
       //
@@ -7598,7 +7800,11 @@ function buildCodexHooksConfig(projectPath: string): Record<string, unknown> {
         {
           matcher: 'Write|Edit|MultiEdit|apply_patch',
           hooks: [
-            { type: 'command', command: wrap(CODE_CHANGE_CAPTURE_FILE), timeout: 10 },
+            {
+              type: 'command',
+              command: wrap('PostToolUse', 'defer', script(CODE_CHANGE_CAPTURE_FILE)),
+              timeout: 3,
+            },
           ],
         },
         {
@@ -7607,18 +7813,32 @@ function buildCodexHooksConfig(projectPath: string): Record<string, unknown> {
           // reconciles rather than mutates.
           matcher: 'update_plan',
           hooks: [
-            { type: 'command', command: wrap(TASK_PERSIST_HOOK_FILE), timeout: 10 },
+            {
+              type: 'command',
+              command: wrap('PostToolUse', 'defer', script(TASK_PERSIST_HOOK_FILE)),
+              timeout: 3,
+            },
           ],
         },
       ],
       PreCompact: [
-        { hooks: [{ type: 'command', command: wrap(PRE_COMPACT_HOOK_FILE), timeout: 120 }] },
+        {
+          hooks: [{
+            type: 'command',
+            command: wrap('PreCompact', 'quiet', script(PRE_COMPACT_HOOK_FILE)),
+            timeout: 15,
+          }],
+        },
       ],
       Stop: [
         {
           hooks: [
-            { type: 'command', command: wrap(SESSION_END_HOOK_FILE), timeout: 10 },
-            notify('idle'),
+            {
+              type: 'command',
+              command: wrap('Stop', 'defer', script(SESSION_END_HOOK_FILE)),
+              timeout: 3,
+            },
+            notify('Stop', 'idle'),
           ],
         },
       ],
@@ -7626,7 +7846,13 @@ function buildCodexHooksConfig(projectPath: string): Record<string, unknown> {
       // this is the real ceiling — the script must background the digest rather
       // than finish it here.
       SessionEnd: [
-        { hooks: [{ type: 'command', command: wrap(SESSION_END_HOOK_FILE), timeout: 3 }] },
+        {
+          hooks: [{
+            type: 'command',
+            command: wrap('SessionEnd', 'defer', script(SESSION_END_HOOK_FILE)),
+            timeout: 3,
+          }],
+        },
       ],
     },
   };

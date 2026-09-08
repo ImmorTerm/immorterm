@@ -299,12 +299,20 @@ describe('Phase A T2 — vendor-router (writeAllVendorConfigs)', () => {
       const entries = cfg.hooks[event][0].hooks;
       expect(entries[0].type).toBe('command');
     }
-    expect(cfg.hooks.SessionStart[0].hooks[0].command).toMatch(/IMMORTERM_AI_TOOL=codex/);
-    expect(cfg.hooks.Stop[0].hooks[0].command).toMatch(/IMMORTERM_AI_TOOL=codex/);
+    expect(cfg.hooks.SessionStart[0].hooks[0].command).toContain('codex-hook-adapter.sh');
+    expect(cfg.hooks.Stop[0].hooks[0].command).toContain('codex-hook-adapter.sh');
+    const adapter = fs.readFileSync(
+      path.join(tmp, '.immorterm', 'hooks', 'lib', 'codex-hook-adapter.sh'),
+      'utf8'
+    );
+    expect(adapter).toContain('export IMMORTERM_AI_TOOL=codex');
     // Sidebar state: breathing dot on prompt submit, stops on Stop.
-    expect(JSON.stringify(cfg.hooks.UserPromptSubmit)).toContain('immorterm-notify.mjs working');
-    expect(JSON.stringify(cfg.hooks.Stop)).toContain('immorterm-notify.mjs idle');
-    expect(JSON.stringify(cfg.hooks.PermissionRequest)).toContain('immorterm-notify.mjs attention');
+    expect(JSON.stringify(cfg.hooks.UserPromptSubmit)).toContain('immorterm-notify.mjs');
+    expect(JSON.stringify(cfg.hooks.UserPromptSubmit)).toContain("'working'");
+    expect(JSON.stringify(cfg.hooks.Stop)).toContain('immorterm-notify.mjs');
+    expect(JSON.stringify(cfg.hooks.Stop)).toContain("'idle'");
+    expect(JSON.stringify(cfg.hooks.PermissionRequest)).toContain('immorterm-notify.mjs');
+    expect(JSON.stringify(cfg.hooks.PermissionRequest)).toContain("'attention'");
 
     // Codex 0.145 parses `async` but does not implement it — it SKIPS the hook
     // and warns "async hooks are not supported yet". Shipping it silently
