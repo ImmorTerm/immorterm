@@ -235,6 +235,14 @@ async function startMemoryServicesPlugAndPlay(workspacePath: string): Promise<bo
   const projectId = getStableProjectId(workspacePath);
   logger.info('Memory project ID:', projectId);
 
+  // Hook templates are local files and must be upgraded even when the memory
+  // daemon is unhealthy. Gating this rewrite on API health strands existing
+  // installations on old hook contracts — precisely when fail-soft hooks are
+  // most important. The installer is idempotent and preserves user-owned
+  // vendor configs, so convergence is safe on every activation.
+  installMemoryHooks(workspacePath, projectId);
+  logger.info('Memory hooks installed/updated');
+
   // Start native memory service
   const state = await startOpenMemory();
 
@@ -252,11 +260,6 @@ async function startMemoryServicesPlugAndPlay(workspacePath: string): Promise<bo
 
     // Clean up legacy global MCP config from ~/.claude.json (one-time migration)
     migrateFromGlobalConfig();
-
-    // Install/update hooks — always run to pick up new hooks added in extension updates.
-    // Generators are idempotent so rewriting is safe.
-    installMemoryHooks(workspacePath, projectId);
-    logger.info('Memory hooks installed/updated');
 
     return true;
   }
