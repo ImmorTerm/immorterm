@@ -263,7 +263,15 @@ function findGatewayBinary(): string | null {
 	//    — one developer's layout, and a path this repo no longer even contains
 	//    since the gateway was extracted. It is gone deliberately: preferring a
 	//    stale vendored copy over the installed one is worse than finding nothing.
-	const siblingRepo = path.join(__dirname, "..", "..", "..", "immorterm-mcp-gateway", "dist", "index.js");
+	const siblingRepo = path.join(
+		__dirname,
+		"..",
+		"..",
+		"..",
+		"immorterm-mcp-gateway",
+		"dist",
+		"index.js",
+	);
 	if (fs.existsSync(siblingRepo)) return siblingRepo;
 
 	return null;

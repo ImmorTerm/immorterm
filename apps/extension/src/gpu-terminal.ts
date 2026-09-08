@@ -97,8 +97,7 @@ type CodexPromptImageSource = { filePath?: string; dataUrl?: string };
 function codexImagePaths(inputText: string): string[] {
   const paths: string[] = [];
   const imageTag = /<image\b([^>]*)>[\s\S]*?<\/image>/gi;
-  let match: RegExpExecArray | null;
-  while ((match = imageTag.exec(inputText)) !== null) {
+  for (const match of inputText.matchAll(imageTag)) {
     const pathMatch = /\bpath=(?:"([^"]+)"|'([^']+)'|([^\s>]+))/.exec(match[1]);
     const filePath = pathMatch?.[1] || pathMatch?.[2] || pathMatch?.[3];
     if (filePath) paths.push(filePath);
