@@ -442,7 +442,7 @@ pub fn recall() -> Result<()> {
     // its `/immorterm:recall` slash command — so running them for another
     // vendor would at best do nothing and at worst launch the wrong agent.
     if registry_tool_for(&wid).as_deref() == Some("codex") {
-        return recall_codex(claude_uuid.as_deref());
+        return recall_codex(&wid, claude_uuid.as_deref());
     }
 
     if let Some(uuid) = &claude_uuid
@@ -694,17 +694,299 @@ fn registry_tool_for(window_id: &str) -> Option<String> {
 /// found a rollout for — Codex date-shards them under
 /// `~/.codex/sessions/YYYY/MM/DD/`, so presence has to be checked by walking,
 /// not by deriving a path.
-fn recall_codex(uuid: Option<&str>) -> Result<()> {
-    if which_agent("codex").is_none() {
+fn recall_codex(window_id: &str, uuid: Option<&str>) -> Result<()> {
+    let codex_bin = configured_vendor_binary(window_id, "codex", "codex");
+    if which_agent(&codex_bin).is_none() {
+        tracing::warn!(
+            "recall: configured Codex command '{}' is not available on PATH",
+            codex_bin
+        );
         return Ok(());
     }
+    sanitize_codex_mcp_config();
     clear_viewport_before_handoff();
     match uuid {
-        Some(id) if codex_rollout_exists(id) => launch_agent("codex", &["resume", id]),
+        Some(id) if codex_rollout_exists(id) => launch_agent(&codex_bin, &["resume", id]),
         // No known thread for this window: hand over a bare Codex rather than
         // `--last`, which could reattach a session from an unrelated project.
-        _ => launch_agent("codex", &[]),
+        _ => launch_agent(&codex_bin, &[]),
     }
+}
+
+/// Resolve a per-project vendor wrapper for session restoration.
+///
+/// Vendor settings live in the workspace's `.immorterm/config.json`. Prefer
+/// the stable owner workspace (so worktree sessions inherit the setting), then
+/// the session's current project/worktree, the spawn environment, and cwd.
+/// The field is an executable/wrapper name, not a shell command; matching the
+/// hub detector, only its first whitespace-delimited token is considered.
+fn configured_vendor_binary(window_id: &str, vendor_id: &str, default_bin: &str) -> String {
+    let registry = crate::registry::Registry::load();
+    let entry = registry.sessions.iter().find(|e| e.window_id == window_id);
+    let mut project_dirs = Vec::new();
+    if let Some(entry) = entry {
+        if let Some(owner) = entry.owner_project_dir.as_deref() {
+            project_dirs.push(PathBuf::from(owner));
+        }
+        if !entry.project_dir.is_empty() {
+            project_dirs.push(PathBuf::from(&entry.project_dir));
+        }
+    }
+    if let Some(project_dir) = std::env::var_os("SCREEN_PROJECT_DIR") {
+        project_dirs.push(PathBuf::from(project_dir));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        project_dirs.push(cwd);
+    }
+
+    for project_dir in project_dirs {
+        if let Some(command) = vendor_binary_from_project_config(&project_dir, vendor_id) {
+            return command;
+        }
+    }
+    default_bin.to_string()
+}
+
+fn vendor_binary_from_project_config(
+    project_dir: &std::path::Path,
+    vendor_id: &str,
+) -> Option<String> {
+    let text = std::fs::read_to_string(project_dir.join(".immorterm/config.json")).ok()?;
+    let config: serde_json::Value = serde_json::from_str(&text).ok()?;
+    config
+        .pointer(&format!("/services/vendors/{vendor_id}/command"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|command| command.split_whitespace().next())
+        .filter(|command| !command.is_empty())
+        .map(str::to_string)
+}
+
+/// Repair ImmorTerm's MCP server tables in `$CODEX_HOME/config.toml` before
+/// handing the window to Codex.
+///
+/// The ChatGPT desktop app's external-agent sync imports Claude Code configs
+/// and merges the project `.mcp.json`'s `immorterm-memory` — a streamable-HTTP
+/// `url` — on top of the stdio entry ImmorTerm registers via `codex mcp add`.
+/// A table carrying both `command` and `url` fails Codex's transport
+/// validation ("invalid transport in `mcp_servers.immorterm-memory`"), and
+/// every session load or resume dies until something rewrites the file. The
+/// extension's hook install already repairs it, but only on activation; this
+/// is the chokepoint every ImmorTerm-launched Codex passes through, so the
+/// broken window can never reach the user no matter when the importer ran.
+///
+/// Line-based on purpose: the file holds auth-adjacent settings and trust
+/// state we do not model, so we only ever delete HTTP-transport keys inside
+/// the two tables ImmorTerm itself owns. Fail-soft: on any error the file is
+/// left untouched and the launch proceeds.
+fn sanitize_codex_mcp_config() {
+    let home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::dirs_home().join(".codex"));
+    sanitize_file(&home.join("config.toml"), |raw| {
+        converge_owned_global_tables(raw)
+    });
+    // Project-level config: several writers (the ChatGPT importer, older
+    // ImmorTerm sessions, hand edits) have left `[mcp_servers.immorterm-memory]`
+    // variants here — a bare `url`, an empty table, or option keys with no
+    // transport. Every variant merges into an invalid transport against the
+    // global stdio entry (or stands invalid alone when that entry is missing),
+    // so in project scope the table is removed outright: the global definition
+    // plus the spawned server's cwd is the canonical project scoping.
+    if let Ok(cwd) = std::env::current_dir() {
+        sanitize_file(&cwd.join(".codex").join("config.toml"), |raw| {
+            strip_owned_tables_from_project_config(raw)
+        });
+    }
+}
+
+/// Apply a pure rewrite to `path` atomically (tmp + rename), so a concurrent
+/// Codex launch never reads a half-written file. No-op when the file is
+/// missing or already clean.
+fn sanitize_file(path: &std::path::Path, rewrite: impl Fn(&str) -> Option<String>) {
+    let Ok(raw) = fs::read_to_string(path) else {
+        return;
+    };
+    let Some(fixed) = rewrite(&raw) else {
+        return;
+    };
+    let tmp = path.with_extension("toml.immorterm-sane");
+    if fs::write(&tmp, &fixed).is_ok() {
+        if let Ok(metadata) = fs::metadata(path) {
+            let _ = fs::set_permissions(&tmp, metadata.permissions());
+        }
+        let _ = fs::rename(&tmp, path);
+    }
+}
+
+/// Converge the two ImmorTerm-owned tables in the GLOBAL config to a valid
+/// stdio transport:
+/// - table missing entirely (a `codex mcp remove` whose re-`add` failed) →
+///   append the canonical stdio definition;
+/// - table present without `command` (importer left option keys or nothing) →
+///   insert the canonical `command`/`args` right after the header, dropping a
+///   conflicting stray `args`;
+/// - table present with `command` → drop any HTTP-transport keys an external
+///   merge injected (`url` beside `command` is what Codex rejects).
+///
+/// Every other server, and our own `.env`/`.tools.*` sub-tables, pass through
+/// byte-for-byte. Returns `None` when the config is already canonical.
+fn converge_owned_global_tables(raw: &str) -> Option<String> {
+    let home = crate::dirs_home();
+    let bin = |name: &str| home.join(".immorterm").join("bin").join(name);
+    let owned: [(&str, String); 2] = [
+        (
+            "[mcp_servers.immorterm]",
+            format!(
+                "command = \"{}\"\nargs = [\"mcp\", \"serve\"]",
+                bin("immorterm-ai").display()
+            ),
+        ),
+        (
+            "[mcp_servers.immorterm-memory]",
+            format!(
+                "command = \"{}\"\nargs = [\"mcp\"]",
+                bin("immorterm-memory").display()
+            ),
+        ),
+    ];
+
+    let mut text = raw.to_string();
+    let mut changed = false;
+    for (header, canonical_body) in &owned {
+        if let Some(next) = rewrite_owned_table(&text, header, canonical_body) {
+            text = next;
+            changed = true;
+        }
+    }
+    // The memory server resolves its vendor from this env var; restore the
+    // sub-table when a remove wiped it together with the parent.
+    if !text.contains("[mcp_servers.immorterm-memory.env]") {
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str("\n[mcp_servers.immorterm-memory.env]\nIMMORTERM_AI_TOOL = \"codex\"\n");
+        changed = true;
+    }
+    changed.then_some(text)
+}
+
+/// One table's converge step for [`converge_owned_global_tables`]. Returns the
+/// rewritten document, or `None` if the table was already valid.
+fn rewrite_owned_table(text: &str, header: &str, canonical_body: &str) -> Option<String> {
+    const HTTP_KEYS: [&str; 4] = ["url", "bearer_token", "bearer_token_env_var", "http_headers"];
+    let lines: Vec<&str> = text.lines().collect();
+    let Some(start) = lines.iter().position(|l| l.trim() == header) else {
+        // Missing entirely — append the canonical definition.
+        let mut out = text.to_string();
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("\n{header}\n{canonical_body}\n"));
+        return Some(out);
+    };
+    let mut end = start + 1;
+    while end < lines.len() && !lines[end].trim_start().starts_with('[') {
+        end += 1;
+    }
+    let body = &lines[start + 1..end];
+    let has_command = body.iter().any(|l| toml_key(l, "command"));
+    let mut changed = false;
+    let mut new_body: Vec<String> = Vec::new();
+    if has_command {
+        for l in body {
+            if HTTP_KEYS.iter().any(|k| toml_key(l, k)) {
+                changed = true;
+            } else {
+                new_body.push((*l).to_string());
+            }
+        }
+    } else {
+        // No transport at all: lead with the canonical stdio pair, keep only
+        // option keys that cannot conflict with it.
+        changed = true;
+        new_body.extend(canonical_body.lines().map(str::to_string));
+        for l in body {
+            let keep = ["enabled_tools", "startup_timeout_sec", "tool_timeout_sec", "enabled"]
+                .iter()
+                .any(|k| toml_key(l, k));
+            let comment_or_blank = l.trim().is_empty() || l.trim_start().starts_with('#');
+            if keep || comment_or_blank {
+                new_body.push((*l).to_string());
+            }
+        }
+    }
+    if !changed {
+        return None;
+    }
+    let mut out: Vec<String> = lines[..=start].iter().map(|l| (*l).to_string()).collect();
+    out.extend(new_body);
+    out.extend(lines[end..].iter().map(|l| (*l).to_string()));
+    let mut fixed = out.join("\n");
+    if text.ends_with('\n') {
+        fixed.push('\n');
+    }
+    Some(fixed)
+}
+
+/// PROJECT-level rewrite: drop every `[mcp_servers.immorterm-memory]` table
+/// and sub-table, and drop an `[mcp_servers.immorterm]` table that carries no
+/// `command` (url-only or option-keys-only). An `immorterm` table WITH a
+/// `command` is kept, minus injected HTTP keys.
+fn strip_owned_tables_from_project_config(raw: &str) -> Option<String> {
+    const HTTP_KEYS: [&str; 4] = ["url", "bearer_token", "bearer_token_env_var", "http_headers"];
+    let lines: Vec<&str> = raw.lines().collect();
+    let mut out: Vec<&str> = Vec::with_capacity(lines.len());
+    let mut changed = false;
+    let mut i = 0;
+    while i < lines.len() {
+        let t = lines[i].trim();
+        let is_memory = t == "[mcp_servers.immorterm-memory]"
+            || t.starts_with("[mcp_servers.immorterm-memory.");
+        let is_terminal =
+            t == "[mcp_servers.immorterm]" || t.starts_with("[mcp_servers.immorterm.");
+        if !is_memory && !is_terminal {
+            out.push(lines[i]);
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        while j < lines.len() && !lines[j].trim_start().starts_with('[') {
+            j += 1;
+        }
+        if is_memory {
+            changed = true; // always removed in project scope
+            i = j;
+            continue;
+        }
+        let body = &lines[i + 1..j];
+        if body.iter().any(|l| toml_key(l, "command")) {
+            out.push(lines[i]);
+            for l in body {
+                if HTTP_KEYS.iter().any(|k| toml_key(l, k)) {
+                    changed = true;
+                } else {
+                    out.push(l);
+                }
+            }
+        } else {
+            changed = true;
+        }
+        i = j;
+    }
+    if !changed {
+        return None;
+    }
+    let mut fixed = out.join("\n");
+    if raw.ends_with('\n') {
+        fixed.push('\n');
+    }
+    Some(fixed)
+}
+
+/// True when `line` assigns TOML key `key` (allowing `key=` and `key =`).
+fn toml_key(line: &str, key: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with(key) && t[key.len()..].trim_start().starts_with('=')
 }
 
 /// Whether a Codex rollout exists for `session_id`.
@@ -1373,6 +1655,156 @@ fn find_session_socket(name: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod recall_tests {
     use super::*;
+
+    /// Global converge: an injected `url` beside our stdio `command` is
+    /// dropped; everything else in the file survives byte-for-byte.
+    #[test]
+    fn global_converge_strips_injected_url() {
+        let poisoned = "\
+[mcp_servers.canva]
+url = \"https://mcp.canva.com/mcp\"
+
+[mcp_servers.immorterm]
+command = \"/x/immorterm-ai\"
+args = [\"mcp\", \"serve\"]
+
+[mcp_servers.immorterm-memory]
+command = \"/x/immorterm-memory\"
+args = [\"mcp\"]
+url = \"http://127.0.0.1:8765/mcp/claude-code/p\"
+enabled_tools = [\"search_memory\"]
+
+[mcp_servers.immorterm-memory.env]
+IMMORTERM_AI_TOOL = \"codex\"
+";
+        let fixed = converge_owned_global_tables(poisoned).unwrap();
+        assert!(!fixed.contains("http://127.0.0.1:8765"));
+        assert!(fixed.contains("command = \"/x/immorterm-memory\""));
+        assert!(fixed.contains("enabled_tools = [\"search_memory\"]"));
+        assert!(fixed.contains("IMMORTERM_AI_TOOL = \"codex\""));
+        assert!(fixed.contains("url = \"https://mcp.canva.com/mcp\""));
+    }
+
+    /// Global converge: a table wiped by `codex mcp remove` (whose re-add
+    /// failed) is recreated with the canonical stdio definition, and a
+    /// transport-less table gains `command`/`args` while keeping safe option
+    /// keys. This is the failure that blanked Codex sessions on 2026-08-31.
+    #[test]
+    fn global_converge_restores_missing_and_transportless_tables() {
+        let wiped = "[mcp_servers.canva]\nurl = \"https://mcp.canva.com/mcp\"\n";
+        let fixed = converge_owned_global_tables(wiped).unwrap();
+        assert!(fixed.contains("[mcp_servers.immorterm]"));
+        assert!(fixed.contains("[mcp_servers.immorterm-memory]"));
+        assert!(fixed.contains("[mcp_servers.immorterm-memory.env]"));
+        assert!(fixed.contains("IMMORTERM_AI_TOOL = \"codex\""));
+
+        let keys_only = "\
+[mcp_servers.immorterm]
+command = \"/x/immorterm-ai\"
+args = [\"mcp\", \"serve\"]
+
+[mcp_servers.immorterm-memory]
+enabled = true
+startup_timeout_sec = 20
+
+[mcp_servers.immorterm-memory.env]
+IMMORTERM_AI_TOOL = \"codex\"
+";
+        let fixed = converge_owned_global_tables(keys_only).unwrap();
+        assert!(fixed.contains("immorterm-memory\nc") || fixed.contains("command = "));
+        assert!(fixed.contains("startup_timeout_sec = 20"));
+        let parsed_ok = fixed.contains("[mcp_servers.immorterm-memory]");
+        assert!(parsed_ok);
+    }
+
+    #[test]
+    fn clean_global_config_is_left_alone() {
+        let clean = "\
+[mcp_servers.immorterm]
+command = \"/x/immorterm-ai\"
+args = [\"mcp\", \"serve\"]
+
+[mcp_servers.immorterm-memory]
+command = \"/x/immorterm-memory\"
+args = [\"mcp\"]
+
+[mcp_servers.immorterm-memory.env]
+IMMORTERM_AI_TOOL = \"codex\"
+";
+        assert!(converge_owned_global_tables(clean).is_none());
+    }
+
+    /// Project scope: every `immorterm-memory` variant is removed outright
+    /// (url-only, empty, option-keys-only — all merge into an invalid
+    /// transport), while an `immorterm` table with a real `command` is kept.
+    #[test]
+    fn project_config_drops_memory_table_variants() {
+        let project = "\
+# heading comment
+[mcp_servers.immorterm]
+command = \"/x/immorterm-ai\"
+args = [\"mcp\", \"serve\"]
+
+[mcp_servers.immorterm-memory]
+url = \"http://127.0.0.1:8765/mcp/claude-code/zippy-org\"
+
+[mcp_servers.other]
+url = \"https://example.com/mcp\"
+";
+        let fixed = strip_owned_tables_from_project_config(project).unwrap();
+        assert!(!fixed.contains("immorterm-memory"));
+        assert!(fixed.contains("command = \"/x/immorterm-ai\""));
+        assert!(fixed.contains("[mcp_servers.other]"));
+
+        let empty_table = "[mcp_servers.immorterm-memory]\n# only a comment\n";
+        let fixed = strip_owned_tables_from_project_config(empty_table).unwrap();
+        assert!(!fixed.contains("immorterm-memory"));
+
+        // A clean project file (no owned tables) round-trips to None.
+        let clean = "[mcp_servers.other]\nurl = \"https://example.com/mcp\"\n";
+        assert!(strip_owned_tables_from_project_config(clean).is_none());
+    }
+
+    #[test]
+    fn vendor_binary_reads_project_wrapper() {
+        let tmp = std::env::temp_dir().join(format!(
+            "imvendor-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("wrapper")
+        ));
+        std::fs::create_dir_all(tmp.join(".immorterm")).unwrap();
+        std::fs::write(
+            tmp.join(".immorterm/config.json"),
+            r#"{"services":{"vendors":{"codex":{"enabled":true,"command":"codex-trust"}}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            vendor_binary_from_project_config(&tmp, "codex").as_deref(),
+            Some("codex-trust")
+        );
+        assert_eq!(vendor_binary_from_project_config(&tmp, "claudeCode"), None);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn vendor_binary_treats_setting_as_executable_not_shell() {
+        let tmp = std::env::temp_dir().join(format!("imvendor-token-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join(".immorterm")).unwrap();
+        std::fs::write(
+            tmp.join(".immorterm/config.json"),
+            r#"{"services":{"vendors":{"codex":{"command":"codex-trust --extra"}}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            vendor_binary_from_project_config(&tmp, "codex").as_deref(),
+            Some("codex-trust")
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     /// Codex date-shards its rollouts, so existence has to be discovered by
     /// walking `~/.codex/sessions/YYYY/MM/DD/` — the path can't be derived
